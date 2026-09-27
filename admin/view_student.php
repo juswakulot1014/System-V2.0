@@ -1401,11 +1401,6 @@ $csrf_token  = csrf_token();
         <a href="dashboard.php"><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php" class="active"><i class="bi bi-people-fill"></i> Students</a>
         <a href="reports.php"><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
-        <div class="nav-label" style="margin-top:.5rem">Administration</div>
-        <a href="create_account.php"><i class="bi bi-person-plus"></i> Accounts</a>
-        <?php if (($_SESSION['admin_role'] ?? '') === 'superadmin'): ?>
-            <a href="audit_log.php"><i class="bi bi-shield-check"></i> Audit Log</a>
-        <?php endif; ?>
     </nav>
     <div class="sidebar-footer">
         <a href="logout.php" class="btn btn-outline-danger btn-sm w-100">
