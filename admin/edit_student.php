@@ -97,8 +97,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $section = trim($_POST['section'] ?? '');
         $school_year = trim($_POST['school_year'] ?? '');
         $term = trim($_POST['term'] ?? '');
+
+        // ═══ STATUS ENUM GUARD ═══
         $student_status = trim($_POST['status'] ?? 'Active');
-        $voucher_status = $_POST['voucher_status'] ?? null;
+        if (!in_array($student_status, ['Active','Transferred','Stopped','Dropped','Graduated'], true)) {
+            $student_status = 'Active';
+        }
+
+        // ═══ VOUCHER STATUS FIX ═══
+        // The <select> submits an empty string when "Select" is chosen,
+        // which is not a valid enum value and truncates/errors in MySQL.
+        // Normalize to NULL so the column accepts it via DEFAULT NULL.
+        $voucher_status = trim($_POST['voucher_status'] ?? '');
+        $voucher_status = ($voucher_status === '') ? null : $voucher_status;
+
         $household_id = trim($_POST['household_id'] ?? '');
 
         $age = null;
@@ -190,11 +202,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         else{$stmt=$conn->prepare("INSERT INTO addresses (student_id,purok_street,barangay,town_city,province,region,district,postal_code) VALUES (?,?,?,?,?,?,?,?)"); $stmt->bind_param("isssssss",$student_id,$purok_street,$barangay,$town_city,$province,$region,$district,$postal_code);}
         $stmt->execute(); if ($stmt->error) throw new Exception("Address error: ".$stmt->error);
 
-        // Enrollment upsert
+        // ═══════════════════════════════════════════════════════════
+        // ENROLLMENT UPSERT + STATUS HISTORY
+        // ═══════════════════════════════════════════════════════════
+        $old_status_q = $conn->prepare("
+            SELECT status FROM enrollment_form
+            WHERE student_id = ?
+            ORDER BY enrollment_id DESC LIMIT 1
+        ");
+        $old_status_q->bind_param("i", $student_id);
+        $old_status_q->execute();
+        $old_status_row = $old_status_q->get_result()->fetch_assoc();
+        $old_status_q->close();
+        $had_enrollment = ($old_status_row !== null);
+        $old_status     = $old_status_row['status'] ?? null;
+
         $stmt=$conn->prepare("SELECT COUNT(*) FROM enrollment_form WHERE student_id=?"); $stmt->bind_param("i",$student_id); $stmt->execute(); $stmt->bind_result($ee); $stmt->fetch(); $stmt->close();
         if($ee){$stmt=$conn->prepare("UPDATE enrollment_form SET grade_level=?,track=?,strand=?,program=?,section=?,school_year=?,term=?,status=?,voucher_status=?,household_id=? WHERE student_id=?"); $stmt->bind_param("ssssssssssi",$grade_level,$track,$strand,$program,$section,$school_year,$term,$student_status,$voucher_status,$household_id,$student_id);}
         elseif(!empty($grade_level)||!empty($school_year)){$stmt=$conn->prepare("INSERT INTO enrollment_form (student_id,grade_level,track,strand,program,section,school_year,term,status,voucher_status,household_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)"); $stmt->bind_param("issssssssss",$student_id,$grade_level,$track,$strand,$program,$section,$school_year,$term,$student_status,$voucher_status,$household_id);}
         if(isset($stmt)){$stmt->execute(); if($stmt->error)throw new Exception("Enrollment error: ".$stmt->error);}
+
+        // Log the status transition if it actually changed
+        if ($had_enrollment && $old_status !== $student_status) {
+            $hist = $conn->prepare("
+                INSERT INTO student_status_history
+                    (student_id, old_status, new_status, reason, changed_by)
+                VALUES (?, ?, ?, ?, ?)
+            ");
+            $reason   = 'Changed via Edit Student form';
+            $admin_id = (int)($_SESSION['admin_id'] ?? 0);
+            $hist->bind_param("isssi", $student_id, $old_status, $student_status, $reason, $admin_id);
+            $hist->execute();
+            $hist->close();
+        }
+        // ═══════════════════════════════════════════════════════════
 
         // Educational history
         $existing_levels = array_keys($edu_data);
@@ -211,8 +252,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         // ---- Audit the student_info update with a diff ----
-        // Guarded: if audit_diff is missing (older audit.php), fall back to a
-        // plain audit_log entry so the save still succeeds.
         $old_snapshot = [
             'lrn'            => $student['lrn']            ?? null,
             'first_name'     => $student['first_name']     ?? null,
@@ -259,8 +298,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 audit_log($conn, 'student.update', ['type' => 'student', 'id' => $student_id]);
             }
         } catch (Throwable $auditErr) {
-            // Never let an audit failure block the save
             error_log('edit_student: audit failed: ' . $auditErr->getMessage());
+        }
+
+        // Also surface the status change in the audit log
+        if ($had_enrollment && $old_status !== $student_status) {
+            try {
+                audit_log($conn, 'student.status_change', [
+                    'type'   => 'student',
+                    'id'     => $student_id,
+                    'from'   => $old_status,
+                    'to'     => $student_status,
+                    'reason' => 'Changed via Edit Student form',
+                ]);
+            } catch (Throwable $auditErr) {
+                error_log('edit_student: status audit failed: ' . $auditErr->getMessage());
+            }
         }
 
         $conn->commit();
@@ -269,7 +322,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } catch (Exception $e) { $conn->rollback(); $errors['general'] = $e->getMessage(); }
 }
 
-$status_options = ['Active', 'Transferred', 'Stopped', 'Dropped'];
+$status_options = ['Active', 'Transferred', 'Stopped', 'Dropped', 'Graduated'];
 $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 'dark' : 'light';
 
 $current_religion = trim((string)($old['religion'] ?? ''));
@@ -330,6 +383,11 @@ $religion_select_value = $religion_is_known ? $current_religion : ($current_reli
             --radius-lg: 16px;
 
             --sidebar-w: 264px;
+
+            /* Custom select chevron — light theme */
+            --select-chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5l5 5 5-5'/></svg>");
+            /* Focused chevron — accent tint */
+            --select-chevron-focus: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='none' stroke='%234f46e5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5l5 5 5-5'/></svg>");
         }
 
         [data-bs-theme="dark"] {
@@ -354,6 +412,10 @@ $religion_select_value = $religion_is_known ? $current_religion : ($current_reli
             --shadow-sm: 0 1px 3px rgba(0,0,0,0.35);
             --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
             --shadow-lg: 0 12px 32px rgba(0,0,0,0.55);
+
+            /* Custom select chevron — dark theme (lighter stroke) */
+            --select-chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5l5 5 5-5'/></svg>");
+            --select-chevron-focus: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='none' stroke='%23818cf8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5l5 5 5-5'/></svg>");
         }
 
         *{font-family:'Inter',system-ui,-apple-system,sans-serif;margin:0;padding:0;box-sizing:border-box}
@@ -462,26 +524,108 @@ $religion_select_value = $religion_is_known ? $current_religion : ($current_reli
             margin-bottom:.35rem;
         }
         .form-label.required::after{content:" *";color:var(--red)}
-        .form-control,.form-select{
-            background:var(--surface-2);border:1px solid var(--border);
-            border-radius:10px;padding:.55rem .8rem;font-size:.875rem;
-            color:var(--text);font-family:inherit;width:100%;
-            transition:border-color .15s, box-shadow .15s, background .15s;
+
+        /* ── Base input + select shell (shared) ─────────────────── */
+        .form-control,
+        .form-select{
+            display:block;
+            width:100%;
+            height:42px;
+            padding:.55rem .85rem;
+            font-size:.875rem;
+            font-family:inherit;
+            line-height:1.3;
+            color:var(--text);
+            background-color:var(--surface-2);
+            border:1px solid var(--border);
+            border-radius:10px;
+            transition:
+                border-color .15s ease,
+                box-shadow .15s ease,
+                background-color .15s ease;
         }
-        .form-control::placeholder{color:var(--text-3)}
-        .form-control:focus,.form-select:focus{
-            border-color:var(--accent);background:var(--surface);
+
+        .form-control::placeholder{color:var(--text-3);opacity:1}
+
+        .form-control:focus,
+        .form-select:focus{
+            border-color:var(--accent);
+            background-color:var(--surface);
             box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
             outline:none;
         }
-        .form-control[readonly],.form-control.bg-light{
+
+        /* Textareas: drop fixed height, keep other styles */
+        textarea.form-control{
+            height:auto;
+            min-height:72px;
+            padding:.65rem .85rem;
+            resize:vertical;
+        }
+
+        /* ── Custom select styling ──────────────────────────────── */
+        .form-select{
+            appearance:none;
+            -webkit-appearance:none;
+            -moz-appearance:none;
+            padding-right:2.4rem;
+            background-image:var(--select-chevron);
+            background-repeat:no-repeat;
+            background-position:right .85rem center;
+            background-size:12px 8px;
+            cursor:pointer;
+            text-overflow:ellipsis;
+            padding-top:0;
+            padding-bottom:0;
+        }
+
+        .form-select:focus{
+            background-image:var(--select-chevron-focus);
+        }
+
+        /* Readable options in dark mode */
+        .form-select option{
+            background-color:var(--surface);
+            color:var(--text);
+            padding:.4rem;
+        }
+
+        /* Option used as placeholder (Select) — muted when unselected */
+        .form-select:has(option[value=""]:checked){
+            color:var(--text-3);
+        }
+
+        /* Fallback: if :has isn't supported, at least don't break */
+        @supports not selector(:has(*)){
+            .form-select{ color:var(--text); }
+        }
+
+        /* IE / legacy Edge */
+        .form-select::-ms-expand{display:none}
+
+        /* ── Readonly / disabled ───────────────────────────────── */
+        .form-control[readonly],
+        .form-control.bg-light{
             background:var(--surface) !important;
             color:var(--text-2);
             cursor:not-allowed;
             border-style:dashed;
         }
-        .form-control.is-invalid{border-color:var(--red)}
-        .form-control.is-invalid:focus{
+        .form-control:disabled,
+        .form-select:disabled{
+            opacity:.7;
+            cursor:not-allowed;
+            background:var(--surface-2);
+        }
+
+        /* ── Invalid state ─────────────────────────────────────── */
+        .form-control.is-invalid,
+        .form-select.is-invalid{
+            border-color:var(--red);
+            background-image:var(--select-chevron);
+        }
+        .form-control.is-invalid:focus,
+        .form-select.is-invalid:focus{
             box-shadow:0 0 0 3px color-mix(in srgb, var(--red) 18%, transparent);
         }
 
@@ -673,8 +817,22 @@ $religion_select_value = $religion_is_known ? $current_religion : ($current_reli
                     <div class="col-md-3"><label class="form-label">Extension</label><input type="text" name="ext_name" class="form-control" value="<?= htmlspecialchars($old['ext_name']??'') ?>"></div>
                     <div class="col-md-3"><label class="form-label required">Birth Date</label><input type="date" name="birth_date" id="birth_date" class="form-control <?= isset($errors['birth_date'])?'is-invalid':'' ?>" value="<?= htmlspecialchars($old['birth_date']??'') ?>" required></div>
                     <div class="col-md-3"><label class="form-label">Age</label><input type="number" id="age" class="form-control bg-light" readonly value="<?= htmlspecialchars($old['age']??'') ?>"></div>
-                    <div class="col-md-4"><label class="form-label required">Sex</label><select name="sex" class="form-select" required><option value="">Select</option><option value="Male" <?= ($old['sex']??'')=='Male'?'selected':'' ?>>Male</option><option value="Female" <?= ($old['sex']??'')=='Female'?'selected':'' ?>>Female</option></select></div>
-                    <div class="col-md-4"><label class="form-label">Civil Status</label><select name="civil_status" class="form-select"><option value="">Select</option><option value="Single" <?= ($old['civil_status']??'')=='Single'?'selected':'' ?>>Single</option><option value="Married" <?= ($old['civil_status']??'')=='Married'?'selected':'' ?>>Married</option></select></div>
+                    <div class="col-md-4">
+                        <label class="form-label required">Sex</label>
+                        <select name="sex" class="form-select" required>
+                            <option value="">Select</option>
+                            <option value="Male" <?= ($old['sex']??'')=='Male'?'selected':'' ?>>Male</option>
+                            <option value="Female" <?= ($old['sex']??'')=='Female'?'selected':'' ?>>Female</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Civil Status</label>
+                        <select name="civil_status" class="form-select">
+                            <option value="">Select</option>
+                            <option value="Single" <?= ($old['civil_status']??'')=='Single'?'selected':'' ?>>Single</option>
+                            <option value="Married" <?= ($old['civil_status']??'')=='Married'?'selected':'' ?>>Married</option>
+                        </select>
+                    </div>
                     <div class="col-md-4"><label class="form-label">Nationality</label><input type="text" name="nationality" class="form-control" value="<?= htmlspecialchars($old['nationality']??'Filipino') ?>"></div>
 
                     <div class="col-md-4">
@@ -773,11 +931,35 @@ $religion_select_value = $religion_is_known ? $current_religion : ($current_reli
                     <div class="col-md-3"><label class="form-label">Section</label><input type="text" name="section" class="form-control" value="<?= htmlspecialchars($old['section']??'') ?>"></div>
                     <div class="col-md-3"><label class="form-label">Term</label><input type="text" name="term" class="form-control" value="<?= htmlspecialchars($old['term']??'') ?>"></div>
                     <div class="col-md-4"><label class="form-label">Track</label><input type="text" name="track" class="form-control bg-light" value="<?= htmlspecialchars($old['track']??'TECHPRO ELECTIVES') ?>" readonly></div>
-                    <div class="col-md-4"><label class="form-label">Strand</label><select name="strand" id="strand" class="form-select"><option value="">Select</option></select></div>
-                    <div class="col-md-4"><label class="form-label">Program</label><select name="program" id="program" class="form-select"><option value="">Select</option></select></div>
-                    <div class="col-md-4"><label class="form-label">Voucher</label><select name="voucher_status" class="form-select"><option value="">Select</option><option value="Qualified" <?= ($old['voucher_status']??'')=='Qualified'?'selected':'' ?>>Qualified</option><option value="Not Qualified" <?= ($old['voucher_status']??'')=='Not Qualified'?'selected':'' ?>>Not Qualified</option></select></div>
+                    <div class="col-md-4">
+                        <label class="form-label">Strand</label>
+                        <select name="strand" id="strand" class="form-select">
+                            <option value="">Select</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Program</label>
+                        <select name="program" id="program" class="form-select">
+                            <option value="">Select</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Voucher</label>
+                        <select name="voucher_status" class="form-select">
+                            <option value="">Select</option>
+                            <option value="Qualified" <?= ($old['voucher_status']??'')=='Qualified'?'selected':'' ?>>Qualified</option>
+                            <option value="Not Qualified" <?= ($old['voucher_status']??'')=='Not Qualified'?'selected':'' ?>>Not Qualified</option>
+                        </select>
+                    </div>
                     <div class="col-md-4"><label class="form-label">Household ID</label><input type="text" name="household_id" class="form-control" value="<?= htmlspecialchars($old['household_id']??'') ?>"></div>
-                    <div class="col-md-4"><label class="form-label required">Status</label><select name="status" class="form-select" required><?php foreach($status_options as $st): ?><option value="<?= $st ?>" <?= ($old['status']??'Active')==$st?'selected':'' ?>><?= $st ?></option><?php endforeach; ?></select></div>
+                    <div class="col-md-4">
+                        <label class="form-label required">Status</label>
+                        <select name="status" class="form-select" required>
+                            <?php foreach($status_options as $st): ?>
+                                <option value="<?= $st ?>" <?= ($old['status']??'Active')==$st?'selected':'' ?>><?= $st ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
                 </div>
             </div>
         </div>

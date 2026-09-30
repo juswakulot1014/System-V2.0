@@ -851,6 +851,14 @@ function render_audit_details(string $action, array $meta): string {
 </head>
 <body>
 
+<?php
+    $__current = basename($_SERVER['PHP_SELF']);
+    $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
+    // Student sub-pages all highlight "Students"
+    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php','student_documents.php'];
+    $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
+    $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
+?>
 <!-- ================= Sidebar ================= -->
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
@@ -862,14 +870,18 @@ function render_audit_details(string $action, array $meta): string {
     </div>
     <nav class="sidebar-nav">
         <div class="nav-label">Overview</div>
-        <a href="dashboard.php"><i class="bi bi-speedometer2"></i> Dashboard</a>
-        <a href="student_profile.php"><i class="bi bi-people-fill"></i> Students</a>
-        <a href="reports.php"><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+        <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
+        <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
+        <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+
+        <?php if ($__super): ?>
         <div class="nav-label" style="margin-top:.5rem">Administration</div>
-        <a href="create_account.php"><i class="bi bi-person-plus"></i> Accounts</a>
-        <?php if (($_SESSION['admin_role'] ?? '') === 'superadmin'): ?>
-            <a href="audit_log.php" class="active"><i class="bi bi-shield-check"></i> Audit Log</a>
+        <a href="create_account.php"<?= $__a('create_account.php') ?>><i class="bi bi-person-plus"></i> Accounts</a>
+        <a href="audit_log.php"<?= $__a('audit_log.php') ?>><i class="bi bi-shield-check"></i> Audit Log</a>
         <?php endif; ?>
+
+        <div class="nav-label" style="margin-top:.5rem">Account</div>
+        <a href="profile.php"<?= $__a('profile.php') ?>><i class="bi bi-person-gear"></i> My Profile</a>
     </nav>
     <div class="sidebar-footer">
         <a href="logout.php" class="btn btn-outline-danger btn-sm w-100">

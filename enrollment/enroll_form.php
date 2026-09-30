@@ -85,6 +85,37 @@ $t = [
         'voucher_qualified' => 'Voucher Status (for transferee)',
         'qualified_voucher' => 'Qualified Voucher Recipient',
         'not_qualified_voucher' => 'Not Qualified Voucher Recipient',
+        'skip_to_content' => 'Skip to main content',
+        'language_switch' => 'Language selection',
+        'english' => 'English',
+        'filipino' => 'Filipino',
+        'progress_label' => 'Form progress',
+        'step' => 'Step',
+        'of' => 'of',
+        'current_step' => 'Current step',
+        'completed_step' => 'Completed step',
+        'incomplete_step' => 'Incomplete - needs attention',
+        'error_summary' => 'Please fix the following before submitting:',
+        'upload_problem' => 'File upload problem:',
+        'review_confirm' => 'Review & Confirm',
+        'review_help' => 'Please review your information before submitting',
+        'edit_btn' => 'Edit',
+        'confirm_save' => 'Confirm & Save Enrollment',
+        'docs_selected' => 'Documents Selected',
+        'staged_files' => 'Staged Files',
+        'no_files' => 'No files attached. You may still submit and upload them later.',
+        'none_selected' => 'None selected',
+        'camera_modal_title' => 'Capture document photo',
+        'camera_capture' => 'Capture',
+        'camera_cancel' => 'Cancel',
+        'photo_preview' => 'Photo preview',
+        'upload_file' => 'Upload File',
+        'or_capture' => 'or Capture',
+        'document_label' => 'Document Label',
+        'already_staged' => 'Already staged — re-upload to replace',
+        'level_label' => 'Level',
+        'close' => 'Close',
+        'close_alert' => 'Close this message',
     ],
     'fil' => [
         'school' => 'USAT Senior High School',
@@ -150,6 +181,37 @@ $t = [
         'voucher_qualified' => 'Katayuan ng Voucher (para sa lumipat)',
         'qualified_voucher' => 'Qualified Voucher Recipient',
         'not_qualified_voucher' => 'Hindi Qualified Voucher Recipient',
+        'skip_to_content' => 'Lumaktaw sa pangunahing nilalaman',
+        'language_switch' => 'Pagpili ng wika',
+        'english' => 'Ingles',
+        'filipino' => 'Filipino',
+        'progress_label' => 'Progreso ng porma',
+        'step' => 'Hakbang',
+        'of' => 'ng',
+        'current_step' => 'Kasalukuyang hakbang',
+        'completed_step' => 'Natapos na hakbang',
+        'incomplete_step' => 'Hindi kumpleto - kailangan ng atensyon',
+        'error_summary' => 'Pakiayos ang mga sumusunod bago magsumite:',
+        'upload_problem' => 'Problema sa pag-upload ng file:',
+        'review_confirm' => 'Suriin at Kumpirmahin',
+        'review_help' => 'Pakisuri ang iyong impormasyon bago magsumite',
+        'edit_btn' => 'I-edit',
+        'confirm_save' => 'Kumpirmahin at I-save',
+        'docs_selected' => 'Mga Napiling Dokumento',
+        'staged_files' => 'Mga Naka-staging na File',
+        'no_files' => 'Walang nakalakip na file. Maaari ka pa ring magsumite at mag-upload mamaya.',
+        'none_selected' => 'Walang napili',
+        'camera_modal_title' => 'Kumuha ng larawan ng dokumento',
+        'camera_capture' => 'Kunan',
+        'camera_cancel' => 'Kanselahin',
+        'photo_preview' => 'Preview ng larawan',
+        'upload_file' => 'Mag-upload ng File',
+        'or_capture' => 'o Kunan',
+        'document_label' => 'Label ng Dokumento',
+        'already_staged' => 'Naka-staging na — mag-upload muli upang palitan',
+        'level_label' => 'Antas',
+        'close' => 'Isara',
+        'close_alert' => 'Isara ang mensaheng ito',
     ]
 ];
 
@@ -168,9 +230,6 @@ $fields = [
     'is_4ps' => ['required' => true]
 ];
 
-/**
- * Delete staged upload files older than 2 hours.
- */
 function purge_old_staging(): void
 {
     if (!is_dir(STAGING_DIR)) return;
@@ -182,9 +241,6 @@ function purge_old_staging(): void
     }
 }
 
-/**
- * Move an uploaded file into the staging directory.
- */
 function stage_file(string $tmp_path, string $orig_name, string $label, ?string &$err = null): ?array
 {
     $max = 5 * 1024 * 1024;
@@ -222,9 +278,6 @@ function stage_file(string $tmp_path, string $orig_name, string $label, ?string 
     ];
 }
 
-/**
- * Stage raw bytes (for camera captures).
- */
 function stage_bytes(string $bin, string $label, string $orig_name, ?string &$err = null): ?array
 {
     $max = 5 * 1024 * 1024;
@@ -301,7 +354,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // Server-side age recompute
     if (!empty($_POST['birth_date'])) {
         $birth = DateTime::createFromFormat('Y-m-d', $_POST['birth_date']);
         if (!$birth) {
@@ -329,7 +381,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors['email'] = $t[$lang]['invalid_email'];
     }
 
-    // Staged file processing
     $prev = $_SESSION['uploaded_files'] ?? [];
     $uploaded_files = [];
 
@@ -441,6 +492,10 @@ if (empty($edu_history)) {
 }
 
 $display_files = isset($_SESSION['uploaded_files']) ? $_SESSION['uploaded_files'] : [];
+
+$field_has_error = function(string $name) use ($errors): bool {
+    return isset($errors[$name]);
+};
 ?>
 <!DOCTYPE html>
 <html lang="<?= $lang ?>">
@@ -456,12 +511,21 @@ $display_files = isset($_SESSION['uploaded_files']) ? $_SESSION['uploaded_files'
         *{margin:0;padding:0;box-sizing:border-box}
         body{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;color:#1a202c}
         body::before{content:'';position:fixed;top:0;left:0;width:100%;height:100%;background:url('https://images.unsplash.com/photo-1523050854058-8df90110c9f1?q=80&w=2070') center/cover no-repeat;opacity:0.05;pointer-events:none;z-index:-1}
+
+        :focus-visible { outline: 3px solid #ffd700 !important; outline-offset: 2px !important; border-radius: 4px; }
+        .form-group input:focus-visible,
+        .form-group select:focus-visible,
+        .form-group textarea:focus-visible { outline: 3px solid #1565c0 !important; outline-offset: 1px !important; }
+
+        .skip-link { position: absolute; top: -100px; left: 1rem; background: #1a202c; color: #fff; padding: 0.75rem 1.25rem; border-radius: 0 0 8px 8px; font-weight: 600; z-index: 10000; text-decoration: none; transition: top 0.2s; }
+        .skip-link:focus { top: 0; color: #fff; }
+
         .hero-header{background:linear-gradient(135deg,rgba(30,136,229,0.95),rgba(21,101,192,0.95));backdrop-filter:blur(10px);padding:2rem 1rem;text-align:center;color:white;border-bottom:4px solid #ffd700;margin-bottom:2rem;position:relative;overflow:hidden}
         .hero-header img{max-width:100px;border-radius:50%;border:4px solid #ffd700;box-shadow:0 10px 30px rgba(0,0,0,0.2)}
         .hero-header h1{font-size:2rem;font-weight:700;margin-top:1rem}
         .hero-header p{font-size:1.1rem;opacity:0.95}
         .form-container{max-width:1300px;margin:0 auto;padding:0 1.5rem 3rem}
-        .section-card{background:rgba(255,255,255,0.98);border-radius:20px;padding:1.8rem;margin-bottom:1.8rem;box-shadow:0 20px 40px -15px rgba(0,0,0,0.15)}
+        .section-card{background:rgba(255,255,255,0.98);border-radius:20px;padding:1.8rem;margin-bottom:1.8rem;box-shadow:0 20px 40px -15px rgba(0,0,0,0.15);scroll-margin-top: 1.5rem;}
         .section-header{display:flex;align-items:center;gap:12px;margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:2px solid #e2e8f0}
         .section-header i{font-size:1.8rem;color:#1e88e5}
         .section-header h2{font-size:1.5rem;font-weight:600;color:#1a202c}
@@ -485,182 +549,49 @@ $display_files = isset($_SESSION['uploaded_files']) ? $_SESSION['uploaded_files'
         .review-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:0.8rem}
         .review-item{padding:0.5rem;border-bottom:1px solid #dee2e6}
         .review-item strong{color:#2d3748;font-weight:600}
-        .lang-switch{position:fixed;top:20px;right:20px;z-index:1000;background:white;border-radius:50px;padding:0.5rem;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
-        .lang-btn{padding:0.5rem 1rem;border:none;background:none;font-weight:600;transition:all 0.3s ease;border-radius:50px}
+        .lang-switch{position:fixed;top:20px;right:20px;z-index:1000;background:white;border-radius:50px;padding:0.5rem;box-shadow:0 2px 10px rgba(0,0,0,0.1);display:flex;gap:0.25rem}
+        .lang-btn{padding:0.5rem 1rem;border:none;background:none;font-weight:600;transition:all 0.3s ease;border-radius:50px;cursor:pointer}
         .lang-btn.active{background:#1e88e5;color:white}
 
-        .form-group.error input,
-        .form-group.error select,
-        .form-group.error textarea {
-            border-color: #dc3545 !important;
-            background: #fff5f5 !important;
-            animation: shake 0.3s ease-in-out;
-        }
-        .form-group.error label {
-            color: #dc3545 !important;
-        }
-        .form-group.error > input + label,
-        .form-group.error > select + label,
-        .form-group.error > textarea + label {
-            top: -0.6rem;
-            font-size: 0.75rem;
-        }
-        .form-group.error::after {
-            content: '\f06a';
-            font-family: 'Font Awesome 6 Free';
-            font-weight: 900;
-            position: absolute;
-            right: 1rem;
-            top: 0.85rem;
-            color: #dc3545;
-            font-size: 1rem;
-            pointer-events: none;
-        }
-        .error-msg {
-            display: flex;
-            align-items: flex-start;
-            gap: 0.35rem;
-            color: #dc3545;
-            font-size: 0.78rem;
-            margin-top: 0.35rem;
-            font-weight: 500;
-            line-height: 1.3;
-            animation: slideDown 0.2s ease-out;
-        }
-        .error-msg::before {
-            content: '\f071';
-            font-family: 'Font Awesome 6 Free';
-            font-weight: 900;
-            font-size: 0.75rem;
-            flex-shrink: 0;
-            margin-top: 1px;
-        }
-        @keyframes slideDown {
-            from { opacity: 0; transform: translateY(-4px); }
-            to   { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes shake {
-            0%,100% { transform: translateX(0); }
-            25%     { transform: translateX(-4px); }
-            75%     { transform: translateX(4px); }
-        }
+        .form-group.error input,.form-group.error select,.form-group.error textarea { border-color: #dc3545 !important; background: #fff5f5 !important; animation: shake 0.3s ease-in-out; }
+        .form-group.error label { color: #dc3545 !important; }
+        .form-group.error > input + label,.form-group.error > select + label,.form-group.error > textarea + label { top: -0.6rem; font-size: 0.75rem; }
+        .form-group.error::after { content: '\f06a'; font-family: 'Font Awesome 6 Free'; font-weight: 900; position: absolute; right: 1rem; top: 0.85rem; color: #dc3545; font-size: 1rem; pointer-events: none; }
+        .error-msg { display: flex; align-items: flex-start; gap: 0.35rem; color: #b71c1c; font-size: 0.8rem; margin-top: 0.35rem; font-weight: 600; line-height: 1.3; animation: slideDown 0.2s ease-out; }
+        .error-msg::before { content: '\f071'; font-family: 'Font Awesome 6 Free'; font-weight: 900; font-size: 0.75rem; flex-shrink: 0; margin-top: 1px; }
+        @keyframes slideDown { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
 
-        .error-banner {
-            background: linear-gradient(135deg, #fef2f2, #fee2e2);
-            border-left: 5px solid #dc3545;
-            color: #991b1b;
-            padding: 1rem 1.25rem;
-            border-radius: 14px;
-            margin-bottom: 1.5rem;
-            display: flex;
-            align-items: flex-start;
-            gap: 0.75rem;
-            box-shadow: 0 4px 16px rgba(220,53,69,0.12);
-            animation: slideDown 0.3s ease-out;
-        }
-        .error-banner > i {
-            font-size: 1.4rem;
-            color: #dc3545;
-            margin-top: 2px;
-            flex-shrink: 0;
-        }
-        .error-banner strong {
-            display: block;
-            font-size: 0.95rem;
-            margin-bottom: 0.35rem;
-            color: #991b1b;
-        }
-        .error-banner ul {
-            margin: 0;
-            padding-left: 1.25rem;
-            font-size: 0.88rem;
-        }
+        .error-banner { background: linear-gradient(135deg, #fef2f2, #fee2e2); border-left: 5px solid #dc3545; color: #7f1d1d; padding: 1rem 1.25rem; border-radius: 14px; margin-bottom: 1.5rem; display: flex; align-items: flex-start; gap: 0.75rem; box-shadow: 0 4px 16px rgba(220,53,69,0.12); animation: slideDown 0.3s ease-out; }
+        .error-banner > i { font-size: 1.4rem; color: #dc3545; margin-top: 2px; flex-shrink: 0; }
+        .error-banner strong { display: block; font-size: 0.95rem; margin-bottom: 0.35rem; color: #7f1d1d; }
+        .error-banner ul { margin: 0; padding-left: 1.25rem; font-size: 0.88rem; }
         .error-banner li { margin-bottom: 0.15rem; }
 
-        .progress-indicator {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 2rem;
-            padding: 1rem 1.5rem;
-            background: white;
-            border-radius: 50px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.06);
-            gap: 0.5rem;
-        }
-        .progress-step {
-            flex: 1;
-            text-align: center;
-            position: relative;
-        }
-        .progress-step .step-number {
-            width: 38px;
-            height: 38px;
-            background: #e2e8f0;
-            border-radius: 50%;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 700;
-            color: #718096;
-            position: relative;
-            z-index: 2;
-            transition: all 0.3s ease;
-        }
-        .progress-step .step-label {
-            display: block;
-            font-size: 0.72rem;
-            color: #718096;
-            margin-top: 0.4rem;
-            font-weight: 500;
-            letter-spacing: 0.2px;
-        }
-        .progress-step.active .step-number {
-            background: linear-gradient(135deg, #1e88e5, #1565c0);
-            color: white;
-            box-shadow: 0 0 0 4px rgba(30,136,229,0.2);
-            transform: scale(1.05);
-        }
-        .progress-step.active .step-label {
-            color: #1e88e5;
-            font-weight: 700;
-        }
-        .progress-step.completed .step-number {
-            background: linear-gradient(135deg, #10b981, #059669);
-            color: white;
-        }
-        .progress-step.completed .step-label {
-            color: #059669;
-            font-weight: 600;
-        }
-        @media (max-width: 640px) {
-            .progress-step .step-label { display: none; }
-            .progress-step .step-number { width: 32px; height: 32px; font-size: 0.85rem; }
-        }
+        .progress-indicator { display: flex; justify-content: space-between; margin-bottom: 2rem; padding: 1rem 1.5rem; background: white; border-radius: 50px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); gap: 0.5rem; list-style: none; position: sticky; top: 10px; z-index: 100; }
+        .progress-step { flex: 1; text-align: center; position: relative; cursor: pointer; transition: transform 0.2s ease; padding: 0.25rem; border-radius: 12px; user-select: none; }
+        .progress-step:hover .step-number { transform: scale(1.1); }
+        .progress-step:focus-visible { outline: 3px solid #ffd700; outline-offset: 4px; border-radius: 12px; }
+        .progress-step .step-number { width: 38px; height: 38px; background: #e2e8f0; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; color: #4a5568; position: relative; z-index: 2; transition: all 0.3s ease; }
+        .progress-step .step-label { display: block; font-size: 0.72rem; color: #4a5568; margin-top: 0.4rem; font-weight: 500; letter-spacing: 0.2px; }
 
-        .upload-row {
-            background: linear-gradient(135deg, #f8fafc, #f1f5f9);
-            border: 2px solid #e2e8f0;
-            border-radius: 14px;
-            padding: 1.1rem;
-            margin-bottom: 0.75rem;
-            transition: all 0.2s;
-        }
-        .upload-row:hover {
-            border-color: #cbd5e1;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-        }
-        .upload-row.has-file {
-            border-color: #10b981;
-            background: linear-gradient(135deg, #f0fdf4, #dcfce7);
-        }
-        .upload-row .form-label {
-            font-size: 0.7rem;
-            font-weight: 700;
-            color: #64748b;
-            letter-spacing: 0.5px;
-            margin-bottom: 0.4rem;
-            text-transform: uppercase;
-        }
+        .progress-step.completed .step-number { background: linear-gradient(135deg, #10b981, #047857); color: white; box-shadow: 0 0 0 4px rgba(16,185,129,0.2); }
+        .progress-step.completed .step-label { color: #047857; font-weight: 700; }
+
+        .progress-step.incomplete .step-number { background: linear-gradient(135deg, #ef4444, #b91c1c); color: white; box-shadow: 0 0 0 4px rgba(239,68,68,0.2); }
+        .progress-step.incomplete .step-label { color: #b91c1c; font-weight: 700; }
+
+        .progress-step.active .step-number { transform: scale(1.08); box-shadow: 0 0 0 5px rgba(30,136,229,0.28), 0 4px 12px rgba(30,136,229,0.35); }
+        .progress-step.active:not(.completed):not(.incomplete) .step-number { background: linear-gradient(135deg, #1565c0, #0d47a1); color: white; }
+        .progress-step.active .step-label { font-weight: 800; }
+        .progress-step.active:not(.completed):not(.incomplete) .step-label { color: #1565c0; }
+
+        @media (max-width: 640px) { .progress-step .step-label { display: none; } .progress-step .step-number { width: 32px; height: 32px; font-size: 0.85rem; } }
+
+        .upload-row { background: linear-gradient(135deg, #f8fafc, #f1f5f9); border: 2px solid #e2e8f0; border-radius: 14px; padding: 1.1rem; margin-bottom: 0.75rem; transition: all 0.2s; }
+        .upload-row:hover { border-color: #cbd5e1; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .upload-row.has-file { border-color: #059669; background: linear-gradient(135deg, #f0fdf4, #dcfce7); }
+        .upload-row .form-label { font-size: 0.7rem; font-weight: 700; color: #475569; letter-spacing: 0.5px; margin-bottom: 0.4rem; text-transform: uppercase; }
         .preview-thumb{width:80px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #e5e7eb}
         .camera-modal{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.9);display:flex;align-items:center;justify-content:center}
         .camera-container{background:#000;border-radius:16px;overflow:hidden;max-width:600px;width:95%}
@@ -670,202 +601,446 @@ $display_files = isset($_SESSION['uploaded_files']) ? $_SESSION['uploaded_files'
         .doc-upload-row{display:none; margin-top:0.5rem; padding-left:1rem; border-left:3px solid #0d6efd;}
         .doc-upload-row.visible{display:block;}
 
-        .swal2-popup {
-            border-radius: 20px !important;
-            padding: 2rem 1.5rem !important;
-        }
-        .swal2-title {
-            font-size: 1.4rem !important;
-            font-weight: 700 !important;
-        }
-        .swal2-html-container {
-            font-size: 0.95rem !important;
-            line-height: 1.6 !important;
-        }
-        .swal2-confirm {
-            border-radius: 50px !important;
-            padding: 0.7rem 2rem !important;
-            font-weight: 600 !important;
+        fieldset.doc-fieldset { border: 0; padding: 0; margin: 0; }
+        fieldset.doc-fieldset > legend { font-size: 0.95rem; font-weight: 600; color: #2d3748; margin-bottom: 0.5rem; padding: 0; width: auto; float: none; }
+
+        .swal2-popup { border-radius: 20px !important; padding: 2rem 1.5rem !important; }
+        .swal2-title { font-size: 1.4rem !important; font-weight: 700 !important; }
+        .swal2-html-container { font-size: 0.95rem !important; line-height: 1.6 !important; }
+        .swal2-confirm { border-radius: 50px !important; padding: 0.7rem 2rem !important; font-weight: 600 !important; }
+
+        .sr-only { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
         }
     </style>
 </head>
 <body>
 
-<div class="lang-switch">
-    <button class="lang-btn <?= $lang == 'en' ? 'active' : '' ?>" onclick="switchLang('en')">EN</button>
-    <button class="lang-btn <?= $lang == 'fil' ? 'active' : '' ?>" onclick="switchLang('fil')">FIL</button>
-</div>
+<a href="#main-content" class="skip-link"><?= $t[$lang]['skip_to_content'] ?></a>
 
-<div class="hero-header">
-    <img src="../assets/img/usat.jpg" alt="USAT College Logo" onerror="this.src='https://via.placeholder.com/100'">
+<nav class="lang-switch" aria-label="<?= htmlspecialchars($t[$lang]['language_switch']) ?>">
+    <button type="button" class="lang-btn <?= $lang == 'en' ? 'active' : '' ?>" onclick="switchLang('en')" aria-label="<?= htmlspecialchars($t[$lang]['english']) ?>" aria-pressed="<?= $lang == 'en' ? 'true' : 'false' ?>" lang="en">EN</button>
+    <button type="button" class="lang-btn <?= $lang == 'fil' ? 'active' : '' ?>" onclick="switchLang('fil')" aria-label="<?= htmlspecialchars($t[$lang]['filipino']) ?>" aria-pressed="<?= $lang == 'fil' ? 'true' : 'false' ?>" lang="fil">FIL</button>
+</nav>
+
+<header class="hero-header" role="banner">
+    <img src="../assets/img/usat.jpg" alt="USAT College logo" onerror="this.src='https://via.placeholder.com/100'">
     <h1><?= $t[$lang]['school'] ?></h1>
     <p><?= $t[$lang]['form'] ?> | <?= $t[$lang]['ay'] ?></p>
-</div>
+</header>
 
-<div class="form-container">
+<main id="main-content" class="form-container" role="main">
 
     <?php if ($mode === 'form'): ?>
 
         <?php if (!empty($errors)): ?>
-            <div class="error-banner">
-                <i class="fas fa-exclamation-circle"></i>
-                <div>
-                    <strong>Please fix the following before submitting:</strong>
-                    <ul>
-                        <?php foreach ($errors as $field => $msg): ?>
-                            <?php if ($field === 'upload') continue; ?>
-                            <li><?= htmlspecialchars($msg) ?></li>
-                        <?php endforeach; ?>
-                    </ul>
+            <?php
+            $error_count = 0;
+            foreach ($errors as $k => $v) {
+                if ($k === 'upload') continue;
+                $error_count++;
+            }
+            ?>
+            <?php if ($error_count > 0): ?>
+                <div class="error-banner" role="alert" aria-live="assertive" tabindex="-1" id="errorSummary">
+                    <i class="fas fa-exclamation-circle" aria-hidden="true"></i>
+                    <div>
+                        <strong><?= htmlspecialchars($t[$lang]['error_summary']) ?></strong>
+                        <ul>
+                            <?php foreach ($errors as $field => $msg): ?>
+                                <?php if ($field === 'upload') continue; ?>
+                                <li><?= htmlspecialchars($msg) ?></li>
+                            <?php endforeach; ?>
+                        </ul>
+                    </div>
                 </div>
-            </div>
+            <?php endif; ?>
         <?php endif; ?>
 
         <?php if (isset($errors['upload'])): ?>
-            <div class="error-banner">
-                <i class="fas fa-file-excel"></i>
+            <div class="error-banner" role="alert" aria-live="assertive">
+                <i class="fas fa-file-circle-exclamation" aria-hidden="true"></i>
                 <div>
-                    <strong>File upload problem:</strong>
+                    <strong><?= htmlspecialchars($t[$lang]['upload_problem']) ?></strong>
                     <ul><li><?= htmlspecialchars($errors['upload']) ?></li></ul>
                 </div>
             </div>
         <?php endif; ?>
 
-        <div class="progress-indicator" id="progressIndicator">
-            <div class="progress-step active" data-step="1"><div class="step-number">1</div><div class="step-label">Student Info</div></div>
-            <div class="progress-step" data-step="2"><div class="step-number">2</div><div class="step-label">Parents & Guardian</div></div>
-            <div class="progress-step" data-step="3"><div class="step-number">3</div><div class="step-label">Address</div></div>
-            <div class="progress-step" data-step="4"><div class="step-number">4</div><div class="step-label">Education</div></div>
-            <div class="progress-step" data-step="5"><div class="step-number">5</div><div class="step-label">Enrollment</div></div>
-        </div>
+        <nav class="progress-indicator" id="progressIndicator" role="navigation" aria-label="<?= htmlspecialchars($t[$lang]['progress_label']) ?>">
+            <ol style="display:contents; list-style:none; margin:0; padding:0;">
+                <li class="progress-step active" data-step="1" data-target="1" aria-current="step" role="button" tabindex="0" aria-label="<?= $t[$lang]['step'] ?> 1 <?= $t[$lang]['of'] ?> 5: Student Info">
+                    <div class="step-number" aria-hidden="true">1</div>
+                    <div class="step-label"><span class="sr-only"><?= $t[$lang]['step'] ?> 1 <?= $t[$lang]['of'] ?> 5: </span>Student Info</div>
+                </li>
+                <li class="progress-step" data-step="2" data-target="2" role="button" tabindex="0" aria-label="<?= $t[$lang]['step'] ?> 2 <?= $t[$lang]['of'] ?> 5: Parents &amp; Guardian">
+                    <div class="step-number" aria-hidden="true">2</div>
+                    <div class="step-label"><span class="sr-only"><?= $t[$lang]['step'] ?> 2 <?= $t[$lang]['of'] ?> 5: </span>Parents &amp; Guardian</div>
+                </li>
+                <li class="progress-step" data-step="3" data-target="3" role="button" tabindex="0" aria-label="<?= $t[$lang]['step'] ?> 3 <?= $t[$lang]['of'] ?> 5: Address">
+                    <div class="step-number" aria-hidden="true">3</div>
+                    <div class="step-label"><span class="sr-only"><?= $t[$lang]['step'] ?> 3 <?= $t[$lang]['of'] ?> 5: </span>Address</div>
+                </li>
+                <li class="progress-step" data-step="4" data-target="4" role="button" tabindex="0" aria-label="<?= $t[$lang]['step'] ?> 4 <?= $t[$lang]['of'] ?> 5: Education">
+                    <div class="step-number" aria-hidden="true">4</div>
+                    <div class="step-label"><span class="sr-only"><?= $t[$lang]['step'] ?> 4 <?= $t[$lang]['of'] ?> 5: </span>Education</div>
+                </li>
+                <li class="progress-step" data-step="5" data-target="5" role="button" tabindex="0" aria-label="<?= $t[$lang]['step'] ?> 5 <?= $t[$lang]['of'] ?> 5: Enrollment">
+                    <div class="step-number" aria-hidden="true">5</div>
+                    <div class="step-label"><span class="sr-only"><?= $t[$lang]['step'] ?> 5 <?= $t[$lang]['of'] ?> 5: </span>Enrollment</div>
+                </li>
+            </ol>
+        </nav>
 
         <form method="POST" action="" id="enrollForm" enctype="multipart/form-data" novalidate>
             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
 
             <!-- STUDENT INFORMATION -->
-            <div class="section-card" data-section="1">
-                <div class="section-header"><i class="fas fa-user-graduate"></i><h2><?= $t[$lang]['student'] ?></h2></div>
+            <section class="section-card" data-section="1" aria-labelledby="sectionStudentHeading">
+                <div class="section-header"><i class="fas fa-user-graduate" aria-hidden="true"></i><h2 id="sectionStudentHeading"><?= $t[$lang]['student'] ?></h2></div>
                 <div class="row g-3">
-                    <div class="col-md-6 form-group <?= isset($errors['lrn']) ? 'error' : '' ?>"><input type="text" name="lrn" id="lrn" placeholder=" " value="<?= htmlspecialchars($_POST['lrn'] ?? '') ?>" required pattern="\d{12}" maxlength="12"><label><i class="fas fa-id-card me-1"></i> <?= $t[$lang]['lrn'] ?></label><?php if(isset($errors['lrn'])): ?><span class="error-msg"><?= $errors['lrn'] ?></span><?php endif; ?></div>
-                    <div class="col-md-6 form-group <?= isset($errors['last_name']) ? 'error' : '' ?>"><input type="text" name="last_name" id="last_name" placeholder=" " value="<?= htmlspecialchars($_POST['last_name'] ?? '') ?>" required pattern="[A-Za-z\s\-']{2,}"><label><i class="fas fa-user me-1"></i> <?= $t[$lang]['lname'] ?></label><?php if(isset($errors['last_name'])): ?><span class="error-msg"><?= $errors['last_name'] ?></span><?php endif; ?></div>
-                    <div class="col-md-6 form-group <?= isset($errors['first_name']) ? 'error' : '' ?>"><input type="text" name="first_name" id="first_name" placeholder=" " value="<?= htmlspecialchars($_POST['first_name'] ?? '') ?>" required pattern="[A-Za-z\s\-']{2,}"><label><i class="fas fa-user me-1"></i> <?= $t[$lang]['fname'] ?></label><?php if(isset($errors['first_name'])): ?><span class="error-msg"><?= $errors['first_name'] ?></span><?php endif; ?></div>
-                    <div class="col-md-6 form-group"><input type="text" name="middle_name" id="middle_name" placeholder=" " value="<?= htmlspecialchars($_POST['middle_name'] ?? '') ?>"><label><i class="fas fa-user me-1"></i> <?= $t[$lang]['mname'] ?></label></div>
-                    <div class="col-md-4 form-group"><input type="text" name="nick_name" id="nick_name" placeholder=" " value="<?= htmlspecialchars($_POST['nick_name'] ?? '') ?>"><label><i class="fas fa-smile me-1"></i> <?= $t[$lang]['nick'] ?></label></div>
-                    <div class="col-md-4 form-group"><input type="text" name="ext_name" id="ext_name" placeholder=" " value="<?= htmlspecialchars($_POST['ext_name'] ?? '') ?>"><label><i class="fas fa-tag me-1"></i> <?= $t[$lang]['ext'] ?></label></div>
-                    <div class="col-md-4 form-group <?= isset($errors['sex']) ? 'error' : '' ?>"><select name="sex" id="sex" required><option value="" disabled selected></option><option value="Male" <?= ($_POST['sex'] ?? '') == 'Male' ? 'selected' : '' ?>><?= $t[$lang]['male'] ?></option><option value="Female" <?= ($_POST['sex'] ?? '') == 'Female' ? 'selected' : '' ?>><?= $t[$lang]['female'] ?></option></select><label><i class="fas fa-venus-mars me-1"></i> <?= $t[$lang]['sex'] ?></label></div>
-                    <div class="col-md-4 form-group <?= isset($errors['birth_date']) ? 'error' : '' ?>"><input type="date" id="birth_date" name="birth_date" value="<?= htmlspecialchars($_POST['birth_date'] ?? '') ?>" required><label><i class="fas fa-calendar-alt me-1"></i> <?= $t[$lang]['bdate'] ?></label></div>
-                    <div class="col-md-4 form-group"><input type="number" id="age" name="age" placeholder=" " value="<?= htmlspecialchars($_POST['age'] ?? '') ?>" min="14" max="25" readonly style="background:#f8f9fa"><label><i class="fas fa-birthday-cake me-1"></i> <?= $t[$lang]['age'] ?></label></div>
-                    <div class="col-md-3 form-group"><input type="text" name="civil_status" id="civil_status" placeholder=" " value="<?= htmlspecialchars($_POST['civil_status'] ?? '') ?>"><label><i class="fas fa-ring me-1"></i> <?= $t[$lang]['civil'] ?></label></div>
-                    <div class="col-md-3 form-group"><input type="text" name="nationality" id="nationality" placeholder=" " value="<?= htmlspecialchars($_POST['nationality'] ?? '') ?>"><label><i class="fas fa-flag me-1"></i> <?= $t[$lang]['nation'] ?></label></div>
-
-                    <!-- Religion with dropdown -->
+                    <div class="col-md-6 form-group <?= $field_has_error('lrn') ? 'error' : '' ?>">
+                        <input type="text" name="lrn" id="lrn" placeholder=" " value="<?= htmlspecialchars($_POST['lrn'] ?? '') ?>" required pattern="\d{12}" maxlength="12" inputmode="numeric" autocomplete="off" aria-required="true" aria-invalid="<?= $field_has_error('lrn') ? 'true' : 'false' ?>" <?= $field_has_error('lrn') ? 'aria-describedby="lrn-error"' : '' ?>>
+                        <label for="lrn"><i class="fas fa-id-card me-1" aria-hidden="true"></i> <?= $t[$lang]['lrn'] ?></label>
+                        <?php if($field_has_error('lrn')): ?><span class="error-msg" id="lrn-error"><?= htmlspecialchars($errors['lrn']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-6 form-group <?= $field_has_error('last_name') ? 'error' : '' ?>">
+                        <input type="text" name="last_name" id="last_name" placeholder=" " value="<?= htmlspecialchars($_POST['last_name'] ?? '') ?>" required pattern="[A-Za-z\s\-']{2,}" autocomplete="family-name" aria-required="true" aria-invalid="<?= $field_has_error('last_name') ? 'true' : 'false' ?>" <?= $field_has_error('last_name') ? 'aria-describedby="last_name-error"' : '' ?>>
+                        <label for="last_name"><i class="fas fa-user me-1" aria-hidden="true"></i> <?= $t[$lang]['lname'] ?></label>
+                        <?php if($field_has_error('last_name')): ?><span class="error-msg" id="last_name-error"><?= htmlspecialchars($errors['last_name']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-6 form-group <?= $field_has_error('first_name') ? 'error' : '' ?>">
+                        <input type="text" name="first_name" id="first_name" placeholder=" " value="<?= htmlspecialchars($_POST['first_name'] ?? '') ?>" required pattern="[A-Za-z\s\-']{2,}" autocomplete="given-name" aria-required="true" aria-invalid="<?= $field_has_error('first_name') ? 'true' : 'false' ?>" <?= $field_has_error('first_name') ? 'aria-describedby="first_name-error"' : '' ?>>
+                        <label for="first_name"><i class="fas fa-user me-1" aria-hidden="true"></i> <?= $t[$lang]['fname'] ?></label>
+                        <?php if($field_has_error('first_name')): ?><span class="error-msg" id="first_name-error"><?= htmlspecialchars($errors['first_name']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="middle_name" id="middle_name" placeholder=" " value="<?= htmlspecialchars($_POST['middle_name'] ?? '') ?>" autocomplete="additional-name">
+                        <label for="middle_name"><i class="fas fa-user me-1" aria-hidden="true"></i> <?= $t[$lang]['mname'] ?></label>
+                    </div>
+                    <div class="col-md-4 form-group">
+                        <input type="text" name="nick_name" id="nick_name" placeholder=" " value="<?= htmlspecialchars($_POST['nick_name'] ?? '') ?>" autocomplete="nickname">
+                        <label for="nick_name"><i class="fas fa-smile me-1" aria-hidden="true"></i> <?= $t[$lang]['nick'] ?></label>
+                    </div>
+                    <div class="col-md-4 form-group">
+                        <input type="text" name="ext_name" id="ext_name" placeholder=" " value="<?= htmlspecialchars($_POST['ext_name'] ?? '') ?>" autocomplete="honorific-suffix">
+                        <label for="ext_name"><i class="fas fa-tag me-1" aria-hidden="true"></i> <?= $t[$lang]['ext'] ?></label>
+                    </div>
+                    <div class="col-md-4 form-group <?= $field_has_error('sex') ? 'error' : '' ?>">
+                        <select name="sex" id="sex" required aria-required="true" aria-invalid="<?= $field_has_error('sex') ? 'true' : 'false' ?>" <?= $field_has_error('sex') ? 'aria-describedby="sex-error"' : '' ?>>
+                            <option value="" disabled selected></option>
+                            <option value="Male" <?= ($_POST['sex'] ?? '') == 'Male' ? 'selected' : '' ?>><?= $t[$lang]['male'] ?></option>
+                            <option value="Female" <?= ($_POST['sex'] ?? '') == 'Female' ? 'selected' : '' ?>><?= $t[$lang]['female'] ?></option>
+                        </select>
+                        <label for="sex"><i class="fas fa-venus-mars me-1" aria-hidden="true"></i> <?= $t[$lang]['sex'] ?></label>
+                        <?php if($field_has_error('sex')): ?><span class="error-msg" id="sex-error"><?= htmlspecialchars($errors['sex']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-4 form-group <?= $field_has_error('birth_date') ? 'error' : '' ?>">
+                        <input type="date" id="birth_date" name="birth_date" value="<?= htmlspecialchars($_POST['birth_date'] ?? '') ?>" required autocomplete="bday" aria-required="true" aria-invalid="<?= $field_has_error('birth_date') ? 'true' : 'false' ?>" <?= $field_has_error('birth_date') ? 'aria-describedby="birth_date-error"' : '' ?>>
+                        <label for="birth_date"><i class="fas fa-calendar-alt me-1" aria-hidden="true"></i> <?= $t[$lang]['bdate'] ?></label>
+                        <?php if($field_has_error('birth_date')): ?><span class="error-msg" id="birth_date-error"><?= htmlspecialchars($errors['birth_date']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-4 form-group">
+                        <input type="number" id="age" name="age" placeholder=" " value="<?= htmlspecialchars($_POST['age'] ?? '') ?>" min="14" max="25" readonly style="background:#f8f9fa" aria-readonly="true">
+                        <label for="age"><i class="fas fa-birthday-cake me-1" aria-hidden="true"></i> <?= $t[$lang]['age'] ?></label>
+                    </div>
                     <div class="col-md-3 form-group">
-                        <input type="text"
-                               name="religion"
-                               id="religion"
-                               placeholder=" "
-                               list="religionOptions"
-                               autocomplete="off"
-                               value="<?= htmlspecialchars($_POST['religion'] ?? '') ?>">
-                        <label><i class="fas fa-church me-1"></i> <?= $t[$lang]['religion'] ?></label>
+                        <input type="text" name="civil_status" id="civil_status" placeholder=" " value="<?= htmlspecialchars($_POST['civil_status'] ?? '') ?>">
+                        <label for="civil_status"><i class="fas fa-ring me-1" aria-hidden="true"></i> <?= $t[$lang]['civil'] ?></label>
+                    </div>
+                    <div class="col-md-3 form-group">
+                        <input type="text" name="nationality" id="nationality" placeholder=" " value="<?= htmlspecialchars($_POST['nationality'] ?? '') ?>" autocomplete="country-name">
+                        <label for="nationality"><i class="fas fa-flag me-1" aria-hidden="true"></i> <?= $t[$lang]['nation'] ?></label>
+                    </div>
+                    <div class="col-md-3 form-group">
+                        <input type="text" name="religion" id="religion" placeholder=" " list="religionOptions" autocomplete="off" value="<?= htmlspecialchars($_POST['religion'] ?? '') ?>" aria-describedby="religion-help">
+                        <label for="religion"><i class="fas fa-church me-1" aria-hidden="true"></i> <?= $t[$lang]['religion'] ?></label>
+                        <span id="religion-help" class="sr-only">Type to filter suggestions, or enter your own.</span>
                         <datalist id="religionOptions">
-                            <option value="Roman Catholic">
-                            <option value="Islam">
-                            <option value="Iglesia ni Cristo">
-                            <option value="Protestant">
-                            <option value="Born Again Christian">
-                            <option value="Seventh-Day Adventist">
-                            <option value="Jehovah's Witnesses">
-                            <option value="Bible Baptist">
-                            <option value="Mormon (LDS)">
-                            <option value="Buddhism">
-                            <option value="Hinduism">
-                            <option value="Atheist">
-                            <option value="Others">
+                            <option value="Roman Catholic"><option value="Islam"><option value="Iglesia ni Cristo">
+                            <option value="Protestant"><option value="Born Again Christian"><option value="Seventh-Day Adventist">
+                            <option value="Jehovah's Witnesses"><option value="Bible Baptist"><option value="Mormon (LDS)">
+                            <option value="Buddhism"><option value="Hinduism"><option value="Atheist"><option value="Others">
                         </datalist>
                     </div>
-
-                    <div class="col-md-3 form-group"><input type="number" step="0.01" name="height" id="height" placeholder=" " value="<?= htmlspecialchars($_POST['height'] ?? '') ?>"><label><i class="fas fa-arrow-up me-1"></i> <?= $t[$lang]['height'] ?></label></div>
-                    <div class="col-md-3 form-group"><input type="number" step="0.01" name="weight" id="weight" placeholder=" " value="<?= htmlspecialchars($_POST['weight'] ?? '') ?>"><label><i class="fas fa-weight-hanging me-1"></i> <?= $t[$lang]['weight'] ?></label></div>
-                    <div class="col-md-5 form-group <?= isset($errors['email']) ? 'error' : '' ?>"><input type="email" name="email" id="email" placeholder=" " value="<?= htmlspecialchars($_POST['email'] ?? '') ?>"><label><i class="fas fa-envelope me-1"></i> <?= $t[$lang]['email'] ?></label></div>
-                    <div class="col-md-4 form-group <?= isset($errors['phone']) ? 'error' : '' ?>"><input type="tel" name="phone" id="phone" placeholder=" " value="<?= htmlspecialchars($_POST['phone'] ?? '') ?>" pattern="09\d{9}" maxlength="11"><label><i class="fas fa-phone-alt me-1"></i> <?= $t[$lang]['phone'] ?></label></div>
-                    <div class="col-12 form-group"><textarea name="special_skills" id="special_skills" rows="2" placeholder=" "><?= htmlspecialchars($_POST['special_skills'] ?? '') ?></textarea><label><i class="fas fa-lightbulb me-1"></i> <?= $t[$lang]['skills'] ?></label></div>
+                    <div class="col-md-3 form-group">
+                        <input type="number" step="0.01" name="height" id="height" placeholder=" " value="<?= htmlspecialchars($_POST['height'] ?? '') ?>">
+                        <label for="height"><i class="fas fa-arrow-up me-1" aria-hidden="true"></i> <?= $t[$lang]['height'] ?></label>
+                    </div>
+                    <div class="col-md-3 form-group">
+                        <input type="number" step="0.01" name="weight" id="weight" placeholder=" " value="<?= htmlspecialchars($_POST['weight'] ?? '') ?>">
+                        <label for="weight"><i class="fas fa-weight-hanging me-1" aria-hidden="true"></i> <?= $t[$lang]['weight'] ?></label>
+                    </div>
+                    <div class="col-md-5 form-group <?= $field_has_error('email') ? 'error' : '' ?>">
+                        <input type="email" name="email" id="email" placeholder=" " value="<?= htmlspecialchars($_POST['email'] ?? '') ?>" autocomplete="email" aria-invalid="<?= $field_has_error('email') ? 'true' : 'false' ?>" <?= $field_has_error('email') ? 'aria-describedby="email-error"' : '' ?>>
+                        <label for="email"><i class="fas fa-envelope me-1" aria-hidden="true"></i> <?= $t[$lang]['email'] ?></label>
+                        <?php if($field_has_error('email')): ?><span class="error-msg" id="email-error"><?= htmlspecialchars($errors['email']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-4 form-group <?= $field_has_error('phone') ? 'error' : '' ?>">
+                        <input type="tel" name="phone" id="phone" placeholder=" " value="<?= htmlspecialchars($_POST['phone'] ?? '') ?>" pattern="09\d{9}" maxlength="11" inputmode="numeric" autocomplete="tel" aria-invalid="<?= $field_has_error('phone') ? 'true' : 'false' ?>" <?= $field_has_error('phone') ? 'aria-describedby="phone-error"' : '' ?>>
+                        <label for="phone"><i class="fas fa-phone-alt me-1" aria-hidden="true"></i> <?= $t[$lang]['phone'] ?></label>
+                        <?php if($field_has_error('phone')): ?><span class="error-msg" id="phone-error"><?= htmlspecialchars($errors['phone']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-12 form-group">
+                        <textarea name="special_skills" id="special_skills" rows="2" placeholder=" "><?= htmlspecialchars($_POST['special_skills'] ?? '') ?></textarea>
+                        <label for="special_skills"><i class="fas fa-lightbulb me-1" aria-hidden="true"></i> <?= $t[$lang]['skills'] ?></label>
+                    </div>
                 </div>
-            </div>
+            </section>
 
             <!-- PARENTS & GUARDIAN -->
-            <div class="section-card" data-section="2">
-                <div class="section-header"><i class="fas fa-users"></i><h2><?= $t[$lang]['parents'] ?></h2></div>
+            <section class="section-card" data-section="2" aria-labelledby="sectionParentsHeading">
+                <div class="section-header"><i class="fas fa-users" aria-hidden="true"></i><h2 id="sectionParentsHeading"><?= $t[$lang]['parents'] ?></h2></div>
                 <div class="row g-3">
-                    <div class="col-md-6 form-group"><input type="text" name="father_name" id="father_name" placeholder=" " value="<?= htmlspecialchars($_POST['father_name'] ?? '') ?>"><label><i class="fas fa-male me-1"></i> <?= $t[$lang]['father'] ?></label></div>
-                    <div class="col-md-6 form-group <?= isset($errors['father_contact']) ? 'error' : '' ?>"><input type="tel" name="father_contact" id="father_contact" placeholder="09XXXXXXXXX" value="<?= htmlspecialchars($_POST['father_contact'] ?? '') ?>" pattern="09\d{9}" maxlength="11"><label><i class="fas fa-phone me-1"></i> <?= $t[$lang]['fcontact'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="father_occupation" id="father_occupation" placeholder=" " value="<?= htmlspecialchars($_POST['father_occupation'] ?? '') ?>"><label><i class="fas fa-briefcase me-1"></i> <?= $t[$lang]['fjob'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="mother_maiden_name" id="mother_maiden_name" placeholder=" " value="<?= htmlspecialchars($_POST['mother_maiden_name'] ?? '') ?>"><label><i class="fas fa-female me-1"></i> <?= $t[$lang]['mother'] ?></label></div>
-                    <div class="col-md-6 form-group <?= isset($errors['mother_contact']) ? 'error' : '' ?>"><input type="tel" name="mother_contact" id="mother_contact" placeholder="09XXXXXXXXX" value="<?= htmlspecialchars($_POST['mother_contact'] ?? '') ?>" pattern="09\d{9}" maxlength="11"><label><i class="fas fa-phone me-1"></i> <?= $t[$lang]['mcontact'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="mother_occupation" id="mother_occupation" placeholder=" " value="<?= htmlspecialchars($_POST['mother_occupation'] ?? '') ?>"><label><i class="fas fa-briefcase me-1"></i> <?= $t[$lang]['mjob'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="ave_family_income" id="ave_family_income" placeholder=" " value="<?= htmlspecialchars($_POST['ave_family_income'] ?? '') ?>"><label><i class="fas fa-money-bill-wave me-1"></i> <?= $t[$lang]['income'] ?></label></div>
-                    <div class="col-md-6 form-group <?= isset($errors['is_4ps']) ? 'error' : '' ?>"><select name="is_4ps" id="is_4ps" required><option value="" disabled <?= !isset($_POST['is_4ps']) || $_POST['is_4ps'] === '' ? 'selected' : '' ?>></option><option value="1" <?= (isset($_POST['is_4ps']) && $_POST['is_4ps'] == '1') ? 'selected' : '' ?>><?= $t[$lang]['yes'] ?></option><option value="0" <?= (isset($_POST['is_4ps']) && $_POST['is_4ps'] == '0') ? 'selected' : '' ?>><?= $t[$lang]['no'] ?></option></select><label><i class="fas fa-hand-holding-usd me-1"></i> <?= $t[$lang]['voucher_question'] ?></label></div>
-                    <div class="col-12 mt-4"><div class="section-header" style="border-bottom:none;padding-bottom:0"><i class="fas fa-shield-alt"></i><h5 class="text-primary mb-0"><?= $t[$lang]['guardian'] ?></h5></div></div>
-                    <div class="col-md-6 form-group"><input type="text" name="guardian_fullname" id="guardian_fullname" placeholder=" " value="<?= htmlspecialchars($_POST['guardian_fullname'] ?? '') ?>"><label><i class="fas fa-user-shield me-1"></i> <?= $t[$lang]['guardian_name'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="guardian_relation" id="guardian_relation" placeholder=" " value="<?= htmlspecialchars($_POST['guardian_relation'] ?? '') ?>"><label><i class="fas fa-handshake me-1"></i> <?= $t[$lang]['guardian_relation'] ?></label></div>
-                    <div class="col-md-6 form-group <?= isset($errors['guardian_contact']) ? 'error' : '' ?>"><input type="tel" name="guardian_contact" id="guardian_contact" placeholder="09XXXXXXXXX" value="<?= htmlspecialchars($_POST['guardian_contact'] ?? '') ?>" pattern="09\d{9}" maxlength="11"><label><i class="fas fa-phone-alt me-1"></i> <?= $t[$lang]['guardian_contact'] ?></label></div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="father_name" id="father_name" placeholder=" " value="<?= htmlspecialchars($_POST['father_name'] ?? '') ?>">
+                        <label for="father_name"><i class="fas fa-male me-1" aria-hidden="true"></i> <?= $t[$lang]['father'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group <?= $field_has_error('father_contact') ? 'error' : '' ?>">
+                        <input type="tel" name="father_contact" id="father_contact" placeholder="09XXXXXXXXX" value="<?= htmlspecialchars($_POST['father_contact'] ?? '') ?>" pattern="09\d{9}" maxlength="11" inputmode="numeric" aria-invalid="<?= $field_has_error('father_contact') ? 'true' : 'false' ?>" <?= $field_has_error('father_contact') ? 'aria-describedby="father_contact-error"' : '' ?>>
+                        <label for="father_contact"><i class="fas fa-phone me-1" aria-hidden="true"></i> <?= $t[$lang]['fcontact'] ?></label>
+                        <?php if($field_has_error('father_contact')): ?><span class="error-msg" id="father_contact-error"><?= htmlspecialchars($errors['father_contact']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="father_occupation" id="father_occupation" placeholder=" " value="<?= htmlspecialchars($_POST['father_occupation'] ?? '') ?>">
+                        <label for="father_occupation"><i class="fas fa-briefcase me-1" aria-hidden="true"></i> <?= $t[$lang]['fjob'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="mother_maiden_name" id="mother_maiden_name" placeholder=" " value="<?= htmlspecialchars($_POST['mother_maiden_name'] ?? '') ?>">
+                        <label for="mother_maiden_name"><i class="fas fa-female me-1" aria-hidden="true"></i> <?= $t[$lang]['mother'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group <?= $field_has_error('mother_contact') ? 'error' : '' ?>">
+                        <input type="tel" name="mother_contact" id="mother_contact" placeholder="09XXXXXXXXX" value="<?= htmlspecialchars($_POST['mother_contact'] ?? '') ?>" pattern="09\d{9}" maxlength="11" inputmode="numeric" aria-invalid="<?= $field_has_error('mother_contact') ? 'true' : 'false' ?>" <?= $field_has_error('mother_contact') ? 'aria-describedby="mother_contact-error"' : '' ?>>
+                        <label for="mother_contact"><i class="fas fa-phone me-1" aria-hidden="true"></i> <?= $t[$lang]['mcontact'] ?></label>
+                        <?php if($field_has_error('mother_contact')): ?><span class="error-msg" id="mother_contact-error"><?= htmlspecialchars($errors['mother_contact']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="mother_occupation" id="mother_occupation" placeholder=" " value="<?= htmlspecialchars($_POST['mother_occupation'] ?? '') ?>">
+                        <label for="mother_occupation"><i class="fas fa-briefcase me-1" aria-hidden="true"></i> <?= $t[$lang]['mjob'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="ave_family_income" id="ave_family_income" placeholder=" " value="<?= htmlspecialchars($_POST['ave_family_income'] ?? '') ?>">
+                        <label for="ave_family_income"><i class="fas fa-money-bill-wave me-1" aria-hidden="true"></i> <?= $t[$lang]['income'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group <?= $field_has_error('is_4ps') ? 'error' : '' ?>">
+                        <select name="is_4ps" id="is_4ps" required aria-required="true" aria-invalid="<?= $field_has_error('is_4ps') ? 'true' : 'false' ?>" <?= $field_has_error('is_4ps') ? 'aria-describedby="is_4ps-error"' : '' ?>>
+                            <option value="" disabled <?= !isset($_POST['is_4ps']) || $_POST['is_4ps'] === '' ? 'selected' : '' ?>></option>
+                            <option value="1" <?= (isset($_POST['is_4ps']) && $_POST['is_4ps'] == '1') ? 'selected' : '' ?>><?= $t[$lang]['yes'] ?></option>
+                            <option value="0" <?= (isset($_POST['is_4ps']) && $_POST['is_4ps'] == '0') ? 'selected' : '' ?>><?= $t[$lang]['no'] ?></option>
+                        </select>
+                        <label for="is_4ps"><i class="fas fa-hand-holding-usd me-1" aria-hidden="true"></i> <?= $t[$lang]['voucher_question'] ?></label>
+                        <?php if($field_has_error('is_4ps')): ?><span class="error-msg" id="is_4ps-error"><?= htmlspecialchars($errors['is_4ps']) ?></span><?php endif; ?>
+                    </div>
+
+                    <div class="col-12 mt-4">
+                        <div class="section-header" style="border-bottom:none;padding-bottom:0">
+                            <i class="fas fa-shield-alt" aria-hidden="true"></i>
+                            <h3 class="text-primary mb-0" style="font-size:1.1rem;"><?= $t[$lang]['guardian'] ?></h3>
+                        </div>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="guardian_fullname" id="guardian_fullname" placeholder=" " value="<?= htmlspecialchars($_POST['guardian_fullname'] ?? '') ?>">
+                        <label for="guardian_fullname"><i class="fas fa-user-shield me-1" aria-hidden="true"></i> <?= $t[$lang]['guardian_name'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="guardian_relation" id="guardian_relation" placeholder=" " value="<?= htmlspecialchars($_POST['guardian_relation'] ?? '') ?>">
+                        <label for="guardian_relation"><i class="fas fa-handshake me-1" aria-hidden="true"></i> <?= $t[$lang]['guardian_relation'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group <?= $field_has_error('guardian_contact') ? 'error' : '' ?>">
+                        <input type="tel" name="guardian_contact" id="guardian_contact" placeholder="09XXXXXXXXX" value="<?= htmlspecialchars($_POST['guardian_contact'] ?? '') ?>" pattern="09\d{9}" maxlength="11" inputmode="numeric" aria-invalid="<?= $field_has_error('guardian_contact') ? 'true' : 'false' ?>" <?= $field_has_error('guardian_contact') ? 'aria-describedby="guardian_contact-error"' : '' ?>>
+                        <label for="guardian_contact"><i class="fas fa-phone-alt me-1" aria-hidden="true"></i> <?= $t[$lang]['guardian_contact'] ?></label>
+                        <?php if($field_has_error('guardian_contact')): ?><span class="error-msg" id="guardian_contact-error"><?= htmlspecialchars($errors['guardian_contact']) ?></span><?php endif; ?>
+                    </div>
                 </div>
-            </div>
+            </section>
 
             <!-- ADDRESS SECTION -->
-            <div class="section-card" data-section="3">
-                <div class="section-header"><i class="fas fa-map-marker-alt"></i><h2><?= $t[$lang]['address'] ?></h2></div>
+            <section class="section-card" data-section="3" aria-labelledby="sectionAddressHeading">
+                <div class="section-header"><i class="fas fa-map-marker-alt" aria-hidden="true"></i><h2 id="sectionAddressHeading"><?= $t[$lang]['address'] ?></h2></div>
                 <div class="row g-3">
-                    <div class="col-md-6 form-group"><input type="text" name="purok_street" id="purok_street" placeholder=" " value="<?= htmlspecialchars($_POST['purok_street'] ?? '') ?>"><label><i class="fas fa-road me-1"></i> <?= $t[$lang]['street'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="barangay" id="barangay" placeholder=" " value="<?= htmlspecialchars($_POST['barangay'] ?? '') ?>"><label><i class="fas fa-home me-1"></i> <?= $t[$lang]['barangay'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="town_city" id="town_city" placeholder=" " value="<?= htmlspecialchars($_POST['town_city'] ?? '') ?>"><label><i class="fas fa-city me-1"></i> <?= $t[$lang]['city'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="province" id="province" placeholder=" " value="<?= htmlspecialchars($_POST['province'] ?? '') ?>"><label><i class="fas fa-globe-asia me-1"></i> <?= $t[$lang]['province'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="region" id="region" placeholder=" " value="<?= htmlspecialchars($_POST['region'] ?? '') ?>"><label><i class="fas fa-map me-1"></i> <?= $t[$lang]['region'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="district" id="district" placeholder=" " value="<?= htmlspecialchars($_POST['district'] ?? '') ?>"><label><i class="fas fa-chart-line me-1"></i> <?= $t[$lang]['district'] ?></label></div>
-                    <div class="col-md-6 form-group"><input type="text" name="postal_code" id="postal_code" placeholder=" " value="<?= htmlspecialchars($_POST['postal_code'] ?? '') ?>"><label><i class="fas fa-mail-bulk me-1"></i> <?= $t[$lang]['postal'] ?></label></div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="purok_street" id="purok_street" placeholder=" " value="<?= htmlspecialchars($_POST['purok_street'] ?? '') ?>" autocomplete="street-address">
+                        <label for="purok_street"><i class="fas fa-road me-1" aria-hidden="true"></i> <?= $t[$lang]['street'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="barangay" id="barangay" placeholder=" " value="<?= htmlspecialchars($_POST['barangay'] ?? '') ?>">
+                        <label for="barangay"><i class="fas fa-home me-1" aria-hidden="true"></i> <?= $t[$lang]['barangay'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="town_city" id="town_city" placeholder=" " value="<?= htmlspecialchars($_POST['town_city'] ?? '') ?>" autocomplete="address-level2">
+                        <label for="town_city"><i class="fas fa-city me-1" aria-hidden="true"></i> <?= $t[$lang]['city'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="province" id="province" placeholder=" " value="<?= htmlspecialchars($_POST['province'] ?? '') ?>" autocomplete="address-level1">
+                        <label for="province"><i class="fas fa-globe-asia me-1" aria-hidden="true"></i> <?= $t[$lang]['province'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="region" id="region" placeholder=" " value="<?= htmlspecialchars($_POST['region'] ?? '') ?>">
+                        <label for="region"><i class="fas fa-map me-1" aria-hidden="true"></i> <?= $t[$lang]['region'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="district" id="district" placeholder=" " value="<?= htmlspecialchars($_POST['district'] ?? '') ?>">
+                        <label for="district"><i class="fas fa-chart-line me-1" aria-hidden="true"></i> <?= $t[$lang]['district'] ?></label>
+                    </div>
+                    <div class="col-md-6 form-group">
+                        <input type="text" name="postal_code" id="postal_code" placeholder=" " value="<?= htmlspecialchars($_POST['postal_code'] ?? '') ?>" inputmode="numeric" autocomplete="postal-code">
+                        <label for="postal_code"><i class="fas fa-mail-bulk me-1" aria-hidden="true"></i> <?= $t[$lang]['postal'] ?></label>
+                    </div>
                 </div>
-            </div>
+            </section>
 
             <!-- EDUCATIONAL HISTORY -->
-            <div class="section-card" data-section="4">
-                <div class="section-header"><i class="fas fa-graduation-cap"></i><h2><?= $t[$lang]['education'] ?></h2></div>
-                <div id="edu-container"><?php foreach ($edu_history as $edu): ?><div class="edu-entry row g-3 align-items-end"><div class="col-md-3 form-group filled"><select name="edu_level[]" class="edu-level" style="background:white"><option value="Elementary" <?= ($edu['level']=='Elementary')?'selected':'' ?>><?= $t[$lang]['elem'] ?></option><option value="JHS" <?= ($edu['level']=='JHS')?'selected':'' ?>><?= $t[$lang]['jhs'] ?></option><option value="Transferred" <?= ($edu['level']=='Transferred')?'selected':'' ?>><?= $t[$lang]['trans'] ?></option></select><label>Level</label></div><div class="col-md-3 form-group"><input type="text" name="school_name[]" placeholder=" " value="<?= htmlspecialchars($edu['school_name']) ?>"><label><?= $t[$lang]['school_name'] ?></label></div><div class="col-md-3 form-group"><input type="text" name="school_address[]" placeholder=" " value="<?= htmlspecialchars($edu['school_address']) ?>"><label><?= $t[$lang]['school_addr'] ?></label></div><div class="col-md-3 form-group"><input type="text" name="year_completed[]" placeholder=" " value="<?= htmlspecialchars($edu['year_completed']) ?>"><label><?= $t[$lang]['year_comp'] ?></label></div></div><?php endforeach; ?></div>
-                <button type="button" class="btn btn-add mt-3" id="addEduBtn"><i class="fas fa-plus me-2"></i><?= $t[$lang]['add_school'] ?></button>
-            </div>
-
-            <!-- ENROLLMENT DETAILS -->
-            <div class="section-card" data-section="5">
-                <div class="section-header"><i class="fas fa-clipboard-list"></i><h2><?= $t[$lang]['enrollment'] ?></h2></div>
-                <div class="row g-3">
-                    <div class="col-md-3 form-group <?= isset($errors['school_year']) ? 'error' : '' ?>"><input type="text" name="school_year" id="school_year" placeholder=" " value="<?= htmlspecialchars($_POST['school_year'] ?? '2026-2027') ?>" required><label><i class="fas fa-calendar me-1"></i> <?= $t[$lang]['sy'] ?></label></div>
-                    <div class="col-md-3 form-group <?= isset($errors['grade_level']) ? 'error' : '' ?>"><select name="grade_level" id="grade_level" required><option value="" disabled selected></option><option value="Grade 11" <?= ($_POST['grade_level'] ?? '') == 'Grade 11' ? 'selected' : '' ?>>Grade 11</option><option value="Grade 12" <?= ($_POST['grade_level'] ?? '') == 'Grade 12' ? 'selected' : '' ?>>Grade 12</option></select><label><i class="fas fa-layer-group me-1"></i> <?= $t[$lang]['grade'] ?></label></div>
-                    <div class="col-md-3 form-group <?= isset($errors['semester']) ? 'error' : '' ?>"><select name="semester" id="semester" required><option value="" disabled selected></option><option value="1st Semester" <?= ($_POST['semester'] ?? '') == '1st Semester' ? 'selected' : '' ?>>1st Semester</option><option value="2nd Semester" <?= ($_POST['semester'] ?? '') == '2nd Semester' ? 'selected' : '' ?>>2nd Semester</option></select><label><i class="fas fa-chart-simple me-1"></i> <?= $t[$lang]['semester'] ?></label></div>
-                    <div class="col-md-3 form-group"><input type="text" name="track" value="TECHPRO ELECTIVES" readonly required style="background:#f8f9fa;cursor:not-allowed"><label><i class="fas fa-road me-1"></i> <?= $t[$lang]['track'] ?></label></div>
-                </div>
-                <div class="row g-3 mt-2"><div class="col-md-6 form-group <?= isset($errors['strand']) ? 'error' : '' ?>"><select name="strand" id="strand" required><option value="" disabled selected></option></select><label><i class="fas fa-tree me-1"></i> <?= $t[$lang]['strand'] ?></label></div><div class="col-md-6 form-group <?= isset($errors['program']) ? 'error' : '' ?>"><select name="program" id="program" required><option value="" disabled selected></option></select><label><i class="fas fa-code-branch me-1"></i> <?= $t[$lang]['program'] ?></label></div></div>
-                <div class="form-group mt-3"><input type="text" name="household_id" id="household_id" placeholder=" " value="<?= htmlspecialchars($_POST['household_id'] ?? '') ?>"><label><i class="fas fa-home me-1"></i> <?= $t[$lang]['household'] ?></label></div>
-                <div class="mt-4"><div class="form-check"><input class="form-check-input" type="checkbox" name="is_transferred" id="is_transferred" value="1" style="width:18px;height:18px" <?= !empty($_POST['is_transferred']) ? 'checked' : '' ?>><label class="form-check-label fw-bold ms-2" for="is_transferred"><i class="fas fa-exchange-alt me-1 text-primary"></i> <?= $t[$lang]['transferred_in'] ?></label></div>
-                <div id="transferee-fields" class="transferee-section" style="display:<?= !empty($_POST['is_transferred']) ? 'block' : 'none' ?>"><div class="row g-3"><div class="col-md-6 form-group"><input type="text" name="previous_school_name" placeholder=" " value="<?= htmlspecialchars($_POST['previous_school_name'] ?? '') ?>"><label><?= $t[$lang]['prev_school_name'] ?></label></div><div class="col-md-6 form-group"><textarea name="previous_school_address" rows="2" placeholder=" "><?= htmlspecialchars($_POST['previous_school_address'] ?? '') ?></textarea><label><?= $t[$lang]['prev_school_address'] ?></label></div><div class="col-md-4 form-group"><input type="text" name="previous_track" placeholder=" " value="<?= htmlspecialchars($_POST['previous_track'] ?? '') ?>"><label><?= $t[$lang]['prev_track'] ?></label></div><div class="col-md-4 form-group"><input type="text" name="previous_strand" placeholder=" " value="<?= htmlspecialchars($_POST['previous_strand'] ?? '') ?>"><label><?= $t[$lang]['prev_strand'] ?></label></div><div class="col-md-4 form-group"><input type="text" name="previous_program" placeholder=" " value="<?= htmlspecialchars($_POST['previous_program'] ?? '') ?>"><label><?= $t[$lang]['prev_program'] ?></label></div><div class="col-md-4 form-group"><input type="number" name="previous_year_completed" placeholder=" " value="<?= htmlspecialchars($_POST['previous_year_completed'] ?? '') ?>" min="2000" max="<?= date('Y') ?>"><label><?= $t[$lang]['prev_year_completed'] ?></label></div></div><div class="mt-4"><label class="form-label fw-bold mb-2"><?= $t[$lang]['voucher_qualified'] ?></label><div class="d-flex gap-4"><div class="form-check"><input class="form-check-input" type="radio" name="voucher_qualified" id="vq_yes" value="1" <?= ($_POST['voucher_qualified'] ?? '') == '1' ? 'checked' : '' ?>><label class="form-check-label" for="vq_yes"><?= $t[$lang]['qualified_voucher'] ?></label></div><div class="form-check"><input class="form-check-input" type="radio" name="voucher_qualified" id="vq_no" value="0" <?= ($_POST['voucher_qualified'] ?? '') == '0' ? 'checked' : '' ?>><label class="form-check-label" for="vq_no"><?= $t[$lang]['not_qualified_voucher'] ?></label></div></div></div></div></div>
-            </div>
-
-            <!-- ENTRANCE DOCUMENTS -->
-            <div class="section-card">
-                <div class="section-header"><i class="fas fa-folder-open"></i><h2><?= $t[$lang]['entrance_data'] ?></h2></div>
-
-                <div class="checkbox-container">
-                    <?php foreach ($doc_options as $doc_name => $doc_key): ?>
-                        <div class="checkbox-item">
-                            <input type="checkbox" name="entrance_data[]" value="<?= htmlspecialchars($doc_name) ?>" id="<?= $doc_key ?>"
-                                <?= in_array($doc_name, $_POST['entrance_data'] ?? [], true) ? 'checked' : '' ?>>
-                            <label for="<?= $doc_key ?>"><i class="fas fa-check-circle me-2 text-primary"></i><?= $t[$lang][$doc_key] ?></label>
+            <section class="section-card" data-section="4" aria-labelledby="sectionEducationHeading">
+                <div class="section-header"><i class="fas fa-graduation-cap" aria-hidden="true"></i><h2 id="sectionEducationHeading"><?= $t[$lang]['education'] ?></h2></div>
+                <div id="edu-container">
+                    <?php foreach ($edu_history as $idx => $edu): ?>
+                        <div class="edu-entry row g-3 align-items-end" role="group" aria-label="Education entry <?= $idx + 1 ?>">
+                            <div class="col-md-3 form-group filled">
+                                <select name="edu_level[]" class="edu-level" id="edu_level_<?= $idx ?>" style="background:white">
+                                    <option value="Elementary" <?= ($edu['level']=='Elementary')?'selected':'' ?>><?= $t[$lang]['elem'] ?></option>
+                                    <option value="JHS" <?= ($edu['level']=='JHS')?'selected':'' ?>><?= $t[$lang]['jhs'] ?></option>
+                                    <option value="Transferred" <?= ($edu['level']=='Transferred')?'selected':'' ?>><?= $t[$lang]['trans'] ?></option>
+                                </select>
+                                <label for="edu_level_<?= $idx ?>"><?= $t[$lang]['level_label'] ?></label>
+                            </div>
+                            <div class="col-md-3 form-group">
+                                <input type="text" name="school_name[]" id="school_name_<?= $idx ?>" placeholder=" " value="<?= htmlspecialchars($edu['school_name']) ?>">
+                                <label for="school_name_<?= $idx ?>"><?= $t[$lang]['school_name'] ?></label>
+                            </div>
+                            <div class="col-md-3 form-group">
+                                <input type="text" name="school_address[]" id="school_address_<?= $idx ?>" placeholder=" " value="<?= htmlspecialchars($edu['school_address']) ?>">
+                                <label for="school_address_<?= $idx ?>"><?= $t[$lang]['school_addr'] ?></label>
+                            </div>
+                            <div class="col-md-3 form-group">
+                                <input type="text" name="year_completed[]" id="year_completed_<?= $idx ?>" placeholder=" " value="<?= htmlspecialchars($edu['year_completed']) ?>" inputmode="numeric">
+                                <label for="year_completed_<?= $idx ?>"><?= $t[$lang]['year_comp'] ?></label>
+                            </div>
                         </div>
                     <?php endforeach; ?>
                 </div>
-                <?php if(isset($errors['entrance_data'])): ?><span class="error-msg"><i class="fas fa-exclamation-triangle me-1"></i><?= $errors['entrance_data'] ?></span><?php endif; ?>
-                <?php if(isset($errors['upload'])): ?>
-                    <div class="alert alert-danger mt-2">
-                        <i class="fas fa-exclamation-triangle me-1"></i><?= htmlspecialchars($errors['upload']) ?>
+                <button type="button" class="btn btn-add mt-3" id="addEduBtn"><i class="fas fa-plus me-2" aria-hidden="true"></i><?= $t[$lang]['add_school'] ?></button>
+            </section>
+
+            <!-- ENROLLMENT DETAILS -->
+            <section class="section-card" data-section="5" aria-labelledby="sectionEnrollmentHeading">
+                <div class="section-header"><i class="fas fa-clipboard-list" aria-hidden="true"></i><h2 id="sectionEnrollmentHeading"><?= $t[$lang]['enrollment'] ?></h2></div>
+                <div class="row g-3">
+                    <div class="col-md-3 form-group <?= $field_has_error('school_year') ? 'error' : '' ?>">
+                        <input type="text" name="school_year" id="school_year" placeholder=" " value="<?= htmlspecialchars($_POST['school_year'] ?? '2026-2027') ?>" required aria-required="true" aria-invalid="<?= $field_has_error('school_year') ? 'true' : 'false' ?>" <?= $field_has_error('school_year') ? 'aria-describedby="school_year-error"' : '' ?>>
+                        <label for="school_year"><i class="fas fa-calendar me-1" aria-hidden="true"></i> <?= $t[$lang]['sy'] ?></label>
+                        <?php if($field_has_error('school_year')): ?><span class="error-msg" id="school_year-error"><?= htmlspecialchars($errors['school_year']) ?></span><?php endif; ?>
                     </div>
+                    <div class="col-md-3 form-group <?= $field_has_error('grade_level') ? 'error' : '' ?>">
+                        <select name="grade_level" id="grade_level" required aria-required="true" aria-invalid="<?= $field_has_error('grade_level') ? 'true' : 'false' ?>" <?= $field_has_error('grade_level') ? 'aria-describedby="grade_level-error"' : '' ?>>
+                            <option value="" disabled selected></option>
+                            <option value="Grade 11" <?= ($_POST['grade_level'] ?? '') == 'Grade 11' ? 'selected' : '' ?>>Grade 11</option>
+                            <option value="Grade 12" <?= ($_POST['grade_level'] ?? '') == 'Grade 12' ? 'selected' : '' ?>>Grade 12</option>
+                        </select>
+                        <label for="grade_level"><i class="fas fa-layer-group me-1" aria-hidden="true"></i> <?= $t[$lang]['grade'] ?></label>
+                        <?php if($field_has_error('grade_level')): ?><span class="error-msg" id="grade_level-error"><?= htmlspecialchars($errors['grade_level']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-3 form-group <?= $field_has_error('semester') ? 'error' : '' ?>">
+                        <select name="semester" id="semester" required aria-required="true" aria-invalid="<?= $field_has_error('semester') ? 'true' : 'false' ?>" <?= $field_has_error('semester') ? 'aria-describedby="semester-error"' : '' ?>>
+                            <option value="" disabled selected></option>
+                            <option value="1st Semester" <?= ($_POST['semester'] ?? '') == '1st Semester' ? 'selected' : '' ?>>1st Semester</option>
+                            <option value="2nd Semester" <?= ($_POST['semester'] ?? '') == '2nd Semester' ? 'selected' : '' ?>>2nd Semester</option>
+                        </select>
+                        <label for="semester"><i class="fas fa-chart-simple me-1" aria-hidden="true"></i> <?= $t[$lang]['semester'] ?></label>
+                        <?php if($field_has_error('semester')): ?><span class="error-msg" id="semester-error"><?= htmlspecialchars($errors['semester']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-3 form-group">
+                        <input type="text" name="track" id="track" value="TECHPRO ELECTIVES" readonly required style="background:#f8f9fa;cursor:not-allowed" aria-readonly="true">
+                        <label for="track"><i class="fas fa-road me-1" aria-hidden="true"></i> <?= $t[$lang]['track'] ?></label>
+                    </div>
+                </div>
+                <div class="row g-3 mt-2">
+                    <div class="col-md-6 form-group <?= $field_has_error('strand') ? 'error' : '' ?>">
+                        <select name="strand" id="strand" required aria-required="true" aria-invalid="<?= $field_has_error('strand') ? 'true' : 'false' ?>" <?= $field_has_error('strand') ? 'aria-describedby="strand-error"' : '' ?>>
+                            <option value="" disabled selected></option>
+                        </select>
+                        <label for="strand"><i class="fas fa-tree me-1" aria-hidden="true"></i> <?= $t[$lang]['strand'] ?></label>
+                        <?php if($field_has_error('strand')): ?><span class="error-msg" id="strand-error"><?= htmlspecialchars($errors['strand']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="col-md-6 form-group <?= $field_has_error('program') ? 'error' : '' ?>">
+                        <select name="program" id="program" required aria-required="true" aria-invalid="<?= $field_has_error('program') ? 'true' : 'false' ?>" <?= $field_has_error('program') ? 'aria-describedby="program-error"' : '' ?>>
+                            <option value="" disabled selected></option>
+                        </select>
+                        <label for="program"><i class="fas fa-code-branch me-1" aria-hidden="true"></i> <?= $t[$lang]['program'] ?></label>
+                        <?php if($field_has_error('program')): ?><span class="error-msg" id="program-error"><?= htmlspecialchars($errors['program']) ?></span><?php endif; ?>
+                    </div>
+                </div>
+                <div class="form-group mt-3">
+                    <input type="text" name="household_id" id="household_id" placeholder=" " value="<?= htmlspecialchars($_POST['household_id'] ?? '') ?>">
+                    <label for="household_id"><i class="fas fa-home me-1" aria-hidden="true"></i> <?= $t[$lang]['household'] ?></label>
+                </div>
+                <div class="mt-4">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="is_transferred" id="is_transferred" value="1" style="width:18px;height:18px" <?= !empty($_POST['is_transferred']) ? 'checked' : '' ?>>
+                        <label class="form-check-label fw-bold ms-2" for="is_transferred"><i class="fas fa-exchange-alt me-1 text-primary" aria-hidden="true"></i> <?= $t[$lang]['transferred_in'] ?></label>
+                    </div>
+                    <div id="transferee-fields" class="transferee-section" style="display:<?= !empty($_POST['is_transferred']) ? 'block' : 'none' ?>">
+                        <div class="row g-3">
+                            <div class="col-md-6 form-group">
+                                <input type="text" name="previous_school_name" id="previous_school_name" placeholder=" " value="<?= htmlspecialchars($_POST['previous_school_name'] ?? '') ?>">
+                                <label for="previous_school_name"><?= $t[$lang]['prev_school_name'] ?></label>
+                            </div>
+                            <div class="col-md-6 form-group">
+                                <textarea name="previous_school_address" id="previous_school_address" rows="2" placeholder=" "><?= htmlspecialchars($_POST['previous_school_address'] ?? '') ?></textarea>
+                                <label for="previous_school_address"><?= $t[$lang]['prev_school_address'] ?></label>
+                            </div>
+                            <div class="col-md-4 form-group">
+                                <input type="text" name="previous_track" id="previous_track" placeholder=" " value="<?= htmlspecialchars($_POST['previous_track'] ?? '') ?>">
+                                <label for="previous_track"><?= $t[$lang]['prev_track'] ?></label>
+                            </div>
+                            <div class="col-md-4 form-group">
+                                <input type="text" name="previous_strand" id="previous_strand" placeholder=" " value="<?= htmlspecialchars($_POST['previous_strand'] ?? '') ?>">
+                                <label for="previous_strand"><?= $t[$lang]['prev_strand'] ?></label>
+                            </div>
+                            <div class="col-md-4 form-group">
+                                <input type="text" name="previous_program" id="previous_program" placeholder=" " value="<?= htmlspecialchars($_POST['previous_program'] ?? '') ?>">
+                                <label for="previous_program"><?= $t[$lang]['prev_program'] ?></label>
+                            </div>
+                            <div class="col-md-4 form-group">
+                                <input type="number" name="previous_year_completed" id="previous_year_completed" placeholder=" " value="<?= htmlspecialchars($_POST['previous_year_completed'] ?? '') ?>" min="2000" max="<?= date('Y') ?>">
+                                <label for="previous_year_completed"><?= $t[$lang]['prev_year_completed'] ?></label>
+                            </div>
+                        </div>
+                        <fieldset class="mt-4" style="border:0;padding:0;">
+                            <legend class="form-label fw-bold mb-2" style="font-size:0.95rem;float:none;width:auto;"><?= $t[$lang]['voucher_qualified'] ?></legend>
+                            <div class="d-flex gap-4 flex-wrap">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="voucher_qualified" id="vq_yes" value="1" <?= ($_POST['voucher_qualified'] ?? '') == '1' ? 'checked' : '' ?>>
+                                    <label class="form-check-label" for="vq_yes"><?= $t[$lang]['qualified_voucher'] ?></label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="voucher_qualified" id="vq_no" value="0" <?= ($_POST['voucher_qualified'] ?? '') == '0' ? 'checked' : '' ?>>
+                                    <label class="form-check-label" for="vq_no"><?= $t[$lang]['not_qualified_voucher'] ?></label>
+                                </div>
+                            </div>
+                        </fieldset>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ENTRANCE DOCUMENTS -->
+            <section class="section-card" data-section="6" aria-labelledby="sectionDocsHeading">
+                <div class="section-header"><i class="fas fa-folder-open" aria-hidden="true"></i><h2 id="sectionDocsHeading"><?= $t[$lang]['entrance_data'] ?></h2></div>
+                <fieldset class="doc-fieldset" aria-describedby="entranceHelp">
+                    <legend class="sr-only"><?= $t[$lang]['entrance_data'] ?></legend>
+                    <p id="entranceHelp" class="sr-only">Check every document you are submitting. Each checked item reveals upload and capture options.</p>
+                    <div class="checkbox-container">
+                        <?php foreach ($doc_options as $doc_name => $doc_key): ?>
+                            <div class="checkbox-item">
+                                <input type="checkbox" name="entrance_data[]" value="<?= htmlspecialchars($doc_name) ?>" id="<?= $doc_key ?>" <?= in_array($doc_name, $_POST['entrance_data'] ?? [], true) ? 'checked' : '' ?>>
+                                <label for="<?= $doc_key ?>"><i class="fas fa-check-circle me-2 text-primary" aria-hidden="true"></i><?= $t[$lang][$doc_key] ?></label>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                </fieldset>
+                <?php if(isset($errors['entrance_data'])): ?>
+                    <span class="error-msg" role="alert"><i class="fas fa-exclamation-triangle me-1" aria-hidden="true"></i><?= htmlspecialchars($errors['entrance_data']) ?></span>
                 <?php endif; ?>
 
                 <div class="mt-3">
@@ -874,93 +1049,76 @@ $display_files = isset($_SESSION['uploaded_files']) ? $_SESSION['uploaded_files'
                         $has_upload = $file_info !== null;
                         $is_checked = in_array($doc_name, $_POST['entrance_data'] ?? [], true);
                         $show_row = $is_checked || $has_upload;
+                        $row_id = 'uploadRow_' . $doc_key;
+                        $file_input_id = 'file_' . $doc_key;
                     ?>
-                        <div class="doc-upload-row <?= $show_row ? 'visible' : '' ?>" id="uploadRow_<?= $doc_key ?>">
+                        <div class="doc-upload-row <?= $show_row ? 'visible' : '' ?>" id="<?= $row_id ?>">
                             <div class="upload-row row g-3 align-items-end <?= $has_upload ? 'has-file' : '' ?>">
                                 <div class="col-md-4">
-                                    <label class="form-label small fw-semibold">Document Label</label>
-                                    <input type="text" class="form-control" value="<?= htmlspecialchars($doc_name) ?>" readonly>
+                                    <label class="form-label small fw-semibold" for="label_<?= $doc_key ?>"><?= $t[$lang]['document_label'] ?></label>
+                                    <input type="text" class="form-control" id="label_<?= $doc_key ?>" value="<?= htmlspecialchars($doc_name) ?>" readonly aria-readonly="true">
                                 </div>
                                 <div class="col-md-3">
-                                    <label class="form-label small fw-semibold">Upload File</label>
-                                    <input type="file"
-                                           name="entrance_files[<?= $doc_key ?>]"
-                                           class="form-control"
-                                           accept=".pdf,.jpg,.jpeg,.png"
-                                           <?php if ($has_upload): ?>disabled style="background:#e9ecef"<?php endif; ?>>
+                                    <label class="form-label small fw-semibold" for="<?= $file_input_id ?>"><?= $t[$lang]['upload_file'] ?></label>
+                                    <input type="file" id="<?= $file_input_id ?>" name="entrance_files[<?= $doc_key ?>]" class="form-control" accept=".pdf,.jpg,.jpeg,.png" aria-describedby="<?= $file_input_id ?>_hint" <?php if ($has_upload): ?>disabled style="background:#e9ecef"<?php endif; ?>>
                                     <?php if ($has_upload): ?>
-                                        <small class="text-success"><i class="fas fa-check-circle"></i> Already staged — re-upload to replace</small>
+                                        <small class="text-success" id="<?= $file_input_id ?>_hint"><i class="fas fa-check-circle" aria-hidden="true"></i> <?= $t[$lang]['already_staged'] ?></small>
+                                    <?php else: ?>
+                                        <small id="<?= $file_input_id ?>_hint" class="sr-only">Accepted formats: PDF, JPG, PNG. Maximum size 5 megabytes.</small>
                                     <?php endif; ?>
                                 </div>
                                 <div class="col-md-3">
-                                    <label class="form-label small fw-semibold">or Capture</label>
-                                    <button type="button" class="btn btn-capture btn-sm w-100" onclick="openCamera('<?= $doc_key ?>')"><i class="fas fa-camera me-1"></i> <?= $t[$lang]['capture'] ?></button>
+                                    <span class="form-label small fw-semibold" id="capture_label_<?= $doc_key ?>"><?= $t[$lang]['or_capture'] ?></span>
+                                    <button type="button" class="btn btn-capture btn-sm w-100" onclick="openCamera('<?= $doc_key ?>')" aria-describedby="capture_label_<?= $doc_key ?>" aria-haspopup="dialog">
+                                        <i class="fas fa-camera me-1" aria-hidden="true"></i> <?= $t[$lang]['capture'] ?>
+                                    </button>
                                 </div>
                                 <div class="col-md-2">
                                     <?php if ($has_upload): ?>
-                                        <span class="badge bg-success" style="word-break:break-all;"><i class="fas fa-check-circle"></i> <?= htmlspecialchars($file_info['name']) ?> (<?= round(($file_info['size'] ?? 0) / 1024, 1) ?> KB)</span>
+                                        <span class="badge bg-success" style="word-break:break-all;"><i class="fas fa-check-circle" aria-hidden="true"></i> <?= htmlspecialchars($file_info['name']) ?> (<?= round(($file_info['size'] ?? 0) / 1024, 1) ?> KB)</span>
                                     <?php endif; ?>
-                                    <div class="preview-thumb" id="preview_<?= $doc_key ?>" style="display:none"><img src="" class="preview-thumb" id="previewImg_<?= $doc_key ?>"></div>
+                                    <div class="preview-thumb" id="preview_<?= $doc_key ?>" style="display:none">
+                                        <img src="" alt="<?= htmlspecialchars($t[$lang]['photo_preview']) ?>" id="previewImg_<?= $doc_key ?>">
+                                    </div>
                                     <input type="hidden" name="camera_data[<?= $doc_key ?>]" id="cameraData_<?= $doc_key ?>" value="">
                                 </div>
                             </div>
                         </div>
                     <?php endforeach; ?>
                 </div>
-            </div>
+            </section>
 
             <div class="text-center mt-5 mb-4">
-                <button type="submit" class="btn btn-submit btn-custom px-5"><i class="fas fa-paper-plane me-2"></i><?= $t[$lang]['submit'] ?></button>
-                <a href="../admin/admin_login.php" class="btn btn-back btn-custom px-5 ms-3"><i class="fas fa-arrow-left me-2"></i><?= $t[$lang]['back'] ?></a>
+                <button type="submit" class="btn btn-submit btn-custom px-5"><i class="fas fa-paper-plane me-2" aria-hidden="true"></i><?= $t[$lang]['submit'] ?></button>
+                <a href="../admin/admin_login.php" class="btn btn-back btn-custom px-5 ms-3"><i class="fas fa-arrow-left me-2" aria-hidden="true"></i><?= $t[$lang]['back'] ?></a>
             </div>
         </form>
     <?php else: ?>
         <!-- REVIEW MODE -->
         <?php
-            $full_name = trim(
-                ($_POST['first_name'] ?? '') . ' ' .
-                ($_POST['middle_name'] ?? '') . ' ' .
-                ($_POST['last_name'] ?? '') . ' ' .
-                ($_POST['ext_name'] ?? '')
-            );
+            $full_name = trim(($_POST['first_name'] ?? '') . ' ' . ($_POST['middle_name'] ?? '') . ' ' . ($_POST['last_name'] ?? '') . ' ' . ($_POST['ext_name'] ?? ''));
             $full_name_display = $full_name !== '' ? preg_replace('/\s+/', ' ', $full_name) : '—';
-
-            $birth_display = !empty($_POST['birth_date'])
-                ? date('F d, Y', strtotime($_POST['birth_date']))
-                : '—';
-
+            $birth_display = !empty($_POST['birth_date']) ? date('F d, Y', strtotime($_POST['birth_date'])) : '—';
             $vq = $_POST['voucher_qualified'] ?? '';
-            $voucher_display = $vq === '1'
-                ? $t[$lang]['qualified_voucher']
-                : ($vq === '0' ? $t[$lang]['not_qualified_voucher'] : '—');
-
-            $section_display = !empty($_POST['section'])
-                ? $_POST['section']
-                : ($_POST['strand'] ?? '—');
+            $voucher_display = $vq === '1' ? $t[$lang]['qualified_voucher'] : ($vq === '0' ? $t[$lang]['not_qualified_voucher'] : '—');
+            $section_display = !empty($_POST['section']) ? $_POST['section'] : ($_POST['strand'] ?? '—');
         ?>
 
         <div class="review-container">
-
             <div class="text-center mb-4">
-                <i class="fas fa-check-circle" style="font-size:4rem;color:#28a745"></i>
-                <h1 class="mt-3" style="color:#1e88e5"><?= $t[$lang]['form'] ?> — Review &amp; Confirm</h1>
-                <p class="text-muted">Please review your information before submitting</p>
+                <i class="fas fa-check-circle" style="font-size:4rem;color:#047857" aria-hidden="true"></i>
+                <h1 class="mt-3" style="color:#1565c0"><?= $t[$lang]['form'] ?> — <?= $t[$lang]['review_confirm'] ?></h1>
+                <p class="text-muted"><?= $t[$lang]['review_help'] ?></p>
             </div>
 
-            <div class="review-section" style="background:linear-gradient(135deg,#eef2ff,#e0e7ff);border-left-color:#4f46e5">
+            <section class="review-section" style="background:linear-gradient(135deg,#eef2ff,#e0e7ff);border-left-color:#4f46e5" aria-label="Summary">
                 <div class="row g-3">
                     <div class="col-md-8">
-                        <h3 class="mb-2" style="color:#1e3c72"><i class="fas fa-user-graduate me-2"></i><?= htmlspecialchars($full_name_display) ?></h3>
+                        <h2 class="mb-2" style="color:#1e3c72;font-size:1.4rem;"><i class="fas fa-user-graduate me-2" aria-hidden="true"></i><?= htmlspecialchars($full_name_display) ?></h2>
                         <div class="d-flex flex-wrap gap-3 small">
-                            <?php if (!empty($_POST['lrn'])): ?>
-                                <span><strong>LRN:</strong> <?= htmlspecialchars($_POST['lrn']) ?></span>
-                            <?php endif; ?>
-                            <?php if (!empty($_POST['sex'])): ?>
-                                <span><strong>Sex:</strong> <?= htmlspecialchars($_POST['sex']) ?></span>
-                            <?php endif; ?>
-                            <?php if (!empty($_POST['age'])): ?>
-                                <span><strong>Age:</strong> <?= htmlspecialchars($_POST['age']) ?></span>
-                            <?php endif; ?>
+                            <?php if (!empty($_POST['lrn'])): ?><span><strong>LRN:</strong> <?= htmlspecialchars($_POST['lrn']) ?></span><?php endif; ?>
+                            <?php if (!empty($_POST['sex'])): ?><span><strong>Sex:</strong> <?= htmlspecialchars($_POST['sex']) ?></span><?php endif; ?>
+                            <?php if (!empty($_POST['age'])): ?><span><strong>Age:</strong> <?= htmlspecialchars($_POST['age']) ?></span><?php endif; ?>
                         </div>
                     </div>
                     <div class="col-md-4 text-md-end">
@@ -971,101 +1129,67 @@ $display_files = isset($_SESSION['uploaded_files']) ? $_SESSION['uploaded_files'
                         </div>
                     </div>
                 </div>
-            </div>
+            </section>
 
-            <div class="review-section">
-                <h3><i class="fas fa-user-graduate me-2"></i><?= $t[$lang]['student'] ?></h3>
-                <div class="review-grid">
+            <section class="review-section" aria-labelledby="revStudentHeading">
+                <h2 id="revStudentHeading" style="font-size:1.2rem;"><i class="fas fa-user-graduate me-2" aria-hidden="true"></i><?= $t[$lang]['student'] ?></h2>
+                <dl class="review-grid" style="margin:0;">
                     <?php
-                    $student_fields = [
-                        'lrn'            => 'LRN',
-                        'last_name'      => 'Last Name',
-                        'first_name'     => 'First Name',
-                        'middle_name'    => 'Middle Name',
-                        'nick_name'      => 'Nickname',
-                        'ext_name'       => 'Extension Name',
-                        'sex'            => 'Sex',
-                        'birth_date'     => 'Birth Date',
-                        'age'            => 'Age',
-                        'civil_status'   => 'Civil Status',
-                        'nationality'    => 'Nationality',
-                        'religion'       => 'Religion',
-                        'height'         => 'Height',
-                        'weight'         => 'Weight',
-                        'email'          => 'Email',
-                        'phone'          => 'Phone',
-                        'special_skills' => 'Special Skills',
-                    ];
+                    $student_fields = ['lrn'=>'LRN','last_name'=>'Last Name','first_name'=>'First Name','middle_name'=>'Middle Name','nick_name'=>'Nickname','ext_name'=>'Extension Name','sex'=>'Sex','birth_date'=>'Birth Date','age'=>'Age','civil_status'=>'Civil Status','nationality'=>'Nationality','religion'=>'Religion','height'=>'Height','weight'=>'Weight','email'=>'Email','phone'=>'Phone','special_skills'=>'Special Skills'];
                     foreach ($student_fields as $k => $l):
                         $val = $_POST[$k] ?? '';
                         if ($k === 'birth_date' && $val !== '') $val = $birth_display;
-                        if ($k === 'height'     && $val !== '') $val .= ' cm';
-                        if ($k === 'weight'     && $val !== '') $val .= ' kg';
+                        if ($k === 'height' && $val !== '') $val .= ' cm';
+                        if ($k === 'weight' && $val !== '') $val .= ' kg';
                     ?>
-                        <div class="review-item"><strong><?= $l ?>:</strong> <?= htmlspecialchars($val !== '' ? $val : '—') ?></div>
+                        <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;"><?= $l ?>:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($val !== '' ? $val : '—') ?></dd></div>
                     <?php endforeach; ?>
-                </div>
-            </div>
+                </dl>
+            </section>
 
-            <div class="review-section">
-                <h3><i class="fas fa-users me-2"></i><?= $t[$lang]['parents'] ?></h3>
-                <div class="review-grid">
+            <section class="review-section" aria-labelledby="revParentsHeading">
+                <h2 id="revParentsHeading" style="font-size:1.2rem;"><i class="fas fa-users me-2" aria-hidden="true"></i><?= $t[$lang]['parents'] ?></h2>
+                <dl class="review-grid" style="margin:0;">
                     <?php
-                    $parent_fields = [
-                        'father_name'        => 'Father Name',
-                        'father_occupation'  => 'Father Occupation',
-                        'father_contact'     => 'Father Contact',
-                        'mother_maiden_name' => 'Mother Maiden Name',
-                        'mother_occupation'  => 'Mother Occupation',
-                        'mother_contact'     => 'Mother Contact',
-                        'ave_family_income'  => 'Average Family Income',
-                    ];
+                    $parent_fields = ['father_name'=>'Father Name','father_occupation'=>'Father Occupation','father_contact'=>'Father Contact','mother_maiden_name'=>'Mother Maiden Name','mother_occupation'=>'Mother Occupation','mother_contact'=>'Mother Contact','ave_family_income'=>'Average Family Income'];
                     foreach ($parent_fields as $k => $l):
                         $val = $_POST[$k] ?? '';
                     ?>
-                        <div class="review-item"><strong><?= $l ?>:</strong> <?= htmlspecialchars($val !== '' ? $val : '—') ?></div>
+                        <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;"><?= $l ?>:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($val !== '' ? $val : '—') ?></dd></div>
                     <?php endforeach; ?>
                     <div class="review-item">
-                        <strong>CCT/4Ps Recipient:</strong>
-                        <?= (isset($_POST['is_4ps']) && $_POST['is_4ps'] == '1') ? $t[$lang]['yes'] : $t[$lang]['no'] ?>
+                        <dt style="display:inline;font-weight:600;color:#2d3748;">CCT/4Ps Recipient:</dt>
+                        <dd style="display:inline;margin:0;"><?= (isset($_POST['is_4ps']) && $_POST['is_4ps'] == '1') ? $t[$lang]['yes'] : $t[$lang]['no'] ?></dd>
                     </div>
-                </div>
-            </div>
+                </dl>
+            </section>
 
             <?php if (!empty($_POST['guardian_fullname']) || !empty($_POST['guardian_relation']) || !empty($_POST['guardian_contact'])): ?>
-            <div class="review-section">
-                <h3><i class="fas fa-shield-alt me-2"></i><?= $t[$lang]['guardian'] ?></h3>
-                <div class="review-grid">
-                    <div class="review-item"><strong>Guardian Name:</strong> <?= htmlspecialchars($_POST['guardian_fullname'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Relationship:</strong> <?= htmlspecialchars($_POST['guardian_relation'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Contact Number:</strong> <?= htmlspecialchars($_POST['guardian_contact'] ?? '—') ?></div>
-                </div>
-            </div>
+            <section class="review-section" aria-labelledby="revGuardianHeading">
+                <h2 id="revGuardianHeading" style="font-size:1.2rem;"><i class="fas fa-shield-alt me-2" aria-hidden="true"></i><?= $t[$lang]['guardian'] ?></h2>
+                <dl class="review-grid" style="margin:0;">
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Guardian Name:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['guardian_fullname'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Relationship:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['guardian_relation'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Contact Number:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['guardian_contact'] ?? '—') ?></dd></div>
+                </dl>
+            </section>
             <?php endif; ?>
 
-            <div class="review-section">
-                <h3><i class="fas fa-map-marker-alt me-2"></i><?= $t[$lang]['address'] ?></h3>
-                <div class="review-grid">
+            <section class="review-section" aria-labelledby="revAddressHeading">
+                <h2 id="revAddressHeading" style="font-size:1.2rem;"><i class="fas fa-map-marker-alt me-2" aria-hidden="true"></i><?= $t[$lang]['address'] ?></h2>
+                <dl class="review-grid" style="margin:0;">
                     <?php
-                    $addr_fields = [
-                        'purok_street' => 'Purok / Street',
-                        'barangay'     => 'Barangay',
-                        'town_city'    => 'Town / City',
-                        'province'     => 'Province',
-                        'region'       => 'Region',
-                        'district'     => 'District',
-                        'postal_code'  => 'Postal Code',
-                    ];
+                    $addr_fields = ['purok_street'=>'Purok / Street','barangay'=>'Barangay','town_city'=>'Town / City','province'=>'Province','region'=>'Region','district'=>'District','postal_code'=>'Postal Code'];
                     foreach ($addr_fields as $k => $l):
                         $val = $_POST[$k] ?? '';
                     ?>
-                        <div class="review-item"><strong><?= $l ?>:</strong> <?= htmlspecialchars($val !== '' ? $val : '—') ?></div>
+                        <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;"><?= $l ?>:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($val !== '' ? $val : '—') ?></dd></div>
                     <?php endforeach; ?>
-                </div>
-            </div>
+                </dl>
+            </section>
 
-            <div class="review-section">
-                <h3><i class="fas fa-graduation-cap me-2"></i><?= $t[$lang]['education'] ?></h3>
+            <section class="review-section" aria-labelledby="revEducationHeading">
+                <h2 id="revEducationHeading" style="font-size:1.2rem;"><i class="fas fa-graduation-cap me-2" aria-hidden="true"></i><?= $t[$lang]['education'] ?></h2>
                 <?php
                 $has_edu = false;
                 if (isset($_POST['edu_level']) && is_array($_POST['edu_level'])):
@@ -1077,7 +1201,7 @@ $display_files = isset($_SESSION['uploaded_files']) ? $_SESSION['uploaded_files'
                         $has_edu = true;
                 ?>
                     <div style="margin-bottom:1rem;padding:1rem;background:white;border-radius:8px;border-left:3px solid #1e88e5">
-                        <strong style="color:#1e88e5"><?= htmlspecialchars($level ?: '—') ?></strong>
+                        <strong style="color:#1565c0"><?= htmlspecialchars($level ?: '—') ?></strong>
                         <div class="mt-2 small">
                             <div><strong>School:</strong> <?= htmlspecialchars($sn ?: '—') ?></div>
                             <div><strong>Address:</strong> <?= htmlspecialchars($sa ?: '—') ?></div>
@@ -1088,68 +1212,64 @@ $display_files = isset($_SESSION['uploaded_files']) ? $_SESSION['uploaded_files'
                 <?php if (!$has_edu): ?>
                     <p class="text-muted mb-0">No educational history provided.</p>
                 <?php endif; ?>
-            </div>
+            </section>
 
-            <div class="review-section">
-                <h3><i class="fas fa-clipboard-list me-2"></i><?= $t[$lang]['enrollment'] ?></h3>
-                <div class="review-grid">
-                    <div class="review-item"><strong>School Year:</strong> <?= htmlspecialchars($_POST['school_year'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Grade Level:</strong> <?= htmlspecialchars($_POST['grade_level'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Semester:</strong> <?= htmlspecialchars($_POST['semester'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Track:</strong> <?= htmlspecialchars($_POST['track'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Strand:</strong> <?= htmlspecialchars($_POST['strand'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Program:</strong> <?= htmlspecialchars($_POST['program'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Section:</strong> <?= htmlspecialchars($section_display) ?></div>
-                    <div class="review-item"><strong>Household ID:</strong> <?= htmlspecialchars($_POST['household_id'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Voucher Status:</strong> <?= htmlspecialchars($voucher_display) ?></div>
+            <section class="review-section" aria-labelledby="revEnrollmentHeading">
+                <h2 id="revEnrollmentHeading" style="font-size:1.2rem;"><i class="fas fa-clipboard-list me-2" aria-hidden="true"></i><?= $t[$lang]['enrollment'] ?></h2>
+                <dl class="review-grid" style="margin:0;">
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">School Year:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['school_year'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Grade Level:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['grade_level'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Semester:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['semester'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Track:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['track'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Strand:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['strand'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Program:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['program'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Section:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($section_display) ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Household ID:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['household_id'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Voucher Status:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($voucher_display) ?></dd></div>
                     <div class="review-item">
-                        <strong>Transferee:</strong>
-                        <?= !empty($_POST['is_transferred']) ? 'Yes' : 'No' ?>
+                        <dt style="display:inline;font-weight:600;color:#2d3748;">Transferee:</dt>
+                        <dd style="display:inline;margin:0;"><?= !empty($_POST['is_transferred']) ? 'Yes' : 'No' ?></dd>
                     </div>
-                </div>
-            </div>
+                </dl>
+            </section>
 
             <?php if (!empty($_POST['is_transferred'])): ?>
-            <div class="review-section">
-                <h3><i class="fas fa-exchange-alt me-2"></i><?= $t[$lang]['transferred_in'] ?></h3>
-                <div class="review-grid">
-                    <div class="review-item"><strong>Previous School:</strong> <?= htmlspecialchars($_POST['previous_school_name'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Previous Address:</strong> <?= htmlspecialchars($_POST['previous_school_address'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Previous Track:</strong> <?= htmlspecialchars($_POST['previous_track'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Previous Strand:</strong> <?= htmlspecialchars($_POST['previous_strand'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Previous Program:</strong> <?= htmlspecialchars($_POST['previous_program'] ?? '—') ?></div>
-                    <div class="review-item"><strong>Year Completed:</strong> <?= htmlspecialchars($_POST['previous_year_completed'] ?? '—') ?></div>
-                </div>
-            </div>
+            <section class="review-section" aria-labelledby="revTransferHeading">
+                <h2 id="revTransferHeading" style="font-size:1.2rem;"><i class="fas fa-exchange-alt me-2" aria-hidden="true"></i><?= $t[$lang]['transferred_in'] ?></h2>
+                <dl class="review-grid" style="margin:0;">
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Previous School:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['previous_school_name'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Previous Address:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['previous_school_address'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Previous Track:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['previous_track'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Previous Strand:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['previous_strand'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Previous Program:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['previous_program'] ?? '—') ?></dd></div>
+                    <div class="review-item"><dt style="display:inline;font-weight:600;color:#2d3748;">Year Completed:</dt> <dd style="display:inline;margin:0;"><?= htmlspecialchars($_POST['previous_year_completed'] ?? '—') ?></dd></div>
+                </dl>
+            </section>
             <?php endif; ?>
 
-            <div class="review-section">
-                <h3><i class="fas fa-folder-open me-2"></i><?= $t[$lang]['entrance_data'] ?></h3>
-
-                <h5 class="mt-2 mb-2"><i class="fas fa-check-circle text-success me-2"></i>Documents Selected</h5>
+            <section class="review-section" aria-labelledby="revDocsHeading">
+                <h2 id="revDocsHeading" style="font-size:1.2rem;"><i class="fas fa-folder-open me-2" aria-hidden="true"></i><?= $t[$lang]['entrance_data'] ?></h2>
+                <h3 class="mt-2 mb-2" style="font-size:1rem;"><i class="fas fa-check-circle text-success me-2" aria-hidden="true"></i><?= $t[$lang]['docs_selected'] ?></h3>
                 <ul class="list-unstyled mb-3">
                     <?php if (!empty($_POST['entrance_data'] ?? [])): ?>
                         <?php foreach (($_POST['entrance_data'] ?? []) as $d): ?>
-                            <li class="mb-1">
-                                <i class="fas fa-check text-success me-2"></i><?= htmlspecialchars($d) ?>
-                            </li>
+                            <li class="mb-1"><i class="fas fa-check text-success me-2" aria-hidden="true"></i><?= htmlspecialchars($d) ?></li>
                         <?php endforeach; ?>
                     <?php else: ?>
-                        <li class="text-muted">None selected</li>
+                        <li class="text-muted"><?= $t[$lang]['none_selected'] ?></li>
                     <?php endif; ?>
                 </ul>
-
                 <?php if (!empty($display_files)): ?>
-                    <h5 class="mt-3 mb-2"><i class="fas fa-paperclip text-primary me-2"></i>Staged Files (<?= count($display_files) ?>)</h5>
+                    <h3 class="mt-3 mb-2" style="font-size:1rem;"><i class="fas fa-paperclip text-primary me-2" aria-hidden="true"></i><?= $t[$lang]['staged_files'] ?> (<?= count($display_files) ?>)</h3>
                     <ul class="list-unstyled mb-0">
                         <?php foreach ($display_files as $dk => $f):
                             $is_img = strpos($f['mime'] ?? '', 'image/') === 0;
                         ?>
-                            <li class="mb-2 d-flex align-items-center gap-2">
+                            <li class="mb-2 d-flex align-items-center gap-2 flex-wrap">
                                 <?php if ($is_img): ?>
-                                    <i class="fas fa-image text-primary"></i>
+                                    <i class="fas fa-image text-primary" aria-hidden="true"></i><span class="sr-only">Image:</span>
                                 <?php else: ?>
-                                    <i class="fas fa-file-pdf text-danger"></i>
+                                    <i class="fas fa-file-pdf text-danger" aria-hidden="true"></i><span class="sr-only">PDF:</span>
                                 <?php endif; ?>
                                 <strong><?= htmlspecialchars($f['label']) ?></strong>
                                 <span class="badge bg-light text-dark"><?= htmlspecialchars($f['mime'] ?? '—') ?></span>
@@ -1158,9 +1278,9 @@ $display_files = isset($_SESSION['uploaded_files']) ? $_SESSION['uploaded_files'
                         <?php endforeach; ?>
                     </ul>
                 <?php else: ?>
-                    <p class="text-muted mb-0 mt-3"><em>No files attached. You may still submit and upload them later.</em></p>
+                    <p class="text-muted mb-0 mt-3"><em><?= $t[$lang]['no_files'] ?></em></p>
                 <?php endif; ?>
-            </div>
+            </section>
 
             <form method="POST" action="process_enroll.php" class="text-center mt-5">
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
@@ -1182,24 +1302,25 @@ $display_files = isset($_SESSION['uploaded_files']) ? $_SESSION['uploaded_files'
                     endif;
                 endforeach;
                 ?>
-
-                <button type="submit" class="btn btn-submit btn-custom px-5"><i class="fas fa-save me-2"></i> Confirm &amp; Save Enrollment</button>
+                <button type="submit" class="btn btn-submit btn-custom px-5"><i class="fas fa-save me-2" aria-hidden="true"></i> <?= $t[$lang]['confirm_save'] ?></button>
             </form>
-            <div class="text-center mt-3"><a href="?edit=1" class="btn btn-back btn-custom px-4"><i class="fas fa-edit me-2"></i> Edit</a></div>
+            <div class="text-center mt-3"><a href="?edit=1" class="btn btn-back btn-custom px-4"><i class="fas fa-edit me-2" aria-hidden="true"></i> <?= $t[$lang]['edit_btn'] ?></a></div>
         </div>
     <?php endif; ?>
-</div>
+</main>
 
 <!-- CAMERA MODAL -->
-<div id="cameraModal" class="camera-modal" style="display:none">
+<div id="cameraModal" class="camera-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="cameraModalTitle" aria-describedby="cameraModalHelp">
     <div class="camera-container">
-        <video id="cameraVideo" autoplay playsinline></video>
+        <h2 id="cameraModalTitle" class="sr-only"><?= $t[$lang]['camera_modal_title'] ?></h2>
+        <p id="cameraModalHelp" class="sr-only">Use the capture button to take a photo of the document. Press Escape to cancel.</p>
+        <video id="cameraVideo" autoplay playsinline aria-label="Live camera preview"></video>
         <div class="camera-controls">
-            <button type="button" class="btn btn-light" onclick="capturePhoto()"><i class="fas fa-camera me-2"></i>Capture</button>
-            <button type="button" class="btn btn-outline-light" onclick="closeCamera()"><i class="fas fa-times me-2"></i>Cancel</button>
+            <button type="button" class="btn btn-light" id="cameraCaptureBtn" onclick="capturePhoto()"><i class="fas fa-camera me-2" aria-hidden="true"></i><?= $t[$lang]['camera_capture'] ?></button>
+            <button type="button" class="btn btn-outline-light" onclick="closeCamera()"><i class="fas fa-times me-2" aria-hidden="true"></i><?= $t[$lang]['camera_cancel'] ?></button>
         </div>
     </div>
-    <canvas id="cameraCanvas" style="display:none"></canvas>
+    <canvas id="cameraCanvas" style="display:none" aria-hidden="true"></canvas>
 </div>
 
 <script>
@@ -1213,7 +1334,7 @@ if(bd){bd.addEventListener('change',calcAge);window.addEventListener('load',calc
 document.addEventListener('DOMContentLoaded',()=>{nameFields.forEach(f=>{const i=document.querySelector(`input[name="${f}"]`);if(i){i.addEventListener('input',()=>{if(i.value.length>0)i.value=capitalize(i.value)});i.addEventListener('blur',()=>{if(i.value.trim()!=='')i.value=capitalize(i.value.trim())})}});initFloatingLabels()});
 const ss=document.getElementById('strand'),ps=document.getElementById('program'),progs={"Automotive and Small Engine Technologies":["Driving and Automotive Servicing","Automotive Servicing (Electrical Repair)","Automotive Servicing (Engine and Chassis Repairs)"],"Construction and Building Technologies":["Carpentry","Manual Metal Arc Welding"],"ICT Support and Computer Programming Technologies":["Computer Programming (Java)","Computer Programming (.NET)","Computer System Servicing"],"Industrial Technologies":["Electronics Product Assembly and Servicing"],"Agri-Fishery Business and Food Innovation":["Agricultural Crops Production"],"Hospitality and Tourism":["Food and Beverage Operation","Hotel Operation (Housekeeping)"]};
 if(ss){ss.innerHTML='<option value="" disabled selected></option>';Object.keys(progs).forEach(k=>{let o=document.createElement("option");o.value=o.textContent=k;ss.appendChild(o)});ss.addEventListener("change",()=>{ps.innerHTML='<option value="" disabled selected></option>';if(progs[ss.value])progs[ss.value].forEach(p=>{let o=document.createElement("option");o.value=o.textContent=p;ps.appendChild(o)});initFloatingLabels(ps.parentElement)});const cs=<?= json_encode($_POST['strand']??'') ?>,cp=<?= json_encode($_POST['program']??'') ?>;if(cs){ss.value=cs;ss.dispatchEvent(new Event('change'));if(cp){const chk=()=>{if(ps.options.length>1){ps.value=cp;if(ps.value)ps.parentElement.classList.add('filled')}else setTimeout(chk,10)};chk()}}}
-function addEdu(){const c=document.getElementById('edu-container'),t=document.createElement('div');t.className='edu-entry row g-3 align-items-end';t.innerHTML=`<div class="col-md-3 form-group filled"><select name="edu_level[]" class="edu-level" style="background:white"><option value="Elementary" selected>Elementary</option><option value="JHS">Junior High School</option><option value="Transferred">Transferred</option></select><label>Level</label></div><div class="col-md-3 form-group"><input type="text" name="school_name[]" placeholder=" " value=""><label>School Name</label></div><div class="col-md-3 form-group"><input type="text" name="school_address[]" placeholder=" " value=""><label>School Address</label></div><div class="col-md-3 form-group"><input type="text" name="year_completed[]" placeholder=" " value=""><label>Year Completed</label></div>`;c.appendChild(t);initFloatingLabels(t)}
+function addEdu(){const c=document.getElementById('edu-container'),idx=c.querySelectorAll('.edu-entry').length,t=document.createElement('div');t.className='edu-entry row g-3 align-items-end';t.setAttribute('role','group');t.setAttribute('aria-label','Education entry '+(idx+1));t.innerHTML=`<div class="col-md-3 form-group filled"><select name="edu_level[]" class="edu-level" id="edu_level_${idx}" style="background:white"><option value="Elementary" selected>Elementary</option><option value="JHS">Junior High School</option><option value="Transferred">Transferred</option></select><label for="edu_level_${idx}">Level</label></div><div class="col-md-3 form-group"><input type="text" name="school_name[]" id="school_name_${idx}" placeholder=" " value=""><label for="school_name_${idx}">School Name</label></div><div class="col-md-3 form-group"><input type="text" name="school_address[]" id="school_address_${idx}" placeholder=" " value=""><label for="school_address_${idx}">School Address</label></div><div class="col-md-3 form-group"><input type="text" name="year_completed[]" id="year_completed_${idx}" placeholder=" " value="" inputmode="numeric"><label for="year_completed_${idx}">Year Completed</label></div>`;c.appendChild(t);initFloatingLabels(t)}
 document.getElementById('addEduBtn')?.addEventListener('click',addEdu);
 const tc=document.getElementById('is_transferred'),ts=document.getElementById('transferee-fields');
 if(tc&&ts){const tg=()=>{ts.style.display=tc.checked?'block':'none';if(tc.checked)initFloatingLabels(ts)};tc.addEventListener('change',tg);window.addEventListener('load',tg)}
@@ -1238,12 +1359,14 @@ document.querySelectorAll('input[name="entrance_data[]"]').forEach(cb => {
     });
 });
 
-let currentRow=null, stream=null;
+let currentRow=null, stream=null, lastFocusedElement=null;
 async function openCamera(rowId){
     currentRow = rowId;
+    lastFocusedElement = document.activeElement;
     const modal = document.getElementById('cameraModal');
     const video = document.getElementById('cameraVideo');
     modal.style.display = 'flex';
+    setTimeout(() => document.getElementById('cameraCaptureBtn')?.focus(), 50);
     try {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
         video.srcObject = stream;
@@ -1256,6 +1379,9 @@ function closeCamera(){
     const modal = document.getElementById('cameraModal');
     modal.style.display = 'none';
     if(stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
+    if (lastFocusedElement && typeof lastFocusedElement.focus === 'function') {
+        lastFocusedElement.focus();
+    }
 }
 function capturePhoto(){
     const video = document.getElementById('cameraVideo');
@@ -1284,6 +1410,15 @@ function capturePhoto(){
     closeCamera();
 }
 
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        const modal = document.getElementById('cameraModal');
+        if (modal && modal.style.display !== 'none') {
+            closeCamera();
+        }
+    }
+});
+
 document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('input[name="entrance_data[]"]:checked').forEach(cb => {
         const rowId = 'uploadRow_' + cb.id;
@@ -1292,41 +1427,130 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
-// Progress indicator follows scroll
+// ============================================================
+// Progress indicator: clickable + state-aware
+// Checkmark appears ONLY when all required fields in a section are filled.
+// ============================================================
 (function() {
     const sections = document.querySelectorAll('[data-section]');
     const steps = document.querySelectorAll('.progress-step');
     if (!sections.length || !steps.length) return;
 
+    const sectionMap = {};
+    sections.forEach(sec => {
+        sectionMap[parseInt(sec.dataset.section, 10)] = sec;
+    });
+
+    const visited = new Set();
+
+    function isSectionComplete(sectionEl) {
+        const sectionNum = sectionEl.dataset.section;
+
+        if (sectionNum === '6') {
+            const checked = sectionEl.querySelectorAll('input[name="entrance_data[]"]:checked');
+            return checked.length > 0;
+        }
+
+        const requiredFields = sectionEl.querySelectorAll('[required]');
+
+        if (requiredFields.length === 0) {
+            const inputs = sectionEl.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]), textarea');
+            for (const f of inputs) {
+                if (f.readOnly) continue;
+                if (f.value && f.value.trim() !== '') return true;
+            }
+            return false;
+        }
+
+        for (const f of requiredFields) {
+            if (!f.checkValidity()) return false;
+            if (f.tagName === 'SELECT' && f.value === '') return false;
+            if (f.tagName === 'TEXTAREA' && (!f.value || f.value.trim() === '')) return false;
+            if ((f.type === 'text' || f.type === 'tel' || f.type === 'email' || f.type === 'number' || f.type === 'date') && (!f.value || f.value.trim() === '')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     function updateProgress() {
         const scrollPos = window.scrollY + window.innerHeight * 0.4;
         let activeStep = 1;
         sections.forEach(sec => {
+            const num = parseInt(sec.dataset.section) || 1;
             if (sec.offsetTop <= scrollPos) {
-                activeStep = parseInt(sec.dataset.section) || 1;
+                activeStep = num;
+                visited.add(num);
             }
         });
+        visited.add(1);
 
         steps.forEach((step, i) => {
-            step.classList.remove('active', 'completed');
             const stepNum = i + 1;
-            if (stepNum === activeStep) {
-                step.classList.add('active');
-            } else if (stepNum < activeStep) {
+            const sectionEl = sectionMap[stepNum];
+            const isComplete = sectionEl ? isSectionComplete(sectionEl) : false;
+            const isVisited = visited.has(stepNum);
+            const isActive = (stepNum === activeStep);
+
+            step.classList.remove('active', 'completed', 'incomplete');
+            step.removeAttribute('aria-current');
+
+            if (isComplete) {
                 step.classList.add('completed');
-                const numEl = step.querySelector('.step-number');
-                if (numEl && !numEl.dataset.checked) {
-                    numEl.dataset.checked = '1';
-                    numEl.innerHTML = '<i class="fas fa-check" style="font-size:0.85rem"></i>';
-                }
-            } else {
-                const numEl = step.querySelector('.step-number');
-                if (numEl && numEl.dataset.checked) {
-                    numEl.removeAttribute('data-checked');
+            } else if (isVisited) {
+                step.classList.add('incomplete');
+            }
+
+            if (isActive) {
+                step.classList.add('active');
+                step.setAttribute('aria-current', 'step');
+            }
+
+            const numEl = step.querySelector('.step-number');
+            if (numEl) {
+                if (isComplete) {
+                    if (!numEl.dataset.checked) {
+                        numEl.dataset.checked = '1';
+                        numEl.innerHTML = '<i class="fas fa-check" style="font-size:0.85rem" aria-hidden="true"></i>';
+                    }
+                } else {
+                    if (numEl.dataset.checked) {
+                        numEl.removeAttribute('data-checked');
+                    }
                     numEl.textContent = stepNum;
                 }
             }
         });
+    }
+
+    function goToStep(stepNumber) {
+        const target = sectionMap[stepNumber];
+        if (!target) return;
+        const yOffset = -80;
+        const y = target.getBoundingClientRect().top + window.pageYOffset + yOffset;
+        window.scrollTo({ top: y, behavior: 'smooth' });
+        target.setAttribute('tabindex', '-1');
+        setTimeout(() => { target.focus({ preventScroll: true }); }, 450);
+    }
+
+    steps.forEach(step => {
+        step.addEventListener('click', () => {
+            const num = parseInt(step.dataset.target, 10);
+            if (!isNaN(num)) goToStep(num);
+        });
+        step.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                const num = parseInt(step.dataset.target, 10);
+                if (!isNaN(num)) goToStep(num);
+            }
+        });
+    });
+
+    const form = document.getElementById('enrollForm');
+    if (form) {
+        form.addEventListener('input', updateProgress, { passive: true });
+        form.addEventListener('change', updateProgress, { passive: true });
     }
 
     window.addEventListener('scroll', updateProgress, { passive: true });
@@ -1342,12 +1566,14 @@ if (form) {
         let errorList = [];
 
         form.querySelectorAll('.form-group.error').forEach(g => g.classList.remove('error'));
+        form.querySelectorAll('[aria-invalid="true"]').forEach(el => el.setAttribute('aria-invalid', 'false'));
 
         form.querySelectorAll('[required]').forEach(f => {
             if (!f.checkValidity()) {
                 v = false;
                 const group = f.closest('.form-group');
                 if (group) group.classList.add('error');
+                f.setAttribute('aria-invalid', 'true');
                 if (!firstError) firstError = f;
                 const label = f.closest('.form-group')?.querySelector('label')?.textContent?.trim() || 'Field';
                 errorList.push(label.replace(/\*$/, '').trim());
@@ -1358,6 +1584,7 @@ if (form) {
         if (lrn && lrn.value && !/^\d{12}$/.test(lrn.value)) {
             v = false;
             lrn.closest('.form-group')?.classList.add('error');
+            lrn.setAttribute('aria-invalid', 'true');
             if (!firstError) firstError = lrn;
             errorList.push('LRN must be exactly 12 digits');
         }
@@ -1366,6 +1593,7 @@ if (form) {
         if (i4 && (!i4.value || i4.value === '')) {
             v = false;
             i4.closest('.form-group')?.classList.add('error');
+            i4.setAttribute('aria-invalid', 'true');
             if (!firstError) firstError = i4;
             errorList.push('CCT/4Ps recipient (Yes/No)');
         }
@@ -1378,7 +1606,6 @@ if (form) {
 
         if (!v) {
             e.preventDefault();
-
             Swal.fire({
                 icon: 'warning',
                 title: 'Please complete the form',
@@ -1386,10 +1613,9 @@ if (form) {
                     + '<ul style="text-align:left;display:inline-block;margin:0;padding-left:1.2rem;font-size:0.9rem">'
                     + errorList.map(err => '<li>' + err.replace(/</g,'&lt;') + '</li>').join('')
                     + '</ul>',
-                confirmButtonColor: '#1e88e5',
+                confirmButtonColor: '#1565c0',
                 confirmButtonText: 'Got it'
             });
-
             if (firstError) {
                 setTimeout(() => {
                     firstError.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1407,12 +1633,10 @@ document.addEventListener('DOMContentLoaded', function() {
             icon: 'success',
             title: 'Enrollment Successful!',
             html: <?= json_encode($_SESSION['success_message'] ?? 'Student successfully enrolled!') ?>,
-            confirmButtonColor: '#1e88e5',
+            confirmButtonColor: '#1565c0',
             confirmButtonText: 'Continue',
             allowOutsideClick: false
-        }).then(() => {
-            window.location.href = 'enroll_form.php';
-        });
+        }).then(() => { window.location.href = 'enroll_form.php'; });
         <?php unset($_SESSION['success'], $_SESSION['success_message']); ?>
 
     <?php elseif (isset($_SESSION['error'])): ?>

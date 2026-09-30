@@ -4,11 +4,6 @@ require_once __DIR__ . '/../config/audit.php';
 
 $current_page = basename($_SERVER['PHP_SELF']);
 
-/**
- * Compute initials for a strand name.
- *   "ICT Support and Computer Programming Technologies" → "ISCPT"
- *   "Hospitality and Tourism"                          → "HT"
- */
 function strandInitials(string $strand): string {
     $stopwords = ['and','of','the','for','in','on','to','a','an','at','by','with','or'];
     $words = preg_split('/\s+/', trim($strand));
@@ -22,9 +17,6 @@ function strandInitials(string $strand): string {
     return $out !== '' ? $out : 'GEN';
 }
 
-/**
- * Build display name: LastName, FirstName M.I. Ext.
- */
 function formatStudentName(array $s): string {
     $mi  = !empty($s['middle_name']) ? ' ' . strtoupper(substr(trim($s['middle_name']), 0, 1)) . '.' : '';
     $ext = !empty($s['ext_name'])    ? ' ' . trim($s['ext_name']) : '';
@@ -33,13 +25,14 @@ function formatStudentName(array $s): string {
 
 // ────────────────────────────────────────────────
 // UPDATE SCHOOL YEAR AFTER PROMOTION
+// (does not touch status, no history needed)
 // ────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_school_year'])) {
     verify_csrf();
 
     $old_sy = trim($_POST['old_school_year'] ?? '');
     $new_sy = trim($_POST['new_school_year'] ?? '');
-    
+
     if (empty($old_sy) || empty($new_sy)) {
         $_SESSION['error'] = "Both old and new school years are required.";
     } elseif ($old_sy === $new_sy) {
@@ -55,7 +48,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_school_year'])
             $conn->commit();
 
             audit_log($conn, 'schoolyear.bulk_update', ['type'=>'school_year','from'=>$old_sy,'to'=>$new_sy,'affected'=>$updated]);
-            
+
             if ($updated > 0) {
                 $_SESSION['success'] = "School year updated! $updated promoted student(s) moved from $old_sy to $new_sy.";
             } else {
@@ -79,7 +72,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['promote_selected'])) 
     $selected_ids = $_POST['selected_students'] ?? [];
     $promote_sy = trim($_POST['promote_school_year'] ?? '');
     $new_school_year = trim($_POST['new_school_year'] ?? '');
-    
+
     if (empty($selected_ids)) {
         $_SESSION['error'] = "No students selected for promotion.";
     } elseif (empty($promote_sy)) {
@@ -91,16 +84,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['promote_selected'])) 
         try {
             $promoted_11 = 0;
             $graduated_12 = 0;
-            
+            $admin_id = (int)($_SESSION['admin_id'] ?? 0);
+
             foreach ($selected_ids as $student_id) {
                 $sid = (int)$student_id;
-                
+
                 $check = $conn->prepare("SELECT grade_level, status FROM enrollment_form WHERE student_id = ? AND school_year = ? AND (status = 'Active' OR status IS NULL) LIMIT 1");
                 $check->bind_param("is", $sid, $promote_sy);
                 $check->execute();
                 $result = $check->get_result()->fetch_assoc();
                 $check->close();
-                
+
                 if ($result) {
                     if ($result['grade_level'] === 'Grade 11') {
                         $upd = $conn->prepare("UPDATE enrollment_form SET grade_level = 'Grade 12', school_year = ? WHERE student_id = ? AND school_year = ?");
@@ -108,24 +102,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['promote_selected'])) 
                         $upd->execute();
                         if ($upd->affected_rows > 0) $promoted_11++;
                         $upd->close();
+                        // Grade 11 → 12 is not a status change; no history row.
                     } elseif ($result['grade_level'] === 'Grade 12') {
+                        $old_status = $result['status'] ?? 'Active';
+
                         $upd = $conn->prepare("UPDATE enrollment_form SET status = 'Graduated', school_year = ? WHERE student_id = ? AND school_year = ? AND grade_level = 'Grade 12'");
                         $upd->bind_param("sis", $new_school_year, $sid, $promote_sy);
                         $upd->execute();
-                        if ($upd->affected_rows > 0) $graduated_12++;
+                        if ($upd->affected_rows > 0) {
+                            $graduated_12++;
+
+                            // ═══ STATUS HISTORY ═══
+                            $hist = $conn->prepare("
+                                INSERT INTO student_status_history
+                                    (student_id, old_status, new_status, reason, changed_by)
+                                VALUES (?, ?, 'Graduated', ?, ?)
+                            ");
+                            $reason = "Graduated via batch promotion ($promote_sy → $new_school_year)";
+                            $hist->bind_param("issi", $sid, $old_status, $reason, $admin_id);
+                            $hist->execute();
+                            $hist->close();
+                            // ═════════════════════
+                        }
                         $upd->close();
                     }
                 }
             }
-            
+
             $conn->commit();
 
             audit_log($conn, 'student.promote', ['type'=>'batch','from_sy'=>$promote_sy,'to_sy'=>$new_school_year,'promoted'=>$promoted_11,'graduated'=>$graduated_12]);
-            
+
             $msg = [];
             if ($promoted_11 > 0) $msg[] = "$promoted_11 → Grade 12";
             if ($graduated_12 > 0) $msg[] = "$graduated_12 → Graduated";
-            
+
             if (!empty($msg)) {
                 $_SESSION['success'] = "Promotion completed! " . implode(" • ", $msg) . ". School year updated to $new_school_year.";
             } else {
@@ -147,7 +158,7 @@ if (isset($_GET['promote_students']) && isset($_GET['school_year']) && isset($_G
     $promote_sy = trim($_GET['school_year']);
     $promote_type = trim($_GET['promote_type']);
     $new_school_year = trim($_GET['new_school_year'] ?? '');
-    
+
     if (empty($promote_sy)) {
         $_SESSION['error'] = "Please select a School Year to promote students.";
     } elseif (empty($new_school_year)) {
@@ -156,7 +167,8 @@ if (isset($_GET['promote_students']) && isset($_GET['school_year']) && isset($_G
         $conn->begin_transaction();
         try {
             $total_promoted = 0;
-            
+            $admin_id = (int)($_SESSION['admin_id'] ?? 0);
+
             if ($promote_type === 'grade11') {
                 $stmt = $conn->prepare("UPDATE enrollment_form SET grade_level = 'Grade 12', school_year = ? WHERE grade_level = 'Grade 11' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
                 $stmt->bind_param("ss", $new_school_year, $promote_sy);
@@ -165,24 +177,79 @@ if (isset($_GET['promote_students']) && isset($_GET['school_year']) && isset($_G
                 $stmt->close();
                 $_SESSION['success'] = $total_promoted > 0 ? "$total_promoted student(s) promoted from Grade 11 to Grade 12. School year updated to $new_school_year." : "No active Grade 11 students found.";
             } elseif ($promote_type === 'grade12') {
+                // ═══ STATUS HISTORY ═══
+                // Capture affected students BEFORE the bulk UPDATE, since a
+                // single UPDATE cannot give us per-student old_status values.
+                $aff = $conn->prepare("SELECT DISTINCT student_id FROM enrollment_form WHERE grade_level = 'Grade 12' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
+                $aff->bind_param("s", $promote_sy);
+                $aff->execute();
+                $affected_ids = array_column($aff->get_result()->fetch_all(MYSQLI_ASSOC), 'student_id');
+                $aff->close();
+                // ═════════════════════
+
                 $stmt = $conn->prepare("UPDATE enrollment_form SET status = 'Graduated', school_year = ? WHERE grade_level = 'Grade 12' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
                 $stmt->bind_param("ss", $new_school_year, $promote_sy);
                 $stmt->execute();
                 $total_promoted = $stmt->affected_rows;
                 $stmt->close();
+
+                // ═══ STATUS HISTORY ═══
+                if (!empty($affected_ids)) {
+                    $hist = $conn->prepare("
+                        INSERT INTO student_status_history
+                            (student_id, old_status, new_status, reason, changed_by)
+                        VALUES (?, 'Active', 'Graduated', ?, ?)
+                    ");
+                    $reason = "Bulk graduated via Promote All ($promote_sy → $new_school_year)";
+                    foreach ($affected_ids as $aid) {
+                        $aid = (int)$aid;
+                        $hist->bind_param("isi", $aid, $reason, $admin_id);
+                        $hist->execute();
+                    }
+                    $hist->close();
+                }
+                // ═════════════════════
+
                 $_SESSION['success'] = $total_promoted > 0 ? "$total_promoted student(s) graduated. School year updated to $new_school_year." : "No active Grade 12 students found.";
             } elseif ($promote_type === 'both') {
                 $stmt = $conn->prepare("UPDATE enrollment_form SET grade_level = 'Grade 12', school_year = ? WHERE grade_level = 'Grade 11' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
                 $stmt->bind_param("ss", $new_school_year, $promote_sy); $stmt->execute(); $p11 = $stmt->affected_rows; $stmt->close();
+
+                // ═══ STATUS HISTORY ═══
+                $aff = $conn->prepare("SELECT DISTINCT student_id FROM enrollment_form WHERE grade_level = 'Grade 12' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
+                $aff->bind_param("s", $promote_sy);
+                $aff->execute();
+                $affected_ids = array_column($aff->get_result()->fetch_all(MYSQLI_ASSOC), 'student_id');
+                $aff->close();
+                // ═════════════════════
+
                 $stmt = $conn->prepare("UPDATE enrollment_form SET status = 'Graduated', school_year = ? WHERE grade_level = 'Grade 12' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
                 $stmt->bind_param("ss", $new_school_year, $promote_sy); $stmt->execute(); $p12 = $stmt->affected_rows; $stmt->close();
+
+                // ═══ STATUS HISTORY ═══
+                if (!empty($affected_ids)) {
+                    $hist = $conn->prepare("
+                        INSERT INTO student_status_history
+                            (student_id, old_status, new_status, reason, changed_by)
+                        VALUES (?, 'Active', 'Graduated', ?, ?)
+                    ");
+                    $reason = "Bulk graduated via Promote Both ($promote_sy → $new_school_year)";
+                    foreach ($affected_ids as $aid) {
+                        $aid = (int)$aid;
+                        $hist->bind_param("isi", $aid, $reason, $admin_id);
+                        $hist->execute();
+                    }
+                    $hist->close();
+                }
+                // ═════════════════════
+
                 $total_promoted = $p11 + $p12;
                 $msg = [];
                 if ($p11 > 0) $msg[] = "$p11 → Grade 12";
                 if ($p12 > 0) $msg[] = "$p12 → Graduated";
                 $_SESSION['success'] = !empty($msg) ? "Promotion completed! " . implode(" • ", $msg) . ". School year updated to $new_school_year." : "No active students found.";
             }
-            
+
             $conn->commit();
 
             audit_log($conn, 'student.promote_all', ['type'=>'batch','from_sy'=>$promote_sy,'to_sy'=>$new_school_year,'mode'=>$promote_type,'affected'=>$total_promoted]);
@@ -431,22 +498,16 @@ if (count($parts) === 2) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Student Profiles • USAT Admin</title>
 
-    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700;14..32,800&display=swap" rel="stylesheet">
 
-    <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 
-    <!-- Bootstrap Icons — served from cdnjs because CSP font-src allows it -->
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
 
     <style>
-        /* ============================================================
-           Design tokens (matches dashboard.php)
-           ============================================================ */
         :root {
             --bg: #f4f6fb;
             --surface: #ffffff;
@@ -513,9 +574,6 @@ if (count($parts) === 2) {
             -webkit-font-smoothing:antialiased;
         }
 
-        /* ============================================================
-           Sidebar
-           ============================================================ */
         .sidebar{
             position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);
             background:var(--surface);border-right:1px solid var(--border);
@@ -555,9 +613,6 @@ if (count($parts) === 2) {
 
         .sidebar-footer{padding:.75rem;border-top:1px solid var(--border)}
 
-        /* ============================================================
-           Main content
-           ============================================================ */
         .main-content{
             margin-left:var(--sidebar-w);
             padding:1.5rem clamp(1rem,2.5vw,2rem) 2rem;
@@ -579,9 +634,6 @@ if (count($parts) === 2) {
         }
         .menu-toggle:hover{background:var(--surface-2)}
 
-        /* ============================================================
-           Stat cards
-           ============================================================ */
         .stat-grid{
             display:grid;
             grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
@@ -626,9 +678,6 @@ if (count($parts) === 2) {
             letter-spacing:.6px;margin-top:.2rem;font-weight:600;
         }
 
-        /* ============================================================
-           Cards
-           ============================================================ */
         .card{
             background:var(--surface);border-radius:var(--radius-lg);
             border:1px solid var(--border);box-shadow:var(--shadow-sm);
@@ -648,9 +697,6 @@ if (count($parts) === 2) {
         .card-body{padding:1.25rem}
         .card-body.no-padding{padding:0}
 
-        /* ============================================================
-           Filter bar
-           ============================================================ */
         .filter-bar{
             display:grid;
             grid-template-columns:minmax(200px,1.6fr) minmax(140px,1fr) minmax(140px,1fr) minmax(140px,1fr) auto;
@@ -685,9 +731,6 @@ if (count($parts) === 2) {
             border-radius:10px;border:1px solid var(--border);
         }
 
-        /* ============================================================
-           Table (sections)
-           ============================================================ */
         .table-scroll{overflow-x:auto}
         .table-admin{width:100%;border-collapse:separate;border-spacing:0}
         .table-admin thead th{
@@ -715,9 +758,6 @@ if (count($parts) === 2) {
         .cell-male{color:var(--blue);font-weight:600;font-variant-numeric:tabular-nums}
         .cell-female{color:var(--red);font-weight:600;font-variant-numeric:tabular-nums}
 
-        /* ============================================================
-           Student cards grid
-           ============================================================ */
         .student-grid{
             display:grid;
             grid-template-columns:repeat(auto-fill,minmax(340px,1fr));
@@ -791,9 +831,6 @@ if (count($parts) === 2) {
             font-weight:700;letter-spacing:.4px;
         }
 
-        /* ============================================================
-           Status pills
-           ============================================================ */
         .pill{
             display:inline-flex;align-items:center;gap:.4rem;
             padding:.22rem .6rem;border-radius:999px;
@@ -809,9 +846,6 @@ if (count($parts) === 2) {
         .pill.danger {background:var(--red-soft);  color:var(--red)}
         .pill.muted  {background:var(--surface-2); color:var(--text-2)}
 
-        /* ============================================================
-           Promote bar (sticky)
-           ============================================================ */
         .promote-bar{
             position:sticky;top:.75rem;z-index:50;
             background:linear-gradient(135deg,#fbbf24,#d97706);
@@ -845,9 +879,6 @@ if (count($parts) === 2) {
         .btn-promote:hover:not(:disabled){background:#1e293b;color:#fff;transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.25)}
         .btn-promote:disabled{opacity:.5;cursor:not-allowed}
 
-        /* ============================================================
-           Buttons
-           ============================================================ */
         .btn{font-weight:500;border-radius:9px;font-size:.82rem;transition:all .15s}
         .btn-primary{background:var(--accent);border-color:var(--accent)}
         .btn-primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
@@ -873,9 +904,6 @@ if (count($parts) === 2) {
         }
         .theme-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
 
-        /* ============================================================
-           Pagination
-           ============================================================ */
         .pagination{
             display:inline-flex;align-items:center;gap:.25rem;
             background:var(--surface);border:1px solid var(--border);
@@ -892,9 +920,6 @@ if (count($parts) === 2) {
             padding:0 .65rem;font-weight:500;
         }
 
-        /* ============================================================
-           Empty state
-           ============================================================ */
         .empty{
             padding:3rem 1.5rem;text-align:center;color:var(--text-2);
         }
@@ -907,9 +932,6 @@ if (count($parts) === 2) {
         .empty .empty-title{font-weight:600;color:var(--text);margin-bottom:.25rem}
         .empty .empty-sub{font-size:.85rem;color:var(--text-2)}
 
-        /* ============================================================
-           Alerts
-           ============================================================ */
         .flash{
             display:flex;align-items:center;gap:.65rem;
             padding:.75rem 1rem;border-radius:var(--radius);
@@ -921,9 +943,6 @@ if (count($parts) === 2) {
         .flash.info   {background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb, var(--accent) 25%, transparent)}
         .flash .btn-close{margin-left:auto;opacity:.6}
 
-        /* ============================================================
-           Modal
-           ============================================================ */
         .modal-content{border-radius:var(--radius-lg);border:none;box-shadow:var(--shadow-lg)}
         .modal-header.promote-head{
             background:linear-gradient(135deg,#fbbf24,#d97706);color:#fff;
@@ -945,9 +964,6 @@ if (count($parts) === 2) {
         }
         .form-text{font-size:.72rem;color:var(--text-3)}
 
-        /* ============================================================
-           Responsive
-           ============================================================ */
         @media (max-width:1280px){
             .filter-bar{grid-template-columns:minmax(200px,1.6fr) 1fr 1fr auto}
             .filter-bar .field:nth-child(4){grid-column:span 1}
@@ -979,6 +995,14 @@ if (count($parts) === 2) {
 </head>
 <body>
 
+<?php
+    $__current = basename($_SERVER['PHP_SELF']);
+    $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
+    // Student sub-pages all highlight "Students"
+    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php','student_documents.php'];
+    $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
+    $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
+?>
 <!-- ================= Sidebar ================= -->
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
@@ -990,11 +1014,18 @@ if (count($parts) === 2) {
     </div>
     <nav class="sidebar-nav">
         <div class="nav-label">Overview</div>
-        <a href="dashboard.php"><i class="bi bi-speedometer2"></i> Dashboard</a>
-        <a href="student_profile.php" class="active"><i class="bi bi-people-fill"></i> Students</a>
-        <a href="reports.php"><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+        <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
+        <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
+        <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+
+        <?php if ($__super): ?>
         <div class="nav-label" style="margin-top:.5rem">Administration</div>
-        <a href="create_account.php"><i class="bi bi-person-plus"></i> Accounts</a>
+        <a href="create_account.php"<?= $__a('create_account.php') ?>><i class="bi bi-person-plus"></i> Accounts</a>
+        <a href="audit_log.php"<?= $__a('audit_log.php') ?>><i class="bi bi-shield-check"></i> Audit Log</a>
+        <?php endif; ?>
+
+        <div class="nav-label" style="margin-top:.5rem">Account</div>
+        <a href="profile.php"<?= $__a('profile.php') ?>><i class="bi bi-person-gear"></i> My Profile</a>
     </nav>
     <div class="sidebar-footer">
         <a href="logout.php" class="btn btn-outline-danger btn-sm w-100">
@@ -1005,7 +1036,6 @@ if (count($parts) === 2) {
 
 <div class="main-content" id="mainContent">
 
-    <!-- ================= Alerts ================= -->
     <?php if(isset($_SESSION['success'])): ?>
         <div class="flash success">
             <i class="bi bi-check-circle-fill"></i>
@@ -1028,7 +1058,6 @@ if (count($parts) === 2) {
         </div>
         <?php unset($_SESSION['info']); endif; ?>
 
-    <!-- ================= Top Bar ================= -->
     <div class="topbar">
         <div class="d-flex align-items-center gap-3">
             <button class="menu-toggle" id="menuToggle"><i class="bi bi-list fs-5"></i></button>
@@ -1042,7 +1071,6 @@ if (count($parts) === 2) {
         </button>
     </div>
 
-    <!-- ================= Stats ================= -->
     <div class="stat-grid">
         <div class="stat-card tone-blue">
             <div class="stat-icon"><i class="bi bi-people-fill"></i></div>
@@ -1074,7 +1102,6 @@ if (count($parts) === 2) {
         </div>
     </div>
 
-    <!-- ================= Filters ================= -->
     <div class="card">
         <div class="card-header">
             <h3><i class="bi bi-funnel"></i> Filters</h3>
@@ -1196,7 +1223,6 @@ if (count($parts) === 2) {
         </div>
     </div>
 
-    <!-- ================= Sections ================= -->
     <?php if(!empty($all_sections) && !$show_promote_mode): ?>
     <div class="card">
         <div class="card-header">
@@ -1237,7 +1263,6 @@ if (count($parts) === 2) {
     </div>
     <?php endif; ?>
 
-    <!-- ================= Students ================= -->
     <div class="card">
         <div class="card-header">
             <h3>
@@ -1385,7 +1410,6 @@ if (count($parts) === 2) {
     </div>
 </div>
 
-<!-- ================= Promote modal ================= -->
 <div class="modal fade" id="promoteConfirmModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">

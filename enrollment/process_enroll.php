@@ -156,6 +156,25 @@ if ($real_age < 14 || $real_age > 25) {
 }
 $_POST['age'] = $real_age;
 
+// ── Require at least one uploaded document ──
+$staged_files = [];
+if (!empty($_SESSION['uploaded_files']) && is_array($_SESSION['uploaded_files'])) {
+    foreach ($_SESSION['uploaded_files'] as $key => $f) {
+        $path = $f['staging_path'] ?? '';
+        if ($path !== '' && is_file($path)) {
+            $staged_files[$key] = $f;
+        }
+    }
+    // Drop stale entries whose staging file no longer exists
+    $_SESSION['uploaded_files'] = $staged_files;
+}
+
+if (empty($staged_files)) {
+    $_SESSION['error'] = 'Please upload at least one required document before submitting the enrollment form.';
+    header('Location: enroll_form.php');
+    exit();
+}
+
 // ── Serialize concurrent enrollments ──
 $got_lock = false;
 $lock_res = $conn->query("SELECT GET_LOCK('enroll_global', 10) AS ok");

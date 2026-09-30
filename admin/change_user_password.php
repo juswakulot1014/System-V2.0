@@ -1,22 +1,50 @@
 <?php
+$REQUIRE_ROLE = 'superadmin';          // must be set BEFORE auth.php runs
 require_once __DIR__ . '/../config/auth.php';
 require_once __DIR__ . '/../config/audit.php';
 
-$error = "";
+$error   = "";
 $success = "";
 
-if (($_SESSION['admin_role'] ?? '') !== 'superadmin') {
-    $_SESSION['error'] = "Access Denied! Only the Principal can change passwords.";
-    header("Location: dashboard.php");
-    exit();
+// ============================================
+// AJAX: live username existence check
+// ============================================
+if (($_GET['action'] ?? '') === 'check_username') {
+    header('Content-Type: application/json; charset=utf-8');
+    verify_csrf();
+    $un = trim($_POST['username'] ?? '');
+    if ($un === '') {
+        echo json_encode(['exists' => false, 'valid' => false]);
+        exit;
+    }
+    $chk = $conn->prepare("SELECT id FROM admins WHERE username = ? LIMIT 1");
+    if (!$chk) {
+        echo json_encode(['exists' => false, 'valid' => true, 'error' => 'db']);
+        exit;
+    }
+    $chk->bind_param("s", $un);
+    $chk->execute();
+    $exists = $chk->get_result()->num_rows === 1;
+    $chk->close();
+    echo json_encode(['exists' => $exists, 'valid' => true]);
+    exit;
 }
 
-// Rate limiting
+// ============================================
+// Rate limiting — 3 attempts / 15 minutes
+// ============================================
 $max_attempts   = 3;
-$lockout_time   = 900; // 15 minutes
+$lockout_time   = 900;
 $rate_limit_key = 'pwd_change_attempts_' . $_SESSION['admin_id'];
+
 if (!isset($_SESSION[$rate_limit_key])) {
     $_SESSION[$rate_limit_key] = ['count' => 0, 'last_attempt' => 0];
+}
+if ($_SESSION[$rate_limit_key]['count'] >= $max_attempts) {
+    $since = time() - $_SESSION[$rate_limit_key]['last_attempt'];
+    if ($since >= $lockout_time) {
+        $_SESSION[$rate_limit_key] = ['count' => 0, 'last_attempt' => 0];
+    }
 }
 
 // ============================================
@@ -26,27 +54,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     verify_csrf();
 
-    if ($_SESSION[$rate_limit_key]['count'] >= $max_attempts) {
-        $since = time() - $_SESSION[$rate_limit_key]['last_attempt'];
-        if ($since < $lockout_time) {
-            $remaining = ceil(($lockout_time - $since) / 60);
-            $error = "Too many attempts. Please try again in {$remaining} minute(s).";
-        } else {
-            $_SESSION[$rate_limit_key] = ['count' => 0, 'last_attempt' => 0];
-        }
+    $is_locked = (
+        $_SESSION[$rate_limit_key]['count'] >= $max_attempts &&
+        (time() - $_SESSION[$rate_limit_key]['last_attempt']) < $lockout_time
+    );
+
+    if ($is_locked) {
+        $since     = time() - $_SESSION[$rate_limit_key]['last_attempt'];
+        $remaining = ceil(($lockout_time - $since) / 60);
+        $error = "Too many attempts. Please try again in {$remaining} minute(s).";
     }
 
+    // Step 1: verify acting admin's password
     if (empty($error)) {
         $admin_password = $_POST['admin_password'] ?? '';
-        if (empty($admin_password)) {
+        if ($admin_password === '') {
             $error = "Please enter your own admin password for verification.";
         } else {
             $verify_stmt = $conn->prepare("SELECT password FROM admins WHERE id = ? LIMIT 1");
-            if ($verify_stmt) {
+            if (!$verify_stmt) {
+                $error = "System error. Please try again later.";
+            } else {
                 $verify_stmt->bind_param("i", $_SESSION['admin_id']);
                 $verify_stmt->execute();
                 $verify_result = $verify_stmt->get_result();
-                if ($verify_result->num_rows === 1) {
+                if ($verify_result->num_rows !== 1) {
+                    $error = "Your session is no longer valid. Please log out and log in again.";
+                } else {
                     $admin_data = $verify_result->fetch_assoc();
                     if (!password_verify($admin_password, $admin_data['password'])) {
                         $error = "Your admin password is incorrect. Action denied.";
@@ -63,12 +97,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // Step 2: validate new password
     if (empty($error)) {
         $target_username  = trim($_POST['username'] ?? '');
         $new_password     = $_POST['new_password'] ?? '';
         $confirm_password = $_POST['confirm_password'] ?? '';
 
-        if (empty($target_username) || empty($new_password) || empty($confirm_password)) {
+        if ($target_username === '' || $new_password === '' || $confirm_password === '') {
             $error = "Please fill in all fields.";
         } elseif ($new_password !== $confirm_password) {
             $error = "New passwords do not match.";
@@ -84,72 +119,92 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = "Password must contain at least one number.";
         } elseif (!preg_match('/[^A-Za-z0-9]/', $new_password)) {
             $error = "Password must contain at least one special character.";
-        } else {
-            $current_admin_stmt = $conn->prepare("SELECT username FROM admins WHERE id = ? LIMIT 1");
-            if ($current_admin_stmt) {
-                $current_admin_stmt->bind_param("i", $_SESSION['admin_id']);
-                $current_admin_stmt->execute();
-                $current_admin = $current_admin_stmt->get_result()->fetch_assoc();
-                $current_admin_stmt->close();
-                if ($current_admin && strcasecmp($target_username, $current_admin['username']) === 0) {
-                    $error = "For security reasons, you cannot change your own password here. Please use the profile settings instead.";
-                }
-            }
         }
+    }
 
-        if (empty($error)) {
-            $stmt = $conn->prepare("SELECT id, fullname, username, role FROM admins WHERE username = ? LIMIT 1");
-            if ($stmt) {
-                $stmt->bind_param("s", $target_username);
-                $stmt->execute();
-                $result = $stmt->get_result();
+    // Step 3: look up target and update
+    if (empty($error)) {
+        $target_username = trim($_POST['username'] ?? '');
 
-                if ($result->num_rows === 1) {
-                    $user = $result->fetch_assoc();
-                    if ($user['role'] === 'superadmin' && $_SESSION['admin_role'] !== 'superadmin') {
-                        $error = "You do not have permission to change this user's password.";
+        $stmt = $conn->prepare("SELECT id, fullname, username, role FROM admins WHERE username = ? LIMIT 1");
+        if (!$stmt) {
+            $error = "System error. Please try again later.";
+        } else {
+            $stmt->bind_param("s", $target_username);
+            $stmt->execute();
+            $result = $stmt->get_result();
+
+            if ($result->num_rows !== 1) {
+                $error = "Username \"" . htmlspecialchars($target_username, ENT_QUOTES, 'UTF-8') . "\" does not exist.";
+            } else {
+                $user    = $result->fetch_assoc();
+                $is_self = ((int)$user['id'] === (int)$_SESSION['admin_id']);
+
+                // Guard: superadmin cannot reset ANOTHER superadmin's password
+                // (but CAN change their own — that's the new fix)
+                if ($user['role'] === 'superadmin' && !$is_self) {
+                    $error = "You cannot change another superadmin's password.";
+                }
+                // Guard: self-change must differ from current
+                elseif ($is_self && password_verify($new_password, $admin_data['password'])) {
+                    $error = "Your new password must be different from your current password.";
+                }
+                else {
+                    $hashed_password = password_hash($new_password, PASSWORD_BCRYPT, ['cost' => 12]);
+
+                    $upd = $conn->prepare(
+                        "UPDATE admins
+                            SET password         = ?,
+                                reset_token      = NULL,
+                                reset_expires    = NULL,
+                                remember_token   = NULL,
+                                remember_expires = NULL
+                          WHERE id = ?"
+                    );
+                    if (!$upd) {
+                        error_log('Password change prepare failed: ' . $conn->error);
+                        $error = "System error. Please try again later.";
                     } else {
-                        $hashed_password = password_hash($new_password, PASSWORD_DEFAULT, ['cost' => 12]);
-                        $upd = $conn->prepare("UPDATE admins SET password = ?, reset_token = NULL, reset_expires = NULL WHERE id = ?");
-                        if ($upd) {
-                            $upd->bind_param("si", $hashed_password, $user['id']);
-                            $upd->execute();
+                        $upd->bind_param("si", $hashed_password, $user['id']);
+                        if (!$upd->execute()) {
+                            error_log('Password change execute failed: ' . $upd->error);
+                            $error = "System error. Please try again later.";
+                        } else {
+                            $_SESSION[$rate_limit_key] = ['count' => 0, 'last_attempt' => 0];
+                            $_SESSION['csrf_token']    = bin2hex(random_bytes(32));
 
-                            if ($upd->affected_rows > 0) {
-                                $_SESSION[$rate_limit_key] = ['count' => 0, 'last_attempt' => 0];
-                                $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-                                $success = "Password successfully updated for user: " . htmlspecialchars($target_username);
-
+                            if ($is_self) {
+                                audit_log($conn, 'password.self_change', [
+                                    'type' => 'admin',
+                                    'id'   => $user['id'],
+                                ]);
+                                $success = "Your password has been updated successfully.";
+                            } else {
                                 audit_log($conn, 'password.change', [
                                     'type'     => 'admin',
                                     'id'       => $user['id'],
                                     'username' => $target_username,
                                 ]);
-
-                                unset($_POST['username'], $_POST['new_password'], $_POST['confirm_password']);
-                            } else {
-                                $error = "Failed to update password. Please try again.";
+                                $success = "Password successfully updated for user: "
+                                         . htmlspecialchars($target_username, ENT_QUOTES, 'UTF-8');
                             }
-                            $upd->close();
-                        } else {
-                            $error = "System error. Please try again later.";
+
+                            unset($_POST['username'], $_POST['new_password'], $_POST['confirm_password']);
                         }
+                        $upd->close();
                     }
-                } else {
-                    $_SESSION[$rate_limit_key]['count']++;
-                    $_SESSION[$rate_limit_key]['last_attempt'] = time();
-                    $error = "Could not process your request. Please verify the username and try again.";
                 }
-                $stmt->close();
-            } else {
-                $error = "System error. Please try again later.";
             }
+            $stmt->close();
         }
     }
 }
 
-$csrf_token = $_SESSION['csrf_token'];
-$admin_name = htmlspecialchars($_SESSION['admin_name'] ?? 'Administrator', ENT_QUOTES, 'UTF-8');
+// ============================================
+// View data
+// ============================================
+$csrf_token    = csrf_token();
+$admin_name    = htmlspecialchars($_SESSION['admin_name'] ?? 'Administrator', ENT_QUOTES, 'UTF-8');
 
 $attempts_used = (int)$_SESSION[$rate_limit_key]['count'];
 $attempts_left = max(0, $max_attempts - $attempts_used);
@@ -170,22 +225,16 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     <title>Change User Password • USAT Admin</title>
     <meta name="robots" content="noindex, nofollow">
 
-    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700;14..32,800&display=swap" rel="stylesheet">
 
-    <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 
-    <!-- Bootstrap Icons — served from cdnjs because CSP font-src allows it -->
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
 
     <style>
-        /* ============================================================
-           Design tokens (matches dashboard.php / create_account.php)
-           ============================================================ */
         :root {
             --bg: #f4f6fb;
             --surface: #ffffff;
@@ -250,9 +299,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             -webkit-font-smoothing:antialiased;
         }
 
-        /* ============================================================
-           Sidebar
-           ============================================================ */
         .sidebar{
             position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);
             background:var(--surface);border-right:1px solid var(--border);
@@ -291,9 +337,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .sidebar-nav a i{font-size:1.05rem;width:20px;text-align:center;flex-shrink:0}
         .sidebar-footer{padding:.75rem;border-top:1px solid var(--border)}
 
-        /* ============================================================
-           Main content
-           ============================================================ */
         .main-content{
             margin-left:var(--sidebar-w);
             padding:1.5rem clamp(1rem,2.5vw,2rem) 2rem;
@@ -322,9 +365,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .breadcrumb-nav a{color:var(--accent);text-decoration:none;font-weight:500}
         .breadcrumb-nav a:hover{text-decoration:underline}
 
-        /* ============================================================
-           Theme button
-           ============================================================ */
         .theme-btn{
             width:38px;height:38px;border-radius:10px;
             border:1px solid var(--border);background:var(--surface);
@@ -340,9 +380,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .btn-outline-danger{color:var(--red);border-color:color-mix(in srgb, var(--red) 35%, transparent)}
         .btn-outline-danger:hover{background:var(--red);color:#fff;border-color:var(--red)}
 
-        /* ============================================================
-           Form wrapper
-           ============================================================ */
         .cw-wrap{
             max-width:640px;margin:0 auto;
             animation:cw-fade .25s ease;
@@ -377,9 +414,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .cw-card-head p{font-size:.82rem;color:var(--text-2);margin:0}
         .cw-card-body{padding:1.5rem}
 
-        /* ============================================================
-           Fields
-           ============================================================ */
         .cw-field{margin-bottom:1.15rem}
         .cw-field-head{
             display:flex;align-items:center;justify-content:space-between;
@@ -439,10 +473,10 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             margin:.45rem 0 0;
             font-size:.78rem;color:var(--text-2);line-height:1.4;
         }
+        .cw-hint.is-valid{color:var(--green);font-weight:600}
+        .cw-hint.is-invalid{color:var(--red);font-weight:600}
+        .cw-hint i{margin-right:.25rem}
 
-        /* ============================================================
-           Divider
-           ============================================================ */
         .cw-divider{
             display:flex;align-items:center;gap:.75rem;
             margin:1.5rem 0 1.15rem;
@@ -459,9 +493,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .cw-divider span i{font-size:.75rem;color:var(--accent)}
 
-        /* ============================================================
-           Strength meter
-           ============================================================ */
         .cw-strength{
             display:grid;grid-template-columns:repeat(5,1fr);
             gap:4px;margin-top:.55rem;
@@ -475,9 +506,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .cw-strength-seg.active-medium{background:var(--amber)}
         .cw-strength-seg.active-strong{background:var(--green)}
 
-        /* ============================================================
-           Requirement pills
-           ============================================================ */
         .cw-reqs{
             display:flex;flex-wrap:wrap;gap:.35rem;
             margin-top:.6rem;
@@ -497,9 +525,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .cw-req.met i{color:var(--green);opacity:1}
 
-        /* ============================================================
-           Submit button
-           ============================================================ */
         .cw-submit{
             width:100%;
             padding:.9rem 1.25rem;
@@ -521,9 +546,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .cw-submit:active:not(:disabled){transform:translateY(0)}
         .cw-submit:disabled{opacity:.65;cursor:not-allowed}
 
-        /* ============================================================
-           Alerts
-           ============================================================ */
         .cw-alert{
             display:flex;align-items:flex-start;gap:.65rem;
             padding:.85rem 1.1rem;
@@ -553,9 +575,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .cw-attempts i{font-size:1rem}
 
-        /* ============================================================
-           Responsive
-           ============================================================ */
         @media (max-width:1024px){
             .sidebar{transform:translateX(-100%)}
             .sidebar.open{transform:translateX(0)}
@@ -571,6 +590,14 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 </head>
 <body>
 
+<?php
+    $__current = basename($_SERVER['PHP_SELF']);
+    $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
+    // Student sub-pages all highlight "Students"
+    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php','student_documents.php'];
+    $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
+    $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
+?>
 <!-- ================= Sidebar ================= -->
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
@@ -582,15 +609,18 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     </div>
     <nav class="sidebar-nav">
         <div class="nav-label">Overview</div>
-        <a href="dashboard.php"><i class="bi bi-speedometer2"></i> Dashboard</a>
-        <a href="student_profile.php"><i class="bi bi-people-fill"></i> Students</a>
-        <a href="reports.php"><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+        <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
+        <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
+        <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+
+        <?php if ($__super): ?>
         <div class="nav-label" style="margin-top:.5rem">Administration</div>
-        <a href="create_account.php"><i class="bi bi-person-plus"></i> Accounts</a>
-        <a href="change_user_password.php" class="active"><i class="bi bi-key"></i> Change Password</a>
-        <?php if (($_SESSION['admin_role'] ?? '') === 'superadmin'): ?>
-            <a href="audit_log.php"><i class="bi bi-shield-check"></i> Audit Log</a>
+        <a href="create_account.php"<?= $__a('create_account.php') ?>><i class="bi bi-person-plus"></i> Accounts</a>
+        <a href="audit_log.php"<?= $__a('audit_log.php') ?>><i class="bi bi-shield-check"></i> Audit Log</a>
         <?php endif; ?>
+
+        <div class="nav-label" style="margin-top:.5rem">Account</div>
+        <a href="profile.php"<?= $__a('profile.php') ?>><i class="bi bi-person-gear"></i> My Profile</a>
     </nav>
     <div class="sidebar-footer">
         <a href="logout.php" class="btn btn-outline-danger btn-sm w-100">
@@ -601,7 +631,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 
 <div class="main-content" id="mainContent">
 
-    <!-- ================= Topbar ================= -->
     <div class="topbar">
         <div class="d-flex align-items-center gap-3">
             <button class="menu-toggle" id="menuToggle"><i class="bi bi-list fs-5"></i></button>
@@ -674,6 +703,7 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
                                    value="<?= isset($_POST['username']) ? htmlspecialchars($_POST['username'], ENT_QUOTES, 'UTF-8') : '' ?>">
                             <i class="bi bi-person cw-input-icon"></i>
                         </div>
+                        <p class="cw-hint" id="usernameStatus"></p>
                     </div>
 
                     <div class="cw-field">
@@ -727,6 +757,7 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
                                 <i class="bi bi-eye"></i>
                             </button>
                         </div>
+                        <p class="cw-hint" id="matchStatus"></p>
                     </div>
 
                     <div class="cw-divider">
@@ -747,7 +778,7 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
                                 <i class="bi bi-eye"></i>
                             </button>
                         </div>
-                        <p class="cw-hint">Required as proof that you're the one making this change.</p>
+                        <p class="cw-hint">Required as proof that you're the one making this change. You have <?= $attempts_left ?> attempt<?= $attempts_left === 1 ? '' : 's' ?> left.</p>
                     </div>
 
                     <button type="submit" class="cw-submit" id="cwSubmit" <?= $locked_until > 0 ? 'disabled' : '' ?>>
@@ -845,10 +876,73 @@ document.querySelectorAll('[data-toggle-pw]').forEach(btn => {
             count.textContent = n + ' / 128';
             count.style.color = n > 128 ? 'var(--red)' : (n >= 8 ? 'var(--green)' : 'var(--text-2)');
         }
+        checkMatch();
     });
 })();
 
-// ---------- Submit loading state ----------
+// ---------- Live password-match indicator ----------
+const newPwEl  = document.getElementById('new_password');
+const confPwEl = document.getElementById('confirm_password');
+const matchEl  = document.getElementById('matchStatus');
+function checkMatch() {
+    if (!matchEl) return;
+    const a = newPwEl.value;
+    const b = confPwEl.value;
+    if (!b) { matchEl.className = 'cw-hint'; matchEl.textContent = ''; return; }
+    if (a === b) {
+        matchEl.className = 'cw-hint is-valid';
+        matchEl.innerHTML = '<i class="bi bi-check-circle-fill"></i>Passwords match.';
+    } else {
+        matchEl.className = 'cw-hint is-invalid';
+        matchEl.innerHTML = '<i class="bi bi-x-circle-fill"></i>Passwords do not match.';
+    }
+}
+if (confPwEl) confPwEl.addEventListener('input', checkMatch);
+
+// ---------- Live username existence check (AJAX) ----------
+const unEl     = document.getElementById('username');
+const unStatus = document.getElementById('usernameStatus');
+let unTimer = null;
+let unLastChecked = '';
+
+if (unEl && unStatus) {
+    unEl.addEventListener('input', () => {
+        clearTimeout(unTimer);
+        const v = unEl.value.trim();
+        if (!v) { unStatus.className = 'cw-hint'; unStatus.textContent = ''; unLastChecked = ''; return; }
+
+        unTimer = setTimeout(async () => {
+            if (v === unLastChecked) return;
+            unLastChecked = v;
+            unStatus.className = 'cw-hint';
+            unStatus.innerHTML = '<i class="bi bi-hourglass-split"></i>Checking…';
+
+            try {
+                const fd = new FormData();
+                fd.append('csrf_token', document.querySelector('input[name="csrf_token"]').value);
+                fd.append('username', v);
+                const r = await fetch('?action=check_username', { method: 'POST', body: fd });
+                const j = await r.json();
+
+                // Guard against stale response if the user kept typing
+                if (unEl.value.trim() !== v) return;
+
+                if (j.exists) {
+                    unStatus.className = 'cw-hint is-valid';
+                    unStatus.innerHTML = '<i class="bi bi-check-circle-fill"></i>User found.';
+                } else {
+                    unStatus.className = 'cw-hint is-invalid';
+                    unStatus.innerHTML = '<i class="bi bi-x-circle-fill"></i>No account with that username.';
+                }
+            } catch (e) {
+                unStatus.className = 'cw-hint';
+                unStatus.textContent = '';
+            }
+        }, 350);
+    });
+}
+
+// ---------- Submit: client-side validation + loading state ----------
 (function () {
     const form = document.getElementById('passwordForm');
     const btn  = document.getElementById('cwSubmit');
@@ -857,14 +951,31 @@ document.querySelectorAll('[data-toggle-pw]').forEach(btn => {
     const btnIcon = btn.querySelector('i');
 
     form.addEventListener('submit', function (e) {
-        const np = document.getElementById('new_password').value;
-        const cp = document.getElementById('confirm_password').value;
+        const np = newPwEl.value;
+        const cp = confPwEl.value;
         const ap = document.getElementById('admin_password').value;
-        const un = document.getElementById('username').value.trim();
+        const un = unEl.value.trim();
 
-        if (!un || !np || !cp || !ap) { e.preventDefault(); return; }
-        if (np !== cp) { e.preventDefault(); alert('New passwords do not match.'); return; }
-        if (np.length < 8) { e.preventDefault(); alert('Password must be at least 8 characters.'); return; }
+        if (!un || !np || !cp || !ap) {
+            e.preventDefault();
+            alert('Please fill in all fields.');
+            return;
+        }
+        if (np !== cp) {
+            e.preventDefault();
+            alert('New passwords do not match.');
+            return;
+        }
+        if (np.length < 8) {
+            e.preventDefault();
+            alert('Password must be at least 8 characters.');
+            return;
+        }
+        if (!/[A-Z]/.test(np) || !/[a-z]/.test(np) || !/[0-9]/.test(np) || !/[^A-Za-z0-9]/.test(np)) {
+            e.preventDefault();
+            alert('Password must contain uppercase, lowercase, number, and special character.');
+            return;
+        }
 
         btn.disabled = true;
         if (btnIcon) btnIcon.className = 'spinner-border spinner-border-sm';

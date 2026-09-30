@@ -23,14 +23,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_account'])) {
         $check = $conn->prepare("SELECT id FROM admins WHERE username = ?");
         $check->bind_param("s", $username);
         $check->execute();
-        
+
         if ($check->get_result()->num_rows > 0) {
             $_SESSION['error'] = "Username already exists!";
         } else {
             $hashed_password = password_hash($password, PASSWORD_DEFAULT);
             $stmt = $conn->prepare("INSERT INTO admins (fullname, username, password, role) VALUES (?, ?, ?, ?)");
             $stmt->bind_param("ssss", $fullname, $username, $hashed_password, $role);
-            
+
             if ($stmt->execute()) {
                 $_SESSION['success'] = "Account created for " . htmlspecialchars($fullname) . "!";
             } else {
@@ -54,7 +54,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_account'])) {
     } else {
         $count_sa = $conn->query("SELECT COUNT(*) as cnt FROM admins WHERE role='superadmin'")->fetch_assoc()['cnt'];
         $target_role = $conn->query("SELECT role FROM admins WHERE id=$account_id")->fetch_assoc()['role'] ?? '';
-        
+
         if ($target_role === 'superadmin' && $count_sa <= 1) {
             $_SESSION['error'] = "Cannot delete the last Super Admin account!";
         } else {
@@ -470,6 +470,14 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 </head>
 <body>
 
+<?php
+    $__current = basename($_SERVER['PHP_SELF']);
+    $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
+    // Student sub-pages all highlight "Students"
+    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php','student_documents.php'];
+    $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
+    $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
+?>
 <!-- ================= Sidebar ================= -->
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
@@ -481,15 +489,18 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     </div>
     <nav class="sidebar-nav">
         <div class="nav-label">Overview</div>
-        <a href="dashboard.php"><i class="bi bi-speedometer2"></i> Dashboard</a>
-        <a href="student_profile.php"><i class="bi bi-people-fill"></i> Students</a>
-        <a href="reports.php"><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+        <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
+        <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
+        <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+
+        <?php if ($__super): ?>
         <div class="nav-label" style="margin-top:.5rem">Administration</div>
-        <a href="create_account.php" class="active"><i class="bi bi-person-plus"></i> Accounts</a>
-        <a href="change_user_password.php"><i class="bi bi-key"></i> Change Password</a>
-        <?php if (($_SESSION['admin_role'] ?? '') === 'superadmin'): ?>
-            <a href="audit_log.php"><i class="bi bi-shield-check"></i> Audit Log</a>
+        <a href="create_account.php"<?= $__a('create_account.php') ?>><i class="bi bi-person-plus"></i> Accounts</a>
+        <a href="audit_log.php"<?= $__a('audit_log.php') ?>><i class="bi bi-shield-check"></i> Audit Log</a>
         <?php endif; ?>
+
+        <div class="nav-label" style="margin-top:.5rem">Account</div>
+        <a href="profile.php"<?= $__a('profile.php') ?>><i class="bi bi-person-gear"></i> My Profile</a>
     </nav>
     <div class="sidebar-footer">
         <a href="logout.php" class="btn btn-outline-danger btn-sm w-100">
@@ -497,7 +508,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </a>
     </div>
 </aside>
-
 <div class="main-content" id="mainContent">
 
     <!-- ================= Flash alerts ================= -->
@@ -526,6 +536,9 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             </div>
         </div>
         <div class="d-flex gap-2 align-items-center flex-wrap">
+            <a href="storage_health.php" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-hdd-stack me-1"></i> Storage Health
+            </a>
             <a href="change_user_password.php" class="btn btn-outline-primary btn-sm">
                 <i class="bi bi-key me-1"></i> Change Password
             </a>
