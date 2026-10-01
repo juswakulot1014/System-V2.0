@@ -217,7 +217,6 @@ foreach ($sf10 as $gl => $terms) {
         : null;
 }
 
-// Defensive alias — prevents future typos like $gradeLevelGWA (capital W)
 $gradeLevelGWA = $gradeLevelGwa;
 
 $fullName = trim(($student['last_name'] ?? '') . ', ' . ($student['first_name'] ?? '') . ' ' . ($student['middle_name'] ?? ''));
@@ -241,19 +240,19 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
         :root {
-            --ink:    #000;
-            --rule:   #000;
-            --label:  #f2f2f2;
-            --head:   #d9d9d9;
-            --dark:   #2b2b2b;
-            --mid:    #4a4a4a;
-            --band:   #e8e8e8;
-            --gold:   #fef3c7;
+            --ink:        #0a0a0a;
+            --ink-soft:   #1f2937;
+            --rule:       #0a0a0a;
+            --label-bg:   #f4f4f5;
+            --head-bg:    #e4e4e7;
+            --band-bg:    #f1f1f3;
+            --accent:     #1e3a8a;
+            --gold:       #fef3c7;
+            --paper-grey: #d6d6d6;
 
-            /* Default: Long Bond / Philippine Folio (8.5" × 13") */
             --paper-width:  215.9mm;
             --paper-height: 330.2mm;
-            --paper-pad-x:  14mm;
+            --paper-pad-x:  16mm;
             --paper-pad-y:  14mm;
         }
 
@@ -264,30 +263,35 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
 
         * { box-sizing: border-box; }
 
+        html, body { margin: 0; padding: 0; }
+
         body {
-            background: #d6d6d6;
-            margin: 0;
-            padding: 30px 0 60px;
-            font-family: 'Times New Roman', Times, serif;
+            background: var(--paper-grey);
+            padding: 90px 0 60px;
+            font-family: 'Times New Roman', Times, Georgia, serif;
             color: var(--ink);
+            -webkit-font-smoothing: antialiased;
         }
 
-        /* ---------- Screen toolbar ---------- */
+        /* ============================================================
+           Floating toolbar
+           ============================================================ */
         .toolbar {
             position: fixed;
-            top: 20px;
+            top: 18px;
             left: 50%;
             transform: translateX(-50%);
             display: flex;
             align-items: center;
             gap: 10px;
-            padding: 10px 14px;
-            background: rgba(255,255,255,0.97);
+            padding: 8px 10px;
+            background: rgba(255,255,255,0.98);
             border-radius: 999px;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.18), 0 2px 6px rgba(0,0,0,0.08);
             border: 1px solid rgba(0,0,0,0.06);
             z-index: 1000;
-            font-family: system-ui, sans-serif;
+            font-family: system-ui, -apple-system, sans-serif;
+            backdrop-filter: blur(10px);
         }
 
         .toolbar .btn-back,
@@ -303,131 +307,177 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             border: none;
             cursor: pointer;
             font-family: inherit;
-            transition: transform 0.15s ease, background 0.15s ease;
+            transition: transform 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
             white-space: nowrap;
+            line-height: 1;
         }
         .toolbar .btn-print {
-            background: #111827;
+            background: #0f172a;
             color: #fff;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            box-shadow: 0 4px 12px rgba(15,23,42,0.35);
         }
-        .toolbar .btn-print:hover { transform: translateY(-1px); background: #1f2937; }
+        .toolbar .btn-print:hover { transform: translateY(-1px); background: #1e293b; box-shadow: 0 6px 16px rgba(15,23,42,0.45); }
         .toolbar .btn-back {
-            background: #f3f4f6;
-            color: #111827;
+            background: #f4f4f5;
+            color: #18181b;
         }
-        .toolbar .btn-back:hover { background: #e5e7eb; }
+        .toolbar .btn-back:hover { background: #e4e4e7; }
 
         .toolbar .divider {
             width: 1px;
-            height: 24px;
-            background: #e5e7eb;
+            height: 22px;
+            background: #e4e4e7;
         }
 
         .toolbar .paper-group {
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 2px;
-            background: #f9fafb;
-            border: 1px solid #e5e7eb;
+            padding: 2px 2px 2px 4px;
+            background: #fafafa;
+            border: 1px solid #e4e4e7;
             border-radius: 999px;
         }
         .toolbar .paper-group label {
-            padding-left: 12px;
-            font-size: 0.78rem;
-            font-weight: 600;
-            color: #4b5563;
-            letter-spacing: 0.3px;
+            padding-left: 10px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            color: #52525b;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
         }
         .toolbar .paper-group select {
             appearance: none;
             -webkit-appearance: none;
-            background: #fff url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='%236b7280' d='M0 0l5 6 5-6z'/></svg>") no-repeat right 12px center;
-            border: 1px solid #e5e7eb;
+            background: #fff url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='%2352525b' d='M0 0l5 6 5-6z'/></svg>") no-repeat right 12px center;
+            border: 1px solid #e4e4e7;
             border-radius: 999px;
-            padding: 6px 30px 6px 14px;
-            font-size: 0.82rem;
+            padding: 6px 28px 6px 14px;
+            font-size: 0.8rem;
             font-weight: 600;
-            color: #111827;
+            color: #18181b;
             cursor: pointer;
             font-family: inherit;
             outline: none;
             transition: border-color 0.15s ease;
         }
         .toolbar .paper-group select:hover,
-        .toolbar .paper-group select:focus { border-color: #9ca3af; }
+        .toolbar .paper-group select:focus { border-color: #a1a1aa; }
 
-        /* ---------- Paper preview ---------- */
+        /* ============================================================
+           Paper
+           ============================================================ */
         .sf10-container {
             width: var(--paper-width);
             min-height: var(--paper-height);
             margin: 0 auto;
             background: #fff;
             padding: var(--paper-pad-y) var(--paper-pad-x) calc(var(--paper-pad-y) + 4mm);
-            font-family: 'Times New Roman', Times, serif;
+            font-family: 'Times New Roman', Times, Georgia, serif;
             font-size: 11.5px;
             color: var(--ink);
-            line-height: 1.5;
-            border: 1px solid #999;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.28);
+            line-height: 1.45;
+            border: 1px solid #8a8a8a;
+            box-shadow: 0 24px 60px rgba(0,0,0,0.28), 0 4px 12px rgba(0,0,0,0.12);
             transition: width 0.2s ease, min-height 0.2s ease;
         }
 
-        /* ---------- Header ---------- */
+        /* ============================================================
+           Official header
+           ============================================================ */
         .official-header {
+            position: relative;
             text-align: center;
-            margin-bottom: 20px;
             padding-bottom: 14px;
+            margin-bottom: 18px;
             border-bottom: 3px double var(--ink);
         }
-        .official-header .logo {
-            width: 90px;
-            height: 90px;
-            object-fit: contain;
+
+        .official-header .logo-wrap {
+            display: flex;
+            justify-content: center;
             margin-bottom: 8px;
         }
+
+        .official-header .logo {
+            width: 110px;
+            height: 110px;
+            object-fit: contain;
+            border-radius: 50%;
+            padding: 4px;
+            background: #fff;
+            box-shadow:
+                0 0 0 1.5px #d4d4d8,
+                0 0 0 4px #fff,
+                0 0 0 5.5px #e4e4e7;
+        }
+
         .official-header .rep-line {
             font-size: 11px;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.6px;
+            line-height: 1.35;
         }
+
         .official-header .school-name {
-            font-size: 15px;
+            font-size: 17px;
             font-weight: bold;
-            letter-spacing: 1.2px;
-            margin: 5px 0 2px;
+            letter-spacing: 1.4px;
+            margin: 6px 0 3px;
             text-transform: uppercase;
+            line-height: 1.15;
         }
+
         .official-header .school-addr {
             font-size: 10.5px;
             font-style: italic;
+            letter-spacing: 0.3px;
+            color: #374151;
         }
+
+        .official-header .title-band {
+            margin-top: 14px;
+            padding-top: 10px;
+            border-top: 1px solid #d4d4d8;
+        }
+
         .official-header .title {
-            font-size: 15.5px;
+            font-size: 15px;
             font-weight: bold;
-            letter-spacing: 1.5px;
-            margin: 12px 0 3px;
+            letter-spacing: 2px;
+            margin: 0 0 3px;
+            text-transform: uppercase;
         }
+
         .official-header .subtitle {
             font-size: 10px;
             font-style: italic;
+            color: #4b5563;
+            letter-spacing: 0.4px;
         }
 
-        /* ---------- Section titles ---------- */
+        /* ============================================================
+           Section titles
+           ============================================================ */
         .section-title {
-            background: var(--dark);
-            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 8px;
             font-weight: bold;
-            padding: 5px 12px;
-            margin: 20px 0 10px;
             font-size: 11px;
-            letter-spacing: 1.2px;
+            letter-spacing: 1.3px;
             text-transform: uppercase;
-            border-top: 1px solid var(--ink);
-            border-bottom: 1px solid var(--ink);
+            padding: 5px 0 5px 12px;
+            margin: 20px 0 10px;
+            border-left: 4px solid var(--accent);
+            border-top: 1px solid #d4d4d8;
+            border-bottom: 1px solid #d4d4d8;
+            background: linear-gradient(to right, rgba(30,58,138,0.05), rgba(30,58,138,0.005));
+            color: var(--ink-soft);
         }
 
-        /* ---------- Tables ---------- */
+        /* ============================================================
+           Tables
+           ============================================================ */
         table {
             width: 100%;
             border-collapse: collapse;
@@ -440,15 +490,15 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             font-size: 11px;
         }
         th {
-            background: var(--head);
+            background: var(--head-bg);
             font-weight: bold;
             text-align: center;
             font-size: 10.5px;
-            letter-spacing: 0.4px;
+            letter-spacing: 0.5px;
             text-transform: uppercase;
         }
         td.label {
-            background: var(--label);
+            background: var(--label-bg);
             font-weight: bold;
             width: 22%;
             font-size: 10.5px;
@@ -459,45 +509,53 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
         td.right  { text-align: right; }
         td.mono   { font-variant-numeric: tabular-nums; }
 
-        /* ---------- Grade blocks ---------- */
+        /* ============================================================
+           Grade blocks
+           ============================================================ */
         .grade-block {
             page-break-inside: avoid;
-            margin-bottom: 18px;
-            border: 2px solid var(--ink);
+            margin-bottom: 20px;
+            border: 1.5px solid var(--ink);
+            border-radius: 2px;
+            overflow: hidden;
         }
         .grade-header {
-            background: var(--mid);
+            background: var(--accent);
             color: #fff;
-            padding: 6px 14px;
+            padding: 8px 14px;
             font-weight: bold;
             font-size: 12.5px;
-            letter-spacing: 1.5px;
+            letter-spacing: 1.8px;
             text-transform: uppercase;
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 12px;
         }
         .grade-header .grade-gwa {
             background: #fff;
-            color: var(--ink);
-            padding: 2px 10px;
+            color: var(--accent);
+            padding: 3px 12px;
             font-size: 10px;
-            letter-spacing: 0.5px;
-            border: 1px solid #fff;
+            letter-spacing: 0.6px;
+            border-radius: 2px;
+            font-weight: bold;
+            text-transform: none;
         }
 
         .term-header {
-            background: var(--band);
-            padding: 5px 14px;
+            background: var(--band-bg);
+            padding: 6px 14px;
             font-weight: bold;
-            font-size: 11px;
-            letter-spacing: 0.8px;
+            font-size: 10.5px;
+            letter-spacing: 0.9px;
             text-transform: uppercase;
             border-top: 1px solid var(--ink);
-            border-bottom: 1px solid var(--ink);
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 10px;
+            color: var(--ink-soft);
         }
         .term-header .sy-tag {
             font-weight: normal;
@@ -505,125 +563,154 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             text-transform: none;
             letter-spacing: 0;
             font-size: 10px;
+            color: #4b5563;
         }
 
         .grades-table { margin: 0; }
         .grades-table th,
         .grades-table td {
             border: 1px solid var(--ink);
+            border-left: none;
+            border-right: none;
         }
         .grades-table thead th {
             background: #ececec;
+            border-top: none;
         }
         .grades-table tbody tr:nth-child(even) td {
             background: #fafafa;
         }
 
         .gwa-row td {
-            background: #f2f2f2 !important;
+            background: #f4f4f5 !important;
             font-weight: bold;
             text-align: right;
-            padding: 6px 10px;
+            padding: 7px 10px;
             letter-spacing: 0.3px;
+            font-size: 10.5px;
+            text-transform: uppercase;
+            color: var(--ink-soft);
         }
         .gwa-row td.val {
             text-align: center;
             font-size: 12px;
+            font-weight: bold;
+            font-variant-numeric: tabular-nums;
+            color: var(--accent);
         }
 
         .grade-footer {
-            background: #e6e6e6;
+            background: #f4f4f5;
             font-weight: bold;
             font-size: 11px;
-            padding: 6px 10px;
+            padding: 8px 12px;
             text-align: right;
-            letter-spacing: 0.3px;
-            border-top: 2px solid var(--ink);
+            letter-spacing: 0.4px;
+            border-top: 1.5px solid var(--ink);
+            text-transform: uppercase;
+            color: var(--ink-soft);
         }
         .grade-footer .grade-footer-val {
             display: inline-block;
-            min-width: 60px;
+            min-width: 72px;
             text-align: center;
             background: #fff;
             border: 1px solid var(--ink);
-            padding: 1px 8px;
-            margin-left: 10px;
-            font-size: 12px;
+            padding: 2px 10px;
+            margin-left: 12px;
+            font-size: 12.5px;
+            font-variant-numeric: tabular-nums;
+            color: var(--accent);
         }
 
         .empty-block {
-            padding: 14px;
+            padding: 16px;
             text-align: center;
-            color: #666;
+            color: #6b7280;
             font-style: italic;
             font-size: 10.5px;
             background: #fafafa;
         }
 
-        /* ---------- Overall GWA ---------- */
+        /* ============================================================
+           Overall GWA
+           ============================================================ */
+        .overall-table {
+            margin-top: 18px;
+            border: 2px solid var(--ink);
+        }
         .overall-table td {
             background: var(--gold) !important;
-            border: 2px solid var(--ink) !important;
+            border: none !important;
             font-weight: bold;
-            padding: 10px 14px;
+            padding: 12px 16px;
             font-size: 12px;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.6px;
+            text-transform: uppercase;
         }
         .overall-table td:last-child {
             text-align: center;
-            font-size: 14px;
+            font-size: 16px;
             font-variant-numeric: tabular-nums;
+            color: var(--accent);
+            border-left: 2px solid var(--ink) !important;
+            width: 120px;
         }
 
-        /* ---------- Certification ---------- */
+        /* ============================================================
+           Certification + signatures
+           ============================================================ */
         .certification {
             text-align: center;
             font-style: italic;
-            padding: 10px 20px;
-            line-height: 1.6;
+            padding: 12px 30px;
+            line-height: 1.65;
             font-size: 11px;
+            color: var(--ink-soft);
         }
 
         .signature-block {
             display: flex;
             justify-content: space-around;
-            gap: 50px;
-            margin-top: 60px;
+            gap: 60px;
+            margin-top: 70px;
             page-break-inside: avoid;
         }
         .sig-item { flex: 1; text-align: center; }
         .sig-line {
             border-top: 1px solid var(--ink);
-            margin: 0 auto 4px;
+            margin: 0 auto 6px;
             width: 240px;
             padding-top: 5px;
             font-weight: bold;
             font-size: 11px;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.7px;
+            text-transform: uppercase;
         }
         .sig-label {
             font-size: 10px;
             font-style: italic;
+            color: #4b5563;
+            margin-top: 2px;
         }
 
         .doc-footer {
             text-align: center;
             font-size: 9px;
-            color: #666;
-            margin-top: 30px;
-            padding-top: 8px;
-            border-top: 1px dashed #999;
+            color: #6b7280;
+            margin-top: 34px;
+            padding-top: 10px;
+            border-top: 1px dashed #a1a1aa;
             letter-spacing: 0.4px;
-            font-family: system-ui, sans-serif;
+            font-family: system-ui, -apple-system, sans-serif;
         }
 
-        /* ---------- Print ---------- */
+        /* ============================================================
+           Print
+           ============================================================ */
         @media print {
             @page { size: 8.5in 13in; margin: 10mm; }
-            body {
-                background: #fff;
-                padding: 0;
-            }
+            body { background: #fff; padding: 0; }
             .toolbar { display: none !important; }
             .sf10-container {
                 width: auto;
@@ -633,21 +720,26 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
                 border: none;
                 box-shadow: none;
             }
-            .grade-block { page-break-inside: avoid; }
-            .signature-block { page-break-inside: avoid; }
+            .grade-block,
+            .signature-block,
+            .overall-table { page-break-inside: avoid; }
+            .section-title { page-break-after: avoid; }
+            .official-header { page-break-after: avoid; }
             .grade-header,
             .section-title,
             .term-header,
             th,
             .gwa-row td,
             .grade-footer,
-            .overall-table td {
+            .overall-table td,
+            .official-header .logo {
                 -webkit-print-color-adjust: exact;
                 print-color-adjust: exact;
             }
         }
 
         @media screen and (max-width: 900px) {
+            body { padding: 80px 12px 40px; }
             .toolbar {
                 flex-wrap: wrap;
                 max-width: calc(100vw - 24px);
@@ -655,14 +747,19 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             }
             .sf10-container {
                 width: 100%;
+                min-height: auto;
                 padding: 20px;
             }
+            .official-header .logo { width: 88px; height: 88px; }
+            .signature-block { flex-direction: column; gap: 50px; }
         }
     </style>
 </head>
 <body class="paper-long">
 
-<!-- Floating toolbar -->
+<!-- =========================================================
+     Floating toolbar
+     ========================================================= -->
 <div class="toolbar no-print">
     <a class="btn-back" href="view_student.php?id=<?= $student_id ?>">
         <i class="bi bi-arrow-left"></i> Back
@@ -674,9 +771,9 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
         <label for="paperSize">Paper</label>
         <select id="paperSize" aria-label="Paper size">
             <option value="long"   selected>Long Bond · 8.5 × 13</option>
-            <option value="legal"  >Legal · 8.5 × 14</option>
-            <option value="a4"     >A4 · 210 × 297 mm</option>
-            <option value="letter" >Short Bond · 8.5 × 11</option>
+            <option value="legal">Legal · 8.5 × 14</option>
+            <option value="a4">A4 · 210 × 297 mm</option>
+            <option value="letter">Short Bond · 8.5 × 11</option>
         </select>
     </div>
 
@@ -685,17 +782,28 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
     </button>
 </div>
 
+<!-- =========================================================
+     Paper
+     ========================================================= -->
 <div class="sf10-container">
 
     <!-- Header -->
     <div class="official-header">
-        <img src="../assets/img/usat.jpg" alt="USAT College Logo" class="logo">
+        <div class="logo-wrap">
+            <img src="../assets/img/usat.jpg"
+                 alt="USAT College Seal"
+                 class="logo"
+                 onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 200 200%22><defs><linearGradient id=%22g%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%221%22><stop offset=%220%22 stop-color=%22%232563eb%22/><stop offset=%221%22 stop-color=%22%231e40af%22/></linearGradient></defs><circle cx=%22100%22 cy=%22100%22 r=%2295%22 fill=%22url(%23g)%22 stroke=%22%23fbbf24%22 stroke-width=%224%22/><ellipse cx=%22100%22 cy=%22100%22 rx=%2260%22 ry=%2222%22 fill=%22none%22 stroke=%22%23fde047%22 stroke-width=%223%22 transform=%22rotate(30 100 100)%22/><ellipse cx=%22100%22 cy=%22100%22 rx=%2260%22 ry=%2222%22 fill=%22none%22 stroke=%22%23f472b6%22 stroke-width=%223%22 transform=%22rotate(-30 100 100)%22/><circle cx=%22100%22 cy=%22100%22 r=%2210%22 fill=%22%23fde047%22/><text x=%22100%22 y=%22175%22 text-anchor=%22middle%22 fill=%22%23fde047%22 font-family=%22Georgia,serif%22 font-size=%2216%22 font-weight=%22bold%22 letter-spacing=%222%22>USAT</text></svg>';">
+        </div>
         <div class="rep-line">Republic of the Philippines</div>
         <div class="rep-line">Department of Education</div>
         <div class="school-name">USAT College Sagay City, Inc.</div>
         <div class="school-addr">Sagay City, Negros Occidental</div>
-        <div class="title">LEARNER'S PERMANENT ACADEMIC RECORD</div>
-        <div class="subtitle">SF 10 - SHS · Senior High School (Grade 11 to Grade 12)</div>
+
+        <div class="title-band">
+            <div class="title">Learner's Permanent Academic Record</div>
+            <div class="subtitle">SF 10 – SHS · Senior High School (Grade 11 to Grade 12)</div>
+        </div>
     </div>
 
     <!-- Personal Info -->
@@ -814,9 +922,8 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
                 <?php endif; ?>
             <?php endforeach; ?>
 
-            <!-- Grade-level GWA footer — FIXED: lowercase 'w' in $gradeLevelGwa -->
             <div class="grade-footer">
-                <?= strtoupper($gradeLevel) ?> GENERAL AVERAGE:
+                <?= strtoupper($gradeLevel) ?> General Average:
                 <span class="grade-footer-val mono"><?= $gradeLevelGwa[$gradeLevel] !== null ? number_format($gradeLevelGwa[$gradeLevel], 2) : '—' ?></span>
             </div>
         </div>
@@ -826,7 +933,7 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
     <?php if ($overall_gwa !== null): ?>
         <table class="overall-table">
             <tr>
-                <td style="width:80%">OVERALL GENERAL WEIGHTED AVERAGE (Grade 11 – Grade 12)</td>
+                <td style="width:80%">Overall General Weighted Average (Grade 11 – Grade 12)</td>
                 <td><?= number_format($overall_gwa, 2) ?></td>
             </tr>
         </table>
@@ -840,17 +947,17 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
 
     <div class="signature-block">
         <div class="sig-item">
-            <div class="sig-line">SCHOOL HEAD / PRINCIPAL</div>
+            <div class="sig-line">School Head / Principal</div>
             <div class="sig-label">Date: <?= date('F d, Y') ?></div>
         </div>
         <div class="sig-item">
-            <div class="sig-line">REGISTRAR</div>
+            <div class="sig-line">Registrar</div>
             <div class="sig-label">USAT College Sagay City, Inc.</div>
         </div>
     </div>
 
     <div class="doc-footer">
-        Generated on <?= date('F d, Y h:i A') ?> · SF 10 - SHS · USAT College Sagay City, Inc.
+        Generated on <?= date('F d, Y h:i A') ?> · SF 10 – SHS · USAT College Sagay City, Inc.
     </div>
 
 </div>
@@ -858,10 +965,10 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const PAPER_SIZES = {
-    long:   { page: '8.5in 13in',  w: '215.9mm', h: '330.2mm', label: 'Long Bond' },
-    legal:  { page: '8.5in 14in',  w: '215.9mm', h: '355.6mm', label: 'Legal' },
-    a4:     { page: '210mm 297mm', w: '210mm',   h: '297mm',   label: 'A4' },
-    letter: { page: '8.5in 11in',  w: '215.9mm', h: '279.4mm', label: 'Short Bond' },
+    long:   { page: '8.5in 13in',  w: '215.9mm', h: '330.2mm' },
+    legal:  { page: '8.5in 14in',  w: '215.9mm', h: '355.6mm' },
+    a4:     { page: '210mm 297mm', w: '210mm',   h: '297mm'   },
+    letter: { page: '8.5in 11in',  w: '215.9mm', h: '279.4mm' },
 };
 
 let currentPaper = 'long';
