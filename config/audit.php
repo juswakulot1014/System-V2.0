@@ -9,6 +9,8 @@
 //   audit_log($conn, 'student.delete', ['type' => 'student', 'id' => 42]);
 //   audit_log($conn, 'grade.edit',     ['type' => 'grade',   'id' => 7, 'old' => 88, 'new' => 92]);
 //
+//   audit_diff($conn, 'grade.update', $before, $after, 'grade', $grade_id);
+//
 // The function never throws. If the log write fails (missing table, DB down),
 // it silently logs to error_log and returns — the page keeps running.
 // Never let auditing break the actual request.
@@ -59,5 +61,71 @@ if (!function_exists('audit_log')) {
             error_log('audit_log: execute failed: ' . $stmt->error);
         }
         // Do NOT close the statement — it is reused across the request via `static`.
+    }
+}
+
+if (!function_exists('audit_diff')) {
+
+    /**
+     * Log a field-level diff between two states of the same record.
+     *
+     * Only fields whose values actually changed are recorded. If nothing
+     * changed, the function is a no-op — no empty row is written.
+     *
+     * The resulting audit_log row has:
+     *   action      = $action
+     *   target_type = $entity_type
+     *   target_id   = $entity_id
+     *   meta        = {
+     *                   "type":    "<entity_type>",
+     *                   "id":      <entity_id>,
+     *                   "changes": { "field": {"from": X, "to": Y}, ... }
+     *                 }
+     *
+     * @param mysqli $conn
+     * @param string $action      Dotted action name, e.g. 'grade.update'
+     * @param array  $before      Old column => value map
+     * @param array  $after       New column => value map
+     * @param string $entity_type e.g. 'grade', 'education'
+     * @param int    $entity_id   Primary key of the affected row
+     */
+    function audit_diff(
+        mysqli $conn,
+        string $action,
+        array  $before,
+        array  $after,
+        string $entity_type,
+        int    $entity_id
+    ): void {
+        $keys    = array_unique(array_merge(array_keys($before), array_keys($after)));
+        $changes = [];
+
+        foreach ($keys as $field) {
+            $old = $before[$field] ?? null;
+            $new = $after[$field]  ?? null;
+
+            // Numeric-aware compare so 75 vs "75.00" doesn't create false diffs.
+            if (is_numeric($old) && is_numeric($new)) {
+                if ((float)$old === (float)$new) continue;
+            } elseif ((string)$old === (string)$new) {
+                continue;
+            }
+
+            $changes[$field] = [
+                'from' => $old,
+                'to'   => $new,
+            ];
+        }
+
+        // Nothing actually changed → don't pollute the audit trail.
+        if (empty($changes)) {
+            return;
+        }
+
+        audit_log($conn, $action, [
+            'type'    => $entity_type,
+            'id'      => $entity_id,
+            'changes' => $changes,
+        ]);
     }
 }
