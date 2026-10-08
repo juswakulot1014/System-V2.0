@@ -50,6 +50,17 @@ function statSizeClass($val) {
 }
 
 /**
+ * Derive remarks from a numeric grade. 75 is the passing threshold,
+ * matching the `.grade-pass` / `.grade-fail` styling below.
+ * Returns null when grade is null (blank).
+ */
+function derive_remarks($grade): ?string {
+    if ($grade === null || $grade === '') return null;
+    if (!is_numeric($grade))          return null;
+    return ((float)$grade >= 75) ? 'Passed' : 'Failed';
+}
+
+/**
  * Encrypt and store a document file.
  * Returns metadata array on success. Throws on failure.
  */
@@ -404,6 +415,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_grade'])) {
     $gr   = ($_POST['grade'] ?? '') !== '' ? (float)$_POST['grade'] : null;
     $rem  = trim($_POST['remarks'] ?? '');
 
+    // Auto-derive remarks from the grade (75 = passing threshold).
+    // Ignore whatever the client sent so the DB is always consistent.
+    if ($gr !== null) {
+        $rem = derive_remarks($gr);
+    }
+
     if (!in_array($term, getTerms(), true)) {
         $_SESSION['error'] = 'Invalid term selected.';
         header("Location: view_student.php?id=$sid"); exit();
@@ -460,6 +477,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_grade'])) {
     $sn   = trim($_POST['subject_name'] ?? '');
     $gr   = ($_POST['grade'] ?? '') !== '' ? (float)$_POST['grade'] : null;
     $rem  = trim($_POST['remarks'] ?? '');
+
+    // Auto-derive remarks from the grade (75 = passing threshold).
+    if ($gr !== null) {
+        $rem = derive_remarks($gr);
+    }
 
     if (!in_array($term, getTerms(), true)) {
         $_SESSION['error'] = 'Invalid term selected.';
@@ -1334,6 +1356,13 @@ $csrf_token  = csrf_token();
         }
         .form-text{font-size:.72rem;color:var(--text-3)}
 
+        /* Read-only auto-derived remarks field */
+        .form-control[readonly]{
+            background:var(--surface-2);
+            color:var(--text-2);
+            cursor:not-allowed;
+        }
+
         /* ============================================================
            Empty state
            ============================================================ */
@@ -2104,8 +2133,12 @@ $csrf_token  = csrf_token();
                     </select>
                     <input name="subject_code" class="form-control form-control-sm mb-2" placeholder="Subject Code" required>
                     <input name="subject_name" class="form-control form-control-sm mb-2" placeholder="Subject Name" required>
-                    <input type="number" step="0.01" name="grade" class="form-control form-control-sm mb-2" placeholder="Grade">
-                    <input name="remarks" class="form-control form-control-sm" placeholder="Remarks">
+                    <input type="number" step="0.01" name="grade" id="ag_grd"
+                           class="form-control form-control-sm mb-2" placeholder="Grade"
+                           oninput="autoRemarks(this, 'ag_rem')">
+                    <input name="remarks" id="ag_rem"
+                           class="form-control form-control-sm" placeholder="Remarks (auto)"
+                           readonly>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
@@ -2137,8 +2170,12 @@ $csrf_token  = csrf_token();
                     </select>
                     <input name="subject_code" id="eg_code" class="form-control form-control-sm mb-2" required>
                     <input name="subject_name" id="eg_name" class="form-control form-control-sm mb-2" required>
-                    <input type="number" step="0.01" name="grade" id="eg_grd" class="form-control form-control-sm mb-2">
-                    <input name="remarks" id="eg_rem" class="form-control form-control-sm">
+                    <input type="number" step="0.01" name="grade" id="eg_grd"
+                           class="form-control form-control-sm mb-2"
+                           oninput="autoRemarks(this, 'eg_rem')">
+                    <input name="remarks" id="eg_rem"
+                           class="form-control form-control-sm" placeholder="Remarks (auto)"
+                           readonly>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
@@ -2312,6 +2349,24 @@ $('#btnUpDoc').click(function () {
 });
 
 // ---------- Grade modals ----------
+const PASSING_GRADE = 75;
+
+// Live-derive remarks from the grade value (75 = passing threshold).
+function autoRemarks(gradeEl, remarksId) {
+    const el = document.getElementById(remarksId);
+    if (!el) return;
+
+    const v = (gradeEl.value || '').trim();
+    if (v === '') { el.value = ''; return; }
+
+    const g = parseFloat(v);
+    if (isNaN(g)) { el.value = ''; return; }
+
+    el.value = g >= PASSING_GRADE ? 'Passed' : 'Failed';
+}
+
+// When the edit modal opens, recompute remarks from the prefilled grade
+// so a stale "Passed" never survives an edit that lowers the grade below 75.
 $('.edit-grd-btn').click(function () {
     var b = $(this);
     $('#eg_id').val(b.data('id'));
@@ -2320,6 +2375,16 @@ $('.edit-grd-btn').click(function () {
     $('#eg_name').val(b.data('name'));
     $('#eg_grd').val(b.data('grd'));
     $('#eg_rem').val(b.data('rem'));
+
+    // Re-derive from the grade itself, ignoring the stored remark.
+    autoRemarks(document.getElementById('eg_grd'), 'eg_rem');
+});
+
+// Same for the Add Grade modal — when it opens, force remarks empty
+// (a previous session's value won't leak in).
+$('#addGradeModal').on('shown.bs.modal', function () {
+    const g = document.getElementById('ag_grd');
+    if (g) autoRemarks(g, 'ag_rem');
 });
 
 $('.del-grd-btn').click(function () {
