@@ -4,52 +4,122 @@ require_once __DIR__ . '/../config/auth.php';
 $current_page = basename($_SERVER['PHP_SELF']);
 
 // ====================== FETCH DASHBOARD DATA ======================
-// Total counts
-$total_students = $conn->query("SELECT COUNT(*) as cnt FROM students_info")->fetch_assoc()['cnt'] ?? 0;
-$total_enrolled = $conn->query("SELECT COUNT(DISTINCT student_id) as cnt FROM enrollment_form")->fetch_assoc()['cnt'] ?? 0;
-$active_enrollment = $conn->query("SELECT COUNT(*) as cnt FROM enrollment_form WHERE status='Active' OR status IS NULL")->fetch_assoc()['cnt'] ?? 0;
-$total_sections = $conn->query("SELECT COUNT(DISTINCT section) as cnt FROM enrollment_form WHERE section IS NOT NULL AND section != ''")->fetch_assoc()['cnt'] ?? 0;
+// NOTE: Graduated students are excluded from every dashboard query.
+// They only appear in reports.php.
 
-// Gender stats
-$gender = $conn->query("SELECT SUM(CASE WHEN sex='Male' THEN 1 ELSE 0 END) as boys, SUM(CASE WHEN sex='Female' THEN 1 ELSE 0 END) as girls FROM students_info")->fetch_assoc();
-$boys = (int)($gender['boys'] ?? 0);
+// Total students — exclude anyone whose enrollment is Graduated
+$total_students = $conn->query("
+    SELECT COUNT(*) as cnt FROM students_info s
+    WHERE NOT EXISTS (
+        SELECT 1 FROM enrollment_form e
+        WHERE e.student_id = s.student_id AND e.status = 'Graduated'
+    )
+")->fetch_assoc()['cnt'] ?? 0;
+
+// Total enrollments (distinct students who are not graduated)
+$total_enrolled = $conn->query("
+    SELECT COUNT(DISTINCT student_id) as cnt FROM enrollment_form
+    WHERE status IS NULL OR status != 'Graduated'
+")->fetch_assoc()['cnt'] ?? 0;
+
+// Active enrollment — unchanged (already filters to Active or NULL)
+$active_enrollment = $conn->query("
+    SELECT COUNT(*) as cnt FROM enrollment_form
+    WHERE status='Active' OR status IS NULL
+")->fetch_assoc()['cnt'] ?? 0;
+
+// Sections — exclude graduated
+$total_sections = $conn->query("
+    SELECT COUNT(DISTINCT section) as cnt FROM enrollment_form
+    WHERE section IS NOT NULL AND section != ''
+      AND (status IS NULL OR status != 'Graduated')
+")->fetch_assoc()['cnt'] ?? 0;
+
+// Gender stats — exclude graduated
+$gender = $conn->query("
+    SELECT
+        SUM(CASE WHEN s.sex='Male' THEN 1 ELSE 0 END) as boys,
+        SUM(CASE WHEN s.sex='Female' THEN 1 ELSE 0 END) as girls
+    FROM students_info s
+    WHERE NOT EXISTS (
+        SELECT 1 FROM enrollment_form e
+        WHERE e.student_id = s.student_id AND e.status = 'Graduated'
+    )
+")->fetch_assoc();
+$boys  = (int)($gender['boys']  ?? 0);
 $girls = (int)($gender['girls'] ?? 0);
 
-// Recent enrollments
-$recent = $conn->query("SELECT s.student_id, s.first_name, s.last_name, s.lrn, s.student_id_number, e.grade_level, e.strand, e.section, e.enrolled_at FROM students_info s JOIN enrollment_form e ON s.student_id=e.student_id ORDER BY e.enrolled_at DESC LIMIT 8");
+// Recent enrollments — exclude graduated
+$recent = $conn->query("
+    SELECT s.student_id, s.first_name, s.last_name, s.lrn, s.student_id_number,
+           e.grade_level, e.strand, e.section, e.enrolled_at
+    FROM students_info s
+    JOIN enrollment_form e ON s.student_id = e.student_id
+    WHERE (e.status IS NULL OR e.status != 'Graduated')
+    ORDER BY e.enrolled_at DESC
+    LIMIT 8
+");
 
-// Grade level distribution
-$grade_dist = $conn->query("SELECT grade_level, COUNT(*) as cnt FROM enrollment_form GROUP BY grade_level ORDER BY grade_level");
+// Grade level distribution — exclude graduated
+$grade_dist = $conn->query("
+    SELECT grade_level, COUNT(*) as cnt FROM enrollment_form
+    WHERE (status IS NULL OR status != 'Graduated')
+    GROUP BY grade_level
+    ORDER BY grade_level
+");
 $grade_labels = []; $grade_data = [];
-while($g = $grade_dist->fetch_assoc()) { $grade_labels[] = $g['grade_level']; $grade_data[] = (int)$g['cnt']; }
+while($g = $grade_dist->fetch_assoc()) {
+    $grade_labels[] = $g['grade_level'];
+    $grade_data[]   = (int)$g['cnt'];
+}
 
-// Strand distribution
-$strand_dist = $conn->query("SELECT COALESCE(strand,'Unassigned') as strand, COUNT(*) as cnt FROM enrollment_form GROUP BY strand ORDER BY cnt DESC");
+// Strand distribution — exclude graduated
+$strand_dist = $conn->query("
+    SELECT COALESCE(strand,'Unassigned') as strand, COUNT(*) as cnt
+    FROM enrollment_form
+    WHERE (status IS NULL OR status != 'Graduated')
+    GROUP BY strand
+    ORDER BY cnt DESC
+");
 $strand_labels = []; $strand_data = []; $strand_colors = [];
 $colors = ['#4f46e5','#7c3aed','#6366f1','#818cf8','#a5b4fc','#c7d2fe','#8b5cf6','#6d28d9'];
 $ci = 0;
 while($s = $strand_dist->fetch_assoc()) {
     $strand_labels[] = $s['strand'];
-    $strand_data[] = (int)$s['cnt'];
+    $strand_data[]   = (int)$s['cnt'];
     $strand_colors[] = $colors[$ci % count($colors)];
     $ci++;
 }
 
-// Unassigned students
-$unassigned = $conn->query("SELECT COUNT(*) as cnt FROM enrollment_form WHERE section IS NULL OR section = ''")->fetch_assoc()['cnt'] ?? 0;
+// Unassigned students — exclude graduated
+$unassigned = $conn->query("
+    SELECT COUNT(*) as cnt FROM enrollment_form
+    WHERE (section IS NULL OR section = '')
+      AND (status IS NULL OR status != 'Graduated')
+")->fetch_assoc()['cnt'] ?? 0;
 
-// Recently added (this week)
+// Recently added (this week) — exclude graduated
 $week_start = date('Y-m-d', strtotime('monday this week'));
-$new_this_week = $conn->query("SELECT COUNT(*) as cnt FROM students_info WHERE created_at >= '$week_start'")->fetch_assoc()['cnt'] ?? 0;
+$new_this_week = $conn->query("
+    SELECT COUNT(*) as cnt FROM students_info s
+    WHERE s.created_at >= '$week_start'
+      AND NOT EXISTS (
+          SELECT 1 FROM enrollment_form e
+          WHERE e.student_id = s.student_id AND e.status = 'Graduated'
+      )
+")->fetch_assoc()['cnt'] ?? 0;
 
 // ====================== FILTERS ======================
-$search = trim($_GET['search'] ?? '');
+$search       = trim($_GET['search'] ?? '');
 $grade_filter = trim($_GET['grade_level'] ?? '');
-$sy_filter = trim($_GET['school_year'] ?? '');
+$sy_filter    = trim($_GET['school_year'] ?? '');
 
-$where = [];
+$where  = [];
 $params = [];
-$types = "";
+$types  = "";
+
+// Always exclude graduated students from the directory
+$where[] = "(e.status IS NULL OR e.status != 'Graduated')";
 
 if ($search !== '') {
     $where[] = "(s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)";
@@ -58,9 +128,9 @@ if ($search !== '') {
     $types .= "ssss";
 }
 if ($grade_filter !== '') { $where[] = "e.grade_level = ?"; $params[] = $grade_filter; $types .= "s"; }
-if ($sy_filter !== '') { $where[] = "e.school_year = ?"; $params[] = $sy_filter; $types .= "s"; }
+if ($sy_filter !== '')    { $where[] = "e.school_year = ?"; $params[] = $sy_filter;    $types .= "s"; }
 
-$where_clause = !empty($where) ? "WHERE " . implode(" AND ", $where) : "";
+$where_clause = "WHERE " . implode(" AND ", $where);
 
 // Students list with filters
 $students_sql = "SELECT s.student_id, s.first_name, s.last_name, s.middle_name, s.lrn, s.student_id_number, s.sex, s.age, e.grade_level, e.school_year, e.strand, e.program, e.section, e.status FROM students_info s LEFT JOIN enrollment_form e ON s.student_id=e.student_id $where_clause ORDER BY s.last_name ASC LIMIT 100";
@@ -71,9 +141,19 @@ $students = $stmt->get_result();
 $filtered_count = $students->num_rows;
 $stmt->close();
 
-// Dropdowns
-$grade_levels = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL ORDER BY grade_level ASC");
-$school_years = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL ORDER BY school_year DESC");
+// Dropdowns — exclude graduated options
+$grade_levels = $conn->query("
+    SELECT DISTINCT grade_level FROM enrollment_form
+    WHERE grade_level IS NOT NULL
+      AND (status IS NULL OR status != 'Graduated')
+    ORDER BY grade_level ASC
+");
+$school_years = $conn->query("
+    SELECT DISTINCT school_year FROM enrollment_form
+    WHERE school_year IS NOT NULL
+      AND (status IS NULL OR status != 'Graduated')
+    ORDER BY school_year DESC
+");
 
 $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 'dark' : 'light';
 ?>
@@ -475,7 +555,7 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     $__current = basename($_SERVER['PHP_SELF']);
     $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
     // Student sub-pages all highlight "Students"
-    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php','student_documents.php'];
+    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
     $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
     $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
 ?>
@@ -492,6 +572,17 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         <div class="nav-label">Overview</div>
         <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
+        <?php
+    $__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
+?>
+<a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
+    <i class="bi bi-hourglass-split"></i> Pending
+    <?php if ($__pending_count > 0): ?>
+        <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
+            <?= $__pending_count ?>
+        </span>
+    <?php endif; ?>
+</a>
         <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
 
         <?php if ($__super): ?>

@@ -324,6 +324,17 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         <div class="nav-label">Overview</div>
         <a href="dashboard.php"><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php"><i class="bi bi-people-fill"></i> Students</a>
+        <?php
+    $__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
+?>
+<a href="pending_enrollments.php"<?= basename($_SERVER['PHP_SELF']) === 'pending_enrollments.php' ? ' class="active"' : '' ?>>
+    <i class="bi bi-hourglass-split"></i> Pending
+    <?php if ($__pending_count > 0): ?>
+        <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
+            <?= $__pending_count ?>
+        </span>
+    <?php endif; ?>
+</a>
         <a href="reports.php"><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
         <div class="nav-label" style="margin-top:.5rem">Administration</div>
         <a href="create_account.php"><i class="bi bi-person-plus"></i> Accounts</a>

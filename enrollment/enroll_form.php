@@ -7,6 +7,8 @@ if (session_status() === PHP_SESSION_NONE) {
 // Include database only once
 include_once __DIR__ . "/../config/db.php";
 require_once __DIR__ . "/../config/paths.php";
+require_once __DIR__ . "/../config/file_verify.php";
+require_once __DIR__ . "/../config/document_content_verify.php";
 
 // Generate CSRF token if not exists
 if (empty($_SESSION['csrf_token'])) {
@@ -39,7 +41,8 @@ $t = [
         'no_file' => 'No file chosen',
         'capture' => 'Capture Photo',
         'good_moral' => 'Good Moral Certificate',
-        'jhs_certificate' => 'Junior High School Certificate (Original)',
+        'jhs_certificate_front' => 'Junior High School Certificate (Front)',
+        'jhs_certificate_back'  => 'Junior High School Certificate (Back)',
         'birth_certificate' => 'NSO/PSA Birth Certificate (Original)',
         'pictures_2x2' => '2 pcs. 2×2 picture',
         'lrn' => 'LRN *', 'lname' => 'Last Name *', 'fname' => 'First Name *', 'mname' => 'Middle Name',
@@ -127,6 +130,9 @@ $t = [
         'close' => 'Close',
         'close_alert' => 'Close this message',
         'back_to_login' => 'Back to Login',
+        'select_placeholder' => '— Select —',
+        'other_specify' => 'Other (specify)',
+        'religion_other_placeholder' => 'Enter religion',
     ],
     'fil' => [
         'school' => 'USAT COLLEGE SAGAY CITY INC.',
@@ -146,7 +152,8 @@ $t = [
         'no_file' => 'Walang napiling file',
         'capture' => 'Kumuha ng Larawan',
         'good_moral' => 'Sertipiko ng Mabuting Asal',
-        'jhs_certificate' => 'Sertipiko mula sa Junior High School (Orihinal)',
+        'jhs_certificate_front' => 'Sertipiko mula sa Junior High School (Harap)',
+        'jhs_certificate_back'  => 'Sertipiko mula sa Junior High School (Likod)',
         'birth_certificate' => 'NSO/PSA Sertipiko ng Kapanganakan (Orihinal)',
         'pictures_2x2' => '2 piraso na 2×2 larawan',
         'lrn' => 'LRN *', 'lname' => 'Apelyido *', 'fname' => 'Pangalan *', 'mname' => 'Gitnang Pangalan',
@@ -234,8 +241,56 @@ $t = [
         'close' => 'Isara',
         'close_alert' => 'Isara ang mensaheng ito',
         'back_to_login' => 'Bumalik sa Login',
+        'select_placeholder' => '— Pumili —',
+        'other_specify' => 'Iba pa (ispesipiko)',
+        'religion_other_placeholder' => 'Ilagay ang relihiyon',
     ]
 ];
+
+/* =========================================================
+   MASTER DROPDOWN LISTS
+   ========================================================= */
+$CIVIL_STATUS_OPTIONS = ['Single', 'Married', 'Widowed', 'Separated', 'Annulled'];
+$NATIONALITY_OPTIONS  = ['Filipino', 'American', 'Chinese', 'Japanese', 'Korean', 'Australian', 'British', 'Canadian', 'Indian', 'Spanish', 'Other'];
+$RELIGION_OPTIONS     = [
+    'Roman Catholic', 'Islam', 'Iglesia ni Cristo', 'Protestant',
+    'Born Again Christian', 'Seventh-Day Adventist', "Jehovah's Witnesses",
+    'Bible Baptist', 'Mormon (LDS)', 'Buddhism', 'Hinduism', 'Atheist',
+];
+$TRACK_OPTIONS = ['TECHPRO ELECTIVES', 'ACADEMIC', 'TVL', 'SPORTS', 'ARTS & DESIGN'];
+$STRAND_PROGRAMS = [
+    'Automotive and Small Engine Technologies' => [
+        'Driving and Automotive Servicing',
+        'Automotive Servicing (Electrical Repair)',
+        'Automotive Servicing (Engine and Chassis Repairs)',
+    ],
+    'Construction and Building Technologies' => [
+        'Carpentry',
+        'Manual Metal Arc Welding',
+    ],
+    'ICT Support and Computer Programming Technologies' => [
+        'Computer Programming (Java)',
+        'Computer Programming (.NET)',
+        'Computer System Servicing',
+    ],
+    'Industrial Technologies' => [
+        'Electronics Product Assembly and Servicing',
+    ],
+    'Agri-Fishery Business and Food Innovation' => [
+        'Agricultural Crops Production',
+    ],
+    'Hospitality and Tourism' => [
+        'Food and Beverage Operation',
+        'Hotel Operation (Housekeeping)',
+    ],
+];
+
+// School year options: current and 3 surrounding years
+$current_year = (int)date('Y');
+$SY_OPTIONS = [];
+for ($y = $current_year - 1; $y <= $current_year + 2; $y++) {
+    $SY_OPTIONS[] = $y . '-' . ($y + 1);
+}
 
 /* =========================================================
    AJAX ENDPOINTS
@@ -245,30 +300,20 @@ if (isset($_GET['action'])) {
 
     if ($_GET['action'] === 'check_lrn') {
         $lrn = trim($_POST['lrn'] ?? '');
-
         if (!preg_match('/^\d{12}$/', $lrn)) {
-            echo json_encode([
-                'valid'   => false,
-                'exists'  => false,
-                'message' => 'LRN must be 12 digits',
-            ]);
+            echo json_encode(['valid' => false, 'exists' => false, 'message' => 'LRN must be 12 digits']);
             exit;
         }
-
         $stmt = $conn->prepare("
-            SELECT s.student_id, s.first_name, s.middle_name, s.last_name,
-                   e.grade_level, e.school_year
+            SELECT s.student_id, s.first_name, s.middle_name, s.last_name, e.grade_level, e.school_year
             FROM students_info s
             LEFT JOIN enrollment_form e ON s.student_id = e.student_id
-            WHERE s.lrn = ?
-            ORDER BY e.enrollment_id DESC
-            LIMIT 1
+            WHERE s.lrn = ? ORDER BY e.enrollment_id DESC LIMIT 1
         ");
         $stmt->bind_param("s", $lrn);
         $stmt->execute();
         $row = $stmt->get_result()->fetch_assoc();
         $stmt->close();
-
         $existing = null;
         if ($row) {
             $existing = [
@@ -278,12 +323,7 @@ if (isset($_GET['action'])) {
                 'school_year' => $row['school_year'] ?? null,
             ];
         }
-
-        echo json_encode([
-            'valid'    => true,
-            'exists'   => $row !== null,
-            'existing' => $existing,
-        ]);
+        echo json_encode(['valid' => true, 'exists' => $row !== null, 'existing' => $existing]);
         exit;
     }
 
@@ -291,13 +331,10 @@ if (isset($_GET['action'])) {
         $fn = trim($_POST['first_name'] ?? '');
         $mn = trim($_POST['middle_name'] ?? '');
         $ln = trim($_POST['last_name'] ?? '');
-
         if ($fn === '' || $ln === '') {
             echo json_encode(['checked' => false, 'matches' => []]);
             exit;
         }
-
-        // Case-insensitive match on first + last (+ middle if provided)
         if ($mn !== '') {
             $stmt = $conn->prepare("
                 SELECT s.student_id, s.lrn, s.first_name, s.middle_name, s.last_name,
@@ -307,8 +344,7 @@ if (isset($_GET['action'])) {
                 WHERE LOWER(s.first_name) = LOWER(?)
                   AND LOWER(s.last_name)  = LOWER(?)
                   AND LOWER(COALESCE(s.middle_name, '')) = LOWER(?)
-                ORDER BY e.enrollment_id DESC
-                LIMIT 5
+                ORDER BY e.enrollment_id DESC LIMIT 5
             ");
             $stmt->bind_param("sss", $fn, $ln, $mn);
         } else {
@@ -317,16 +353,13 @@ if (isset($_GET['action'])) {
                        s.birth_date, e.grade_level, e.school_year
                 FROM students_info s
                 LEFT JOIN enrollment_form e ON s.student_id = e.student_id
-                WHERE LOWER(s.first_name) = LOWER(?)
-                  AND LOWER(s.last_name)  = LOWER(?)
-                ORDER BY e.enrollment_id DESC
-                LIMIT 5
+                WHERE LOWER(s.first_name) = LOWER(?) AND LOWER(s.last_name) = LOWER(?)
+                ORDER BY e.enrollment_id DESC LIMIT 5
             ");
             $stmt->bind_param("ss", $fn, $ln);
         }
         $stmt->execute();
         $res = $stmt->get_result();
-
         $matches = [];
         while ($r = $res->fetch_assoc()) {
             $matches[] = [
@@ -339,8 +372,67 @@ if (isset($_GET['action'])) {
             ];
         }
         $stmt->close();
-
         echo json_encode(['checked' => true, 'matches' => $matches]);
+        exit;
+    }
+
+    if ($_GET['action'] === 'strand_trends') {
+        $latest_row = $conn->query("
+            SELECT school_year FROM enrollment_form
+            WHERE school_year IS NOT NULL AND school_year != ''
+            ORDER BY school_year DESC LIMIT 1
+        ")->fetch_assoc();
+        $latest_sy = $latest_row['school_year'] ?? null;
+        $trends = []; $total = 0;
+
+        if ($latest_sy) {
+            $prev_sy = null;
+            if (preg_match('/^(\d{4})-(\d{4})$/', $latest_sy, $m)) {
+                $prev_sy = ((int)$m[1] - 1) . '-' . ((int)$m[2] - 1);
+            }
+            $current_counts = [];
+            $stmt = $conn->prepare("
+                SELECT strand, COUNT(DISTINCT student_id) AS enrolled
+                FROM enrollment_form
+                WHERE school_year = ? AND strand IS NOT NULL AND strand != ''
+                GROUP BY strand
+            ");
+            $stmt->bind_param('s', $latest_sy);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            while ($r = $res->fetch_assoc()) $current_counts[$r['strand']] = (int)$r['enrolled'];
+            $stmt->close();
+            $total = array_sum($current_counts);
+
+            $prev_counts = [];
+            if ($prev_sy) {
+                $stmt = $conn->prepare("
+                    SELECT strand, COUNT(DISTINCT student_id) AS enrolled
+                    FROM enrollment_form
+                    WHERE school_year = ? AND strand IS NOT NULL AND strand != ''
+                    GROUP BY strand
+                ");
+                $stmt->bind_param('s', $prev_sy);
+                $stmt->execute();
+                $res = $stmt->get_result();
+                while ($r = $res->fetch_assoc()) $prev_counts[$r['strand']] = (int)$r['enrolled'];
+                $stmt->close();
+            }
+
+            foreach ($current_counts as $strand => $curr) {
+                $prev = $prev_counts[$strand] ?? 0;
+                $growth = null;
+                if ($prev > 0) $growth = round((($curr - $prev) / $prev) * 100, 1);
+                elseif ($curr > 0) $growth = 'new';
+                $trends[$strand] = [
+                    'current'  => $curr,
+                    'previous' => $prev,
+                    'pct'      => $total > 0 ? round(($curr / $total) * 100, 1) : 0,
+                    'growth'   => $growth,
+                ];
+            }
+        }
+        echo json_encode(['sy' => $latest_sy, 'total' => $total, 'trends' => $trends]);
         exit;
     }
 
@@ -366,7 +458,6 @@ $fields = [
     'is_4ps' => ['required' => true]
 ];
 
-// Height / weight limits
 const HEIGHT_MIN = 100;
 const HEIGHT_MAX = 250;
 const WEIGHT_MIN = 20;
@@ -377,16 +468,13 @@ function purge_old_staging(): void
     if (!is_dir(STAGING_DIR)) return;
     $now = time();
     foreach (glob(STAGING_DIR . '*') as $f) {
-        if (is_file($f) && ($now - filemtime($f)) > 7200) {
-            @unlink($f);
-        }
+        if (is_file($f) && ($now - filemtime($f)) > 7200) @unlink($f);
     }
 }
 
 function stage_file(string $tmp_path, string $orig_name, string $label, ?string &$err = null): ?array
 {
     $max = 5 * 1024 * 1024;
-
     $size = @filesize($tmp_path);
     if ($size === false || $size === 0) { $err = "Empty file"; return null; }
     if ($size > $max) { $err = "File too large: " . htmlspecialchars($orig_name); return null; }
@@ -396,10 +484,7 @@ function stage_file(string $tmp_path, string $orig_name, string $label, ?string 
     finfo_close($fi);
 
     $allowed = ['application/pdf', 'image/jpeg', 'image/png'];
-    if (!in_array($mime, $allowed, true)) {
-        $err = "Invalid file type: " . htmlspecialchars($orig_name);
-        return null;
-    }
+    if (!in_array($mime, $allowed, true)) { $err = "Invalid file type: " . htmlspecialchars($orig_name); return null; }
 
     $token = bin2hex(random_bytes(16));
     $ext = strtolower(pathinfo($orig_name, PATHINFO_EXTENSION));
@@ -411,13 +496,7 @@ function stage_file(string $tmp_path, string $orig_name, string $label, ?string 
     }
     @chmod($staged, 0600);
 
-    return [
-        'label'        => $label,
-        'staging_path' => $staged,
-        'mime'         => $mime,
-        'name'         => $orig_name,
-        'size'         => $size,
-    ];
+    return ['label' => $label, 'staging_path' => $staged, 'mime' => $mime, 'name' => $orig_name, 'size' => $size];
 }
 
 function stage_bytes(string $bin, string $label, string $orig_name, ?string &$err = null): ?array
@@ -426,48 +505,31 @@ function stage_bytes(string $bin, string $label, string $orig_name, ?string &$er
     if ($bin === '' || strlen($bin) > $max) { $err = "Invalid capture size"; return null; }
 
     $tmp = tempnam(sys_get_temp_dir(), 'cam_');
-    if ($tmp === false || file_put_contents($tmp, $bin) === false) {
-        $err = "Cannot stage capture";
-        return null;
-    }
+    if ($tmp === false || file_put_contents($tmp, $bin) === false) { $err = "Cannot stage capture"; return null; }
 
     $fi = finfo_open(FILEINFO_MIME_TYPE);
     $mime = finfo_file($fi, $tmp);
     finfo_close($fi);
 
     $allowed = ['application/pdf', 'image/jpeg', 'image/png'];
-    if (!in_array($mime, $allowed, true)) {
-        @unlink($tmp);
-        $err = "Invalid capture type";
-        return null;
-    }
+    if (!in_array($mime, $allowed, true)) { @unlink($tmp); $err = "Invalid capture type"; return null; }
 
     $token = bin2hex(random_bytes(16));
     $ext = $mime === 'application/pdf' ? 'pdf' : ($mime === 'image/png' ? 'png' : 'jpg');
     $staged = STAGING_DIR . $token . '.' . $ext;
 
-    if (!@rename($tmp, $staged)) {
-        @unlink($tmp);
-        $err = "Cannot store capture";
-        return null;
-    }
+    if (!@rename($tmp, $staged)) { @unlink($tmp); $err = "Cannot store capture"; return null; }
     @chmod($staged, 0600);
 
-    return [
-        'label'        => $label,
-        'staging_path' => $staged,
-        'mime'         => $mime,
-        'name'         => $orig_name,
-        'size'         => strlen($bin),
-    ];
+    return ['label' => $label, 'staging_path' => $staged, 'mime' => $mime, 'name' => $orig_name, 'size' => strlen($bin)];
 }
 
-// Document options
 $doc_options = [
-    'Good Moral Certificate' => 'good_moral',
-    'Junior High School Certificate (Original)' => 'jhs_certificate',
-    'NSO/PSA Birth Certificate (Original)' => 'birth_certificate',
-    '2 pcs 2×2 picture' => 'pictures_2x2'
+    'Good Moral Certificate'                    => 'good_moral',
+    'Junior High School Certificate (Front)'    => 'jhs_certificate_front',
+    'Junior High School Certificate (Back)'     => 'jhs_certificate_back',
+    'NSO/PSA Birth Certificate (Original)'      => 'birth_certificate',
+    '2 pcs 2×2 picture'                         => 'pictures_2x2'
 ];
 
 /* =========================================================
@@ -483,45 +545,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     foreach ($fields as $f => $rules) {
         $val = $_POST[$f] ?? '';
         if ($f === 'is_4ps') {
-            if (($val === '' || $val === null) && $rules['required']) {
-                $errors[$f] = $t[$lang]['required'];
-            }
+            if (($val === '' || $val === null) && $rules['required']) $errors[$f] = $t[$lang]['required'];
         } else {
             $val = trim($val);
-            if ($rules['required'] && empty($val)) {
-                $errors[$f] = $t[$lang]['required'];
-            } elseif (!empty($val) && isset($rules['pattern']) && !preg_match($rules['pattern'], $val)) {
-                $errors[$f] = $t[$lang][$rules['msg']];
-            }
+            if ($rules['required'] && empty($val)) $errors[$f] = $t[$lang]['required'];
+            elseif (!empty($val) && isset($rules['pattern']) && !preg_match($rules['pattern'], $val)) $errors[$f] = $t[$lang][$rules['msg']];
         }
     }
 
-    // ---- Height limiter ----
+    // Religion: if "Other" was chosen, use the text input value
+    if (($_POST['religion'] ?? '') === '__other__') {
+        $other = trim($_POST['religion_other'] ?? '');
+        $_POST['religion'] = $other;
+    }
+
     if (!empty($_POST['height'])) {
         $h = (float)$_POST['height'];
-        if ($h < HEIGHT_MIN || $h > HEIGHT_MAX) {
-            $errors['height'] = $t[$lang]['invalid_height'];
-        }
+        if ($h < HEIGHT_MIN || $h > HEIGHT_MAX) $errors['height'] = $t[$lang]['invalid_height'];
     }
 
-    // ---- Weight limiter ----
     if (!empty($_POST['weight'])) {
         $w = (float)$_POST['weight'];
-        if ($w < WEIGHT_MIN || $w > WEIGHT_MAX) {
-            $errors['weight'] = $t[$lang]['invalid_weight'];
-        }
+        if ($w < WEIGHT_MIN || $w > WEIGHT_MAX) $errors['weight'] = $t[$lang]['invalid_weight'];
     }
 
-    // ---- Birth date / age ----
     if (!empty($_POST['birth_date'])) {
         $birth = DateTime::createFromFormat('Y-m-d', $_POST['birth_date']);
-        if (!$birth) {
-            $errors['birth_date'] = $t[$lang]['required'];
-        } else {
+        if (!$birth) $errors['birth_date'] = $t[$lang]['required'];
+        else {
             $age = (new DateTime())->diff($birth)->y;
-            if ($age < 14 || $age > 25) {
-                $errors['birth_date'] = $t[$lang]['invalid_age'];
-            }
+            if ($age < 14 || $age > 25) $errors['birth_date'] = $t[$lang]['invalid_age'];
             $_POST['age'] = $age;
         }
     }
@@ -532,36 +585,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    if (empty($_POST['entrance_data'] ?? [])) {
-        $errors['entrance_data'] = $t[$lang]['select_one_entrance'];
-    }
+    if (empty($_POST['entrance_data'] ?? [])) $errors['entrance_data'] = $t[$lang]['select_one_entrance'];
+    if (!empty($_POST['email']) && !filter_var($_POST['email'], FILTER_VALIDATE_EMAIL)) $errors['email'] = $t[$lang]['invalid_email'];
 
-    if (!empty($_POST['email']) && !filter_var($_POST['email'], FILTER_VALIDATE_EMAIL)) {
-        $errors['email'] = $t[$lang]['invalid_email'];
-    }
-
-    // ---- LRN uniqueness (server-side, race-safe) ----
     if (empty($errors['lrn']) && !empty($_POST['lrn'])) {
-        $lrn_check = $conn->prepare("
-            SELECT s.student_id, s.first_name, s.last_name
-            FROM students_info s
-            WHERE s.lrn = ?
-            LIMIT 1
-        ");
+        $lrn_check = $conn->prepare("SELECT s.student_id, s.first_name, s.last_name FROM students_info s WHERE s.lrn = ? LIMIT 1");
         $lrn_check->bind_param("s", $_POST['lrn']);
         $lrn_check->execute();
         $dup = $lrn_check->get_result()->fetch_assoc();
         $lrn_check->close();
-
         if ($dup) {
-            $errors['lrn'] = $t[$lang]['lrn_exists'] . ': '
-                . trim(($dup['last_name'] ?? '') . ', ' . ($dup['first_name'] ?? ''));
+            $errors['lrn'] = $t[$lang]['lrn_exists'] . ': ' . trim(($dup['last_name'] ?? '') . ', ' . ($dup['first_name'] ?? ''));
         }
     }
 
-    // ---- Name duplicate confirmation (soft warning) ----
-    // If the user hasn't acknowledged a name duplicate yet, force them to
-    // return to the form so the JS can prompt them.
     if (empty($errors['first_name']) && empty($errors['last_name'])) {
         $fn = trim($_POST['first_name'] ?? '');
         $mn = trim($_POST['middle_name'] ?? '');
@@ -569,65 +606,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($fn !== '' && $ln !== '') {
             if ($mn !== '') {
-                $nc = $conn->prepare("
-                    SELECT student_id FROM students_info
-                    WHERE LOWER(first_name) = LOWER(?)
-                      AND LOWER(last_name)  = LOWER(?)
-                      AND LOWER(COALESCE(middle_name,'')) = LOWER(?)
-                    LIMIT 1
-                ");
+                $nc = $conn->prepare("SELECT student_id FROM students_info WHERE LOWER(first_name)=LOWER(?) AND LOWER(last_name)=LOWER(?) AND LOWER(COALESCE(middle_name,''))=LOWER(?) LIMIT 1");
                 $nc->bind_param("sss", $fn, $ln, $mn);
             } else {
-                $nc = $conn->prepare("
-                    SELECT student_id FROM students_info
-                    WHERE LOWER(first_name) = LOWER(?)
-                      AND LOWER(last_name)  = LOWER(?)
-                    LIMIT 1
-                ");
+                $nc = $conn->prepare("SELECT student_id FROM students_info WHERE LOWER(first_name)=LOWER(?) AND LOWER(last_name)=LOWER(?) LIMIT 1");
                 $nc->bind_param("ss", $fn, $ln);
             }
             $nc->execute();
             $name_dup_exists = $nc->get_result()->num_rows > 0;
             $nc->close();
-
-            if ($name_dup_exists && empty($_POST['acknowledge_duplicate_name'])) {
-                $errors['name_duplicate'] = 'duplicate_name';
-            }
+            if ($name_dup_exists && empty($_POST['acknowledge_duplicate_name'])) $errors['name_duplicate'] = 'duplicate_name';
         }
     }
 
-    // ---- Process uploaded files ----
     $prev = $_SESSION['uploaded_files'] ?? [];
     $uploaded_files = [];
-
     $checked_labels = $_POST['entrance_data'] ?? [];
 
     foreach ($prev as $doc_key => $info) {
         $label = $info['label'] ?? '';
         $path  = $info['staging_path'] ?? '';
-        if (in_array($label, $checked_labels, true) && $path !== '' && is_file($path)) {
-            $uploaded_files[$doc_key] = $info;
-        } elseif ($path !== '' && is_file($path)) {
-            @unlink($path);
-        }
+        if (in_array($label, $checked_labels, true) && $path !== '' && is_file($path)) $uploaded_files[$doc_key] = $info;
+        elseif ($path !== '' && is_file($path)) @unlink($path);
     }
 
     if (!empty($_FILES['entrance_files']['name']) && is_array($_FILES['entrance_files']['name'])) {
         foreach ($_FILES['entrance_files']['name'] as $doc_key => $name) {
             if ($_FILES['entrance_files']['error'][$doc_key] !== UPLOAD_ERR_OK || $name === '') continue;
-
             $label = array_search($doc_key, $doc_options, true) ?: $doc_key;
             $err = null;
             $meta = stage_file($_FILES['entrance_files']['tmp_name'][$doc_key], $name, $label, $err);
-
             if ($meta) {
-                if (!empty($uploaded_files[$doc_key]['staging_path'])) {
-                    @unlink($uploaded_files[$doc_key]['staging_path']);
-                }
+                if (!empty($uploaded_files[$doc_key]['staging_path'])) @unlink($uploaded_files[$doc_key]['staging_path']);
                 $uploaded_files[$doc_key] = $meta;
-            } else {
-                $errors['upload'] = $err ?: "Upload failed";
-            }
+            } else $errors['upload'] = $err ?: "Upload failed";
         }
     }
 
@@ -636,38 +648,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (empty($data) || strpos($data, 'data:image/') !== 0) continue;
             $comma = strpos($data, ',');
             if ($comma === false) continue;
-
             $bin = base64_decode(substr($data, $comma + 1), true);
             if ($bin === false || $bin === '') continue;
-
             $label = array_search($doc_key, $doc_options, true) ?: $doc_key;
             $err = null;
             $meta = stage_bytes($bin, $label, $label . '.jpg', $err);
-
             if ($meta) {
-                if (!empty($uploaded_files[$doc_key]['staging_path'])) {
-                    @unlink($uploaded_files[$doc_key]['staging_path']);
-                }
+                if (!empty($uploaded_files[$doc_key]['staging_path'])) @unlink($uploaded_files[$doc_key]['staging_path']);
                 $uploaded_files[$doc_key] = $meta;
-            } else {
-                $errors['upload'] = $err ?: "Capture failed";
-            }
+            } else $errors['upload'] = $err ?: "Capture failed";
         }
     }
 
-    // ---- Route ----
+    /* --------------------------------------------------------------
+       Identity verification for the JHS Certificate (Front).
+       Runs after staging so it covers both file uploads and camera
+       captures — both feed into $uploaded_files['jhs_certificate_front'].
+       Extracts text via tesseract (images) or pdftotext (PDFs), then
+       checks that the student name AND LRN appear in the document.
+       -------------------------------------------------------------- */
+    unset($_SESSION['name_verify']); // reset each attempt
+    $jhs_key = 'jhs_certificate_front';
+    if (!empty($uploaded_files[$jhs_key]['staging_path'])
+        && is_file($uploaded_files[$jhs_key]['staging_path'])) {
+        $_SESSION['name_verify'] = verify_name_in_document(
+            $uploaded_files[$jhs_key]['staging_path'],
+            (string)($uploaded_files[$jhs_key]['mime'] ?? ''),
+            [
+                'first_name'  => $_POST['first_name']  ?? '',
+                'middle_name' => $_POST['middle_name'] ?? '',
+                'last_name'   => $_POST['last_name']   ?? '',
+                'lrn'         => $_POST['lrn']         ?? '',
+            ]
+        );
+    }
+
     if (empty($errors)) {
-        $_SESSION['form_data']      = $_POST;
+        $_SESSION['form_data'] = $_POST;
         $_SESSION['uploaded_files'] = $uploaded_files;
         header('Location: ' . basename(__FILE__) . '?review=1');
         exit;
     } else {
-        // Special-case: name duplicate → bounce back so JS can prompt
-        if (isset($errors['name_duplicate'])) {
-            $_SESSION['name_dup_pending'] = true;
-        }
-        $_SESSION['errors']         = $errors;
-        $_SESSION['old']            = $_POST;
+        if (isset($errors['name_duplicate'])) $_SESSION['name_dup_pending'] = true;
+        $_SESSION['errors'] = $errors;
+        $_SESSION['old'] = $_POST;
         $_SESSION['uploaded_files'] = $uploaded_files;
         header('Location: ' . basename(__FILE__));
         exit;
@@ -679,9 +703,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
    ========================================================= */
 if (isset($_GET['edit'])) {
     $mode = 'form';
-    if (isset($_SESSION['form_data'])) {
-        $_POST = $_SESSION['form_data'];
-    }
+    if (isset($_SESSION['form_data'])) $_POST = $_SESSION['form_data'];
 } elseif (isset($_GET['review']) && isset($_SESSION['form_data'])) {
     $mode = 'review';
     $_POST = $_SESSION['form_data'];
@@ -690,6 +712,8 @@ if (isset($_GET['edit'])) {
     if (isset($_SESSION['old'])) {
         $_POST = $_SESSION['old'];
         unset($_SESSION['old']);
+    } elseif (isset($_SESSION['form_data'])) {
+        $_POST = $_SESSION['form_data'];
     }
     if (isset($_SESSION['errors'])) {
         $errors = $_SESSION['errors'];
@@ -701,7 +725,6 @@ $name_dup_pending = false;
 if (!empty($_SESSION['name_dup_pending'])) {
     $name_dup_pending = true;
     unset($_SESSION['name_dup_pending']);
-    // Remove name_duplicate from errors — it's not a real field error
     unset($errors['name_duplicate']);
 }
 
@@ -726,7 +749,6 @@ $field_has_error = function(string $name) use ($errors): bool {
     return isset($errors[$name]);
 };
 
-// Map error fields → step numbers, so we can auto-jump to the offending step
 $field_step_map = [
     'lrn' => 1, 'last_name' => 1, 'first_name' => 1, 'middle_name' => 1,
     'nick_name' => 1, 'ext_name' => 1, 'sex' => 1, 'birth_date' => 1,
@@ -744,9 +766,15 @@ $field_step_map = [
     'voucher_qualified' => 5, 'previous_school_name' => 5,
 ];
 
-// Determine which step to show on error
+$total_steps = 5;
+
+$enroll_error = $_SESSION['enroll_error'] ?? null;
+unset($_SESSION['enroll_error']);
+
 $initial_step = 1;
-if (!empty($errors)) {
+if ($enroll_error && !empty($enroll_error['step'])) {
+    $initial_step = max(1, min($total_steps, (int)$enroll_error['step']));
+} elseif (!empty($errors)) {
     $first_step = PHP_INT_MAX;
     foreach ($errors as $field => $msg) {
         $s = $field_step_map[$field] ?? 1;
@@ -755,7 +783,16 @@ if (!empty($errors)) {
     if ($first_step !== PHP_INT_MAX) $initial_step = $first_step;
 }
 
-$total_steps = 5;
+$cur_civil_status = trim((string)($_POST['civil_status'] ?? ''));
+$cur_nationality  = trim((string)($_POST['nationality']  ?? ''));
+$cur_religion     = trim((string)($_POST['religion']     ?? ''));
+$cur_sy           = trim((string)($_POST['school_year']  ?? ($SY_OPTIONS[1] ?? '')));
+$cur_prev_track   = trim((string)($_POST['previous_track'] ?? ''));
+$cur_prev_strand  = trim((string)($_POST['previous_strand'] ?? ''));
+$cur_prev_program = trim((string)($_POST['previous_program'] ?? ''));
+
+$religion_is_known = in_array($cur_religion, $RELIGION_OPTIONS, true);
+$religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !== '' ? '__other__' : '');
 ?>
 <!DOCTYPE html>
 <html lang="<?= $lang ?>">
@@ -786,7 +823,6 @@ $total_steps = 5;
         .hero-header p{font-size:1rem;opacity:0.95}
         .form-container{max-width:1100px;margin:0 auto;padding:0 1.25rem 2rem}
 
-        /* ================= Wizard progress ================= */
         .wizard-progress-wrap{background:rgba(255,255,255,0.98);border-radius:999px;padding:1rem 1.5rem;margin-bottom:1.5rem;box-shadow:0 12px 30px -12px rgba(0,0,0,0.18);position:sticky;top:12px;z-index:100}
         .wizard-progress{display:flex;justify-content:space-between;align-items:center;gap:0.5rem;list-style:none;margin:0;padding:0}
         .wizard-step-indicator{flex:1;display:flex;flex-direction:column;align-items:center;gap:0.4rem;padding:0.4rem 0.25rem;cursor:pointer;transition:transform 0.2s ease;position:relative;background:none;border:none;font-family:inherit;user-select:none}
@@ -794,7 +830,6 @@ $total_steps = 5;
         .wizard-step-indicator:not(:disabled):hover .wizard-step-num{transform:scale(1.08)}
         .wizard-step-num{width:38px;height:38px;border-radius:50%;background:#e2e8f0;color:#4a5568;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:1rem;transition:all 0.3s ease;box-shadow:0 0 0 4px rgba(226,232,240,0.45)}
         .wizard-step-label{font-size:0.72rem;font-weight:600;color:#64748b;letter-spacing:0.2px;text-align:center;white-space:nowrap}
-
         .wizard-step-indicator.completed .wizard-step-num{background:linear-gradient(135deg,#10b981,#047857);color:#fff;box-shadow:0 0 0 4px rgba(16,185,129,0.22)}
         .wizard-step-indicator.completed .wizard-step-label{color:#047857}
         .wizard-step-indicator.active .wizard-step-num{background:linear-gradient(135deg,#1e88e5,#1565c0);color:#fff;box-shadow:0 0 0 6px rgba(30,136,229,0.22),0 4px 14px rgba(30,136,229,0.35);transform:scale(1.08)}
@@ -816,6 +851,7 @@ $total_steps = 5;
         .form-group input:focus,.form-group select:focus,.form-group textarea:focus{border-color:#1e88e5;box-shadow:0 0 0 3px rgba(30,136,229,0.1);outline:none}
         .form-group label{position:absolute;left:1rem;top:0.85rem;color:#718096;font-size:0.95rem;pointer-events:none;transition:all 0.3s ease;background:white;padding:0 0.4rem;font-weight:500;z-index:1}
         .form-group.filled label,.form-group input:focus+label,.form-group select:focus+label,.form-group textarea:focus+label{top:-0.6rem;font-size:0.75rem;color:#1e88e5;font-weight:600}
+        .form-group select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='none' stroke='%23718096' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5l5 5 5-5'/></svg>");background-repeat:no-repeat;background-position:right 1rem center;background-size:12px 8px;padding-right:2.4rem;cursor:pointer}
 
         .checkbox-container{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:0.8rem;margin:1rem 0}
         .checkbox-item input[type="checkbox"]{width:auto;margin-right:0.5rem}
@@ -847,41 +883,140 @@ $total_steps = 5;
         @keyframes slideDown { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
 
-        /* ---- Live check hints ---- */
-        .check-hint {
-            display: flex;
-            align-items: center;
-            gap: 0.35rem;
-            font-size: 0.78rem;
-            font-weight: 600;
-            margin-top: 0.35rem;
-            min-height: 1.1em;
-        }
+        .check-hint { display: flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; font-weight: 600; margin-top: 0.35rem; min-height: 1.1em; }
         .check-hint.pending { color: #64748b; }
         .check-hint.ok      { color: #059669; }
         .check-hint.error   { color: #dc2626; }
         .check-hint.warn    { color: #d97706; }
         .check-hint .existing-name { font-weight: 500; color: #64748b; margin-left: 0.15rem; }
 
-        .name-dup-alert {
-            grid-column: 1 / -1;
-            display: flex;
-            align-items: flex-start;
-            gap: 0.6rem;
-            padding: 0.85rem 1.1rem;
-            border-radius: 12px;
-            background: linear-gradient(135deg, #fff7ed, #fed7aa);
-            border-left: 4px solid #d97706;
-            color: #92400e;
-            font-size: 0.85rem;
-            font-weight: 500;
-            line-height: 1.45;
-            margin-top: 0.5rem;
-        }
+        .name-dup-alert { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 0.6rem; padding: 0.85rem 1.1rem; border-radius: 12px; background: linear-gradient(135deg, #fff7ed, #fed7aa); border-left: 4px solid #d97706; color: #92400e; font-size: 0.85rem; font-weight: 500; line-height: 1.45; margin-top: 0.5rem; }
         .name-dup-alert i { font-size: 1.1rem; color: #d97706; margin-top: 2px; flex-shrink: 0; }
         .name-dup-alert ul { margin: 0.35rem 0 0 1.15rem; padding: 0; }
         .name-dup-alert li { margin-bottom: 0.15rem; }
         .name-dup-alert li strong { color: #78350f; }
+
+        /* ============================================================
+           JHS Certificate name verification card
+           ============================================================ */
+        .name-verify-card { border-left-width: 4px; }
+        .name-verify-head { display:flex; align-items:center; gap:.85rem; flex-wrap:wrap; }
+        .name-verify-icon {
+            width: 42px; height: 42px; border-radius: 12px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.15rem; flex-shrink: 0;
+            background: rgba(255,255,255,.85);
+            box-shadow: 0 0 0 1px rgba(0,0,0,.05) inset;
+        }
+        .name-verify-titles { flex: 1; min-width: 0; }
+        .name-verify-sub { font-size: .78rem; color: #4a5568; margin-top: .15rem; }
+        .name-verify-badge {
+            font-size: .72rem; font-weight: 700;
+            padding: .28rem .7rem; border-radius: 999px;
+            text-transform: uppercase; letter-spacing: .4px;
+            background: rgba(255,255,255,.85);
+            border: 1px solid rgba(0,0,0,.06);
+        }
+        .name-verify-message {
+            margin: .85rem 0 0; font-size: .9rem; line-height: 1.55; color: #1f2937;
+        }
+        .name-verify-grid {
+            display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .85rem;
+        }
+        .name-verify-part {
+            display: inline-flex; align-items: center; gap: .4rem;
+            padding: .35rem .75rem; border-radius: 999px;
+            font-size: .76rem; font-weight: 600;
+            background: #fff; border: 1px solid rgba(0,0,0,.06);
+        }
+        .name-verify-part i { font-size: .72rem; }
+        .name-verify-part.ok   { color: #047857; background: #ecfdf5; border-color: rgba(5,150,105,.25); }
+        .name-verify-part.miss { color: #b91c1c; background: #fef2f2; border-color: rgba(220,38,38,.25); }
+        .name-verify-part.skip { color: #64748b; background: #f1f5f9; border-color: rgba(100,116,139,.2); }
+
+        .name-verify-details {
+            margin-top: .85rem; border-radius: 10px;
+            background: rgba(255,255,255,.75);
+            border: 1px solid rgba(0,0,0,.05);
+            overflow: hidden;
+        }
+        .name-verify-details summary {
+            cursor: pointer; padding: .55rem .85rem;
+            font-size: .8rem; font-weight: 600; color: #334155;
+            list-style: none;
+        }
+        .name-verify-details summary::-webkit-details-marker { display: none; }
+        .name-verify-details summary::before {
+            content: '\f0da'; font-family: 'Font Awesome 6 Free'; font-weight: 900;
+            display: inline-block; margin-right: .45rem;
+            transition: transform .15s; color: #94a3b8;
+        }
+        .name-verify-details[open] summary::before { transform: rotate(90deg); }
+        .name-verify-pre {
+            margin: 0; padding: .85rem 1rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: .76rem; line-height: 1.5; color: #334155;
+            background: #f8fafc; border-top: 1px solid rgba(0,0,0,.05);
+            max-height: 220px; overflow: auto;
+            white-space: pre-wrap; word-break: break-word;
+        }
+
+        .name-verify-warn {
+            display: flex; gap: .6rem; align-items: flex-start;
+            margin-top: .85rem; padding: .7rem .9rem;
+            border-radius: 10px; font-size: .82rem; line-height: 1.5;
+            background: #fffbeb; color: #92400e; border: 1px solid rgba(217,119,6,.3);
+        }
+        .name-verify-warn i { color: #d97706; margin-top: 2px; flex-shrink: 0; }
+
+        /* Two-block layout inside the verification card (Name + LRN) */
+        .verify-block {
+            margin-top: 1rem; padding: .9rem 1rem;
+            background: rgba(255,255,255,.55);
+            border-radius: 12px;
+            border: 1px solid rgba(0,0,0,.05);
+        }
+        .verify-block-title {
+            display: flex; align-items: center; gap: .55rem;
+            font-size: .82rem; font-weight: 700;
+            color: #334155; text-transform: uppercase; letter-spacing: .4px;
+            margin-bottom: .55rem;
+        }
+        .verify-block-verdict {
+            display: inline-flex; align-items: center; gap: .3rem;
+            font-size: .68rem; font-weight: 700;
+            padding: .2rem .55rem; border-radius: 999px;
+            text-transform: uppercase; letter-spacing: .4px;
+            margin-left: auto;
+        }
+        .verify-block-verdict.ok   { background: #d1fae5; color: #047857; }
+        .verify-block-verdict.warn { background: #fef3c7; color: #b45309; }
+        .verify-block-verdict.miss { background: #fee2e2; color: #b91c1c; }
+        .verify-block-verdict.skip { background: #e2e8f0; color: #475569; }
+        .verify-block-msg {
+            font-size: .8rem; color: #4a5568; line-height: 1.5;
+            margin-top: .55rem;
+        }
+        .lrn-distance {
+            margin-left: .35rem; font-size: .68rem;
+            font-weight: 600; color: #b45309;
+        }
+
+        .name-verify-card.nv-match        { background: linear-gradient(135deg, #f0fdf4, #dcfce7); border-left-color: #059669; }
+        .name-verify-card.nv-match        .name-verify-icon  { color: #047857; }
+        .name-verify-card.nv-match        .name-verify-badge { color: #047857; }
+
+        .name-verify-card.nv-partial      { background: linear-gradient(135deg, #fffbeb, #fef3c7); border-left-color: #d97706; }
+        .name-verify-card.nv-partial      .name-verify-icon  { color: #b45309; }
+        .name-verify-card.nv-partial      .name-verify-badge { color: #b45309; }
+
+        .name-verify-card.nv-mismatch     { background: linear-gradient(135deg, #fef2f2, #fee2e2); border-left-color: #dc2626; }
+        .name-verify-card.nv-mismatch     .name-verify-icon  { color: #b91c1c; }
+        .name-verify-card.nv-mismatch     .name-verify-badge { color: #b91c1c; }
+
+        .name-verify-card.nv-unverifiable { background: linear-gradient(135deg, #f1f5f9, #e2e8f0); border-left-color: #64748b; }
+        .name-verify-card.nv-unverifiable .name-verify-icon  { color: #475569; }
+        .name-verify-card.nv-unverifiable .name-verify-badge { color: #475569; }
 
         .error-banner { background: linear-gradient(135deg, #fef2f2, #fee2e2); border-left: 5px solid #dc3545; color: #7f1d1d; padding: 1rem 1.25rem; border-radius: 14px; margin-bottom: 1.5rem; display: flex; align-items: flex-start; gap: 0.75rem; box-shadow: 0 4px 16px rgba(220,53,69,0.12); animation: slideDown 0.3s ease-out; }
         .error-banner > i { font-size: 1.4rem; color: #dc3545; margin-top: 2px; flex-shrink: 0; }
@@ -923,6 +1058,100 @@ $total_steps = 5;
         .wizard-nav .btn-submit:hover { transform:translateY(-1px);box-shadow:0 10px 22px -4px rgba(16,185,129,0.6); }
         .wizard-nav .btn-submit:disabled { opacity:0.7;cursor:not-allowed;transform:none; }
         .wizard-nav .btn-back.placeholder { visibility:hidden;pointer-events:none; }
+
+        /* ============================================================
+           Strand Recommendation
+           ============================================================ */
+        #strandRecommendation {
+            margin-top: 1rem;
+            animation: recFade .25s ease;
+        }
+        @keyframes recFade {
+            from { opacity: 0; transform: translateY(-6px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        .rec-card {
+            display: flex;
+            gap: .85rem;
+            padding: 1rem 1.15rem;
+            border-radius: 14px;
+            border: 1.5px solid #e2e8f0;
+            background: #f8fafc;
+            align-items: flex-start;
+            transition: all .2s ease;
+        }
+        .rec-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 11px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.05rem;
+            flex-shrink: 0;
+        }
+        .rec-body { flex: 1; min-width: 0; }
+        .rec-title {
+            font-size: .9rem;
+            font-weight: 700;
+            color: #1a202c;
+            line-height: 1.3;
+            margin-bottom: .3rem;
+        }
+        .rec-message {
+            font-size: .82rem;
+            color: #4a5568;
+            line-height: 1.55;
+        }
+        .rec-suggestion {
+            display: inline-flex;
+            align-items: center;
+            gap: .4rem;
+            margin-top: .55rem;
+            padding: .35rem .75rem;
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 999px;
+            font-size: .74rem;
+            font-weight: 600;
+            color: #4a5568;
+        }
+        .rec-suggestion i { color: #7c3aed; }
+        .rec-suggestion strong { color: #7c3aed; font-weight: 700; }
+
+        .rec-card.rec-aligned,
+        .rec-card.rec-strong { background: linear-gradient(135deg, #f0fdf4, #dcfce7); border-color: rgba(5, 150, 105, .3); }
+        .rec-card.rec-aligned .rec-icon,
+        .rec-card.rec-strong .rec-icon { background: #fff; color: #059669; box-shadow: 0 0 0 1px rgba(5, 150, 105, .25); }
+
+        .rec-card.rec-changed,
+        .rec-card.rec-alternative { background: linear-gradient(135deg, #fffbeb, #fef3c7); border-color: rgba(217, 119, 6, .3); }
+        .rec-card.rec-changed .rec-icon,
+        .rec-card.rec-alternative .rec-icon { background: #fff; color: #d97706; box-shadow: 0 0 0 1px rgba(217, 119, 6, .25); }
+
+        .rec-card.rec-mismatch { background: linear-gradient(135deg, #fef2f2, #fee2e2); border-color: rgba(220, 38, 38, .3); }
+        .rec-card.rec-mismatch .rec-icon { background: #fff; color: #dc2626; box-shadow: 0 0 0 1px rgba(220, 38, 38, .25); }
+
+        .rec-card.rec-insufficient { background: #f1f5f9; border-color: #e2e8f0; }
+        .rec-card.rec-insufficient .rec-icon { background: #eef2ff; color: #4f46e5; }
+
+        .rec-trends { margin-top: .85rem; padding: .85rem 1rem; background: rgba(255,255,255,0.7); border-radius: 12px; border: 1px solid rgba(0,0,0,0.05); }
+        .rec-trends-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; flex-wrap: wrap; margin-bottom: .6rem; }
+        .rec-trends-title { font-size: .72rem; font-weight: 700; color: #334155; text-transform: uppercase; letter-spacing: .5px; }
+        .rec-growth { display: inline-flex; align-items: center; gap: .3rem; padding: .2rem .6rem; border-radius: 999px; font-size: .7rem; font-weight: 700; }
+        .rec-growth.up   { background: #d1fae5; color: #059669; }
+        .rec-growth.down { background: #fee2e2; color: #dc2626; }
+        .rec-growth.new  { background: #ede9fe; color: #7c3aed; }
+        .rec-growth.flat { background: #e2e8f0; color: #64748b; }
+
+        .rec-bars { display: flex; flex-direction: column; gap: .55rem; }
+        .rec-bar-row .rec-bar-label { display: flex; align-items: center; justify-content: space-between; gap: .5rem; font-size: .72rem; font-weight: 600; color: #4a5568; margin-bottom: .25rem; }
+        .rec-bar-row.is-chosen .rec-bar-label span:first-child { color: #4f46e5; font-weight: 700; }
+        .rec-bar-count { font-variant-numeric: tabular-nums; color: #1a202c; font-weight: 700; }
+        .rec-bar-track { width: 100%; height: 8px; border-radius: 999px; background: #f1f5f9; overflow: hidden; border: 1px solid #e2e8f0; }
+        .rec-bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #4f46e5, #6366f1); transition: width .3s; }
+        .rec-bar-row.is-chosen .rec-bar-fill { background: linear-gradient(90deg, #7c3aed, #a78bfa); }
 
         @media (max-width: 640px) {
             .wizard-step-label { display: none; }
@@ -995,7 +1224,6 @@ $total_steps = 5;
             </div>
         <?php endif; ?>
 
-        <!-- ================= Wizard progress ================= -->
         <div class="wizard-progress-wrap">
             <ol class="wizard-progress" id="wizardProgress" role="navigation" aria-label="<?= htmlspecialchars($t[$lang]['progress_label']) ?>">
                 <button type="button" class="wizard-step-indicator active" data-step="1" aria-current="step" aria-label="<?= $t[$lang]['step'] ?> 1: Student Info">
@@ -1051,7 +1279,6 @@ $total_steps = 5;
                             <label for="middle_name"><i class="fas fa-user me-1" aria-hidden="true"></i> <?= $t[$lang]['mname'] ?></label>
                         </div>
 
-                        <!-- Live name-duplicate warning appears here -->
                         <div class="col-12" id="nameDupContainer" style="display:none;">
                             <div class="name-dup-alert" id="nameDupAlert"></div>
                         </div>
@@ -1082,25 +1309,52 @@ $total_steps = 5;
                             <input type="number" id="age" name="age" placeholder=" " value="<?= htmlspecialchars($_POST['age'] ?? '') ?>" min="14" max="25" readonly style="background:#f8f9fa" aria-readonly="true">
                             <label for="age"><i class="fas fa-birthday-cake me-1" aria-hidden="true"></i> <?= $t[$lang]['age'] ?></label>
                         </div>
-                        <div class="col-md-3 form-group">
-                            <input type="text" name="civil_status" id="civil_status" placeholder=" " value="<?= htmlspecialchars($_POST['civil_status'] ?? '') ?>">
+
+                        <div class="col-md-4 form-group <?= $field_has_error('civil_status') ? 'error' : '' ?>">
+                            <select name="civil_status" id="civil_status" style="background:white">
+                                <option value="" <?= $cur_civil_status === '' ? 'selected' : '' ?>>— <?= $t[$lang]['select_placeholder'] ?> —</option>
+                                <?php foreach ($CIVIL_STATUS_OPTIONS as $opt): ?>
+                                    <option value="<?= htmlspecialchars($opt) ?>" <?= $cur_civil_status === $opt ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($opt) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
                             <label for="civil_status"><i class="fas fa-ring me-1" aria-hidden="true"></i> <?= $t[$lang]['civil'] ?></label>
                         </div>
-                        <div class="col-md-3 form-group">
-                            <input type="text" name="nationality" id="nationality" placeholder=" " value="<?= htmlspecialchars($_POST['nationality'] ?? '') ?>" autocomplete="country-name">
+
+                        <div class="col-md-4 form-group <?= $field_has_error('nationality') ? 'error' : '' ?>">
+                            <select name="nationality" id="nationality" style="background:white">
+                                <option value="" <?= $cur_nationality === '' ? 'selected' : '' ?>>— <?= $t[$lang]['select_placeholder'] ?> —</option>
+                                <?php foreach ($NATIONALITY_OPTIONS as $opt): ?>
+                                    <option value="<?= htmlspecialchars($opt) ?>" <?= $cur_nationality === $opt ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($opt) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
                             <label for="nationality"><i class="fas fa-flag me-1" aria-hidden="true"></i> <?= $t[$lang]['nation'] ?></label>
                         </div>
-                        <div class="col-md-3 form-group">
-                            <input type="text" name="religion" id="religion" placeholder=" " list="religionOptions" autocomplete="off" value="<?= htmlspecialchars($_POST['religion'] ?? '') ?>">
-                            <label for="religion"><i class="fas fa-church me-1" aria-hidden="true"></i> <?= $t[$lang]['religion'] ?></label>
-                            <datalist id="religionOptions">
-                                <option value="Roman Catholic"><option value="Islam"><option value="Iglesia ni Cristo">
-                                <option value="Protestant"><option value="Born Again Christian"><option value="Seventh-Day Adventist">
-                                <option value="Jehovah's Witnesses"><option value="Bible Baptist"><option value="Mormon (LDS)">
-                                <option value="Buddhism"><option value="Hinduism"><option value="Atheist"><option value="Others">
-                            </datalist>
+
+                        <div class="col-md-4 form-group <?= $field_has_error('religion') ? 'error' : '' ?>">
+                            <select name="religion" id="religion_select" style="background:white" onchange="syncReligion()">
+                                <option value="" <?= $religion_select_value === '' ? 'selected' : '' ?>>— <?= $t[$lang]['select_placeholder'] ?> —</option>
+                                <?php foreach ($RELIGION_OPTIONS as $opt): ?>
+                                    <option value="<?= htmlspecialchars($opt) ?>" <?= $religion_select_value === $opt ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($opt) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                                <option value="__other__" <?= $religion_select_value === '__other__' ? 'selected' : '' ?>>
+                                    <?= $t[$lang]['other_specify'] ?>
+                                </option>
+                            </select>
+                            <label for="religion_select"><i class="fas fa-church me-1" aria-hidden="true"></i> <?= $t[$lang]['religion'] ?></label>
+                            <input type="text"
+                                   id="religion_other"
+                                   class="form-control mt-2"
+                                   placeholder="<?= htmlspecialchars($t[$lang]['religion_other_placeholder']) ?>"
+                                   style="<?= $religion_select_value === '__other__' ? '' : 'display:none;' ?>border:2px solid #e2e8f0;border-radius:12px;padding:0.7rem 1rem;width:100%"
+                                   value="<?= $religion_select_value === '__other__' ? htmlspecialchars($cur_religion) : '' ?>">
                         </div>
-                        <!-- HEIGHT: added min/max/step limiter -->
+
                         <div class="col-md-3 form-group <?= $field_has_error('height') ? 'error' : '' ?>">
                             <input type="number" name="height" id="height"
                                    placeholder=" " step="0.1"
@@ -1110,7 +1364,6 @@ $total_steps = 5;
                             <label for="height"><i class="fas fa-arrow-up me-1" aria-hidden="true"></i> <?= $t[$lang]['height'] ?></label>
                             <?php if($field_has_error('height')): ?><span class="error-msg"><?= htmlspecialchars($errors['height']) ?></span><?php endif; ?>
                         </div>
-                        <!-- WEIGHT: added min/max/step limiter -->
                         <div class="col-md-3 form-group <?= $field_has_error('weight') ? 'error' : '' ?>">
                             <input type="number" name="weight" id="weight"
                                    placeholder=" " step="0.1"
@@ -1120,12 +1373,12 @@ $total_steps = 5;
                             <label for="weight"><i class="fas fa-weight-hanging me-1" aria-hidden="true"></i> <?= $t[$lang]['weight'] ?></label>
                             <?php if($field_has_error('weight')): ?><span class="error-msg"><?= htmlspecialchars($errors['weight']) ?></span><?php endif; ?>
                         </div>
-                        <div class="col-md-5 form-group <?= $field_has_error('email') ? 'error' : '' ?>">
+                        <div class="col-md-6 form-group <?= $field_has_error('email') ? 'error' : '' ?>">
                             <input type="email" name="email" id="email" placeholder=" " value="<?= htmlspecialchars($_POST['email'] ?? '') ?>" autocomplete="email">
                             <label for="email"><i class="fas fa-envelope me-1" aria-hidden="true"></i> <?= $t[$lang]['email'] ?></label>
                             <?php if($field_has_error('email')): ?><span class="error-msg"><?= htmlspecialchars($errors['email']) ?></span><?php endif; ?>
                         </div>
-                        <div class="col-md-4 form-group <?= $field_has_error('phone') ? 'error' : '' ?>">
+                        <div class="col-md-6 form-group <?= $field_has_error('phone') ? 'error' : '' ?>">
                             <input type="tel" name="phone" id="phone" placeholder=" " value="<?= htmlspecialchars($_POST['phone'] ?? '') ?>" pattern="09\d{9}" maxlength="11" inputmode="numeric" autocomplete="tel">
                             <label for="phone"><i class="fas fa-phone-alt me-1" aria-hidden="true"></i> <?= $t[$lang]['phone'] ?></label>
                             <?php if($field_has_error('phone')): ?><span class="error-msg"><?= htmlspecialchars($errors['phone']) ?></span><?php endif; ?>
@@ -1309,7 +1562,13 @@ $total_steps = 5;
                     <div class="section-header"><i class="fas fa-clipboard-list" aria-hidden="true"></i><h2 id="sectionEnrollmentHeading"><?= $t[$lang]['enrollment'] ?></h2></div>
                     <div class="row g-3">
                         <div class="col-md-3 form-group <?= $field_has_error('school_year') ? 'error' : '' ?>">
-                            <input type="text" name="school_year" id="school_year" placeholder=" " value="<?= htmlspecialchars($_POST['school_year'] ?? '2026-2027') ?>" required aria-required="true">
+                            <select name="school_year" id="school_year" required aria-required="true" style="background:white">
+                                <?php foreach ($SY_OPTIONS as $opt): ?>
+                                    <option value="<?= htmlspecialchars($opt) ?>" <?= $cur_sy === $opt ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($opt) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
                             <label for="school_year"><i class="fas fa-calendar me-1" aria-hidden="true"></i> <?= $t[$lang]['sy'] ?></label>
                             <?php if($field_has_error('school_year')): ?><span class="error-msg"><?= htmlspecialchars($errors['school_year']) ?></span><?php endif; ?>
                         </div>
@@ -1353,6 +1612,9 @@ $total_steps = 5;
                             <?php if($field_has_error('program')): ?><span class="error-msg"><?= htmlspecialchars($errors['program']) ?></span><?php endif; ?>
                         </div>
                     </div>
+
+                    <div id="strandRecommendation" style="display:none;"></div>
+
                     <div class="form-group mt-3">
                         <input type="text" name="household_id" id="household_id" placeholder=" " value="<?= htmlspecialchars($_POST['household_id'] ?? '') ?>">
                         <label for="household_id"><i class="fas fa-home me-1" aria-hidden="true"></i> <?= $t[$lang]['household'] ?></label>
@@ -1373,15 +1635,38 @@ $total_steps = 5;
                                     <label for="previous_school_address"><?= $t[$lang]['prev_school_address'] ?></label>
                                 </div>
                                 <div class="col-md-4 form-group">
-                                    <input type="text" name="previous_track" id="previous_track" placeholder=" " value="<?= htmlspecialchars($_POST['previous_track'] ?? '') ?>">
+                                    <select name="previous_track" id="previous_track" style="background:white">
+                                        <option value="" <?= $cur_prev_track === '' ? 'selected' : '' ?>>— <?= $t[$lang]['select_placeholder'] ?> —</option>
+                                        <?php foreach ($TRACK_OPTIONS as $opt): ?>
+                                            <option value="<?= htmlspecialchars($opt) ?>" <?= $cur_prev_track === $opt ? 'selected' : '' ?>>
+                                                <?= htmlspecialchars($opt) ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
                                     <label for="previous_track"><?= $t[$lang]['prev_track'] ?></label>
                                 </div>
                                 <div class="col-md-4 form-group">
-                                    <input type="text" name="previous_strand" id="previous_strand" placeholder=" " value="<?= htmlspecialchars($_POST['previous_strand'] ?? '') ?>">
+                                    <select name="previous_strand" id="previous_strand" style="background:white">
+                                        <option value="" <?= $cur_prev_strand === '' ? 'selected' : '' ?>>— <?= $t[$lang]['select_placeholder'] ?> —</option>
+                                        <?php foreach (array_keys($STRAND_PROGRAMS) as $s): ?>
+                                            <option value="<?= htmlspecialchars($s) ?>" <?= $cur_prev_strand === $s ? 'selected' : '' ?>>
+                                                <?= htmlspecialchars($s) ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
                                     <label for="previous_strand"><?= $t[$lang]['prev_strand'] ?></label>
                                 </div>
                                 <div class="col-md-4 form-group">
-                                    <input type="text" name="previous_program" id="previous_program" placeholder=" " value="<?= htmlspecialchars($_POST['previous_program'] ?? '') ?>">
+                                    <select name="previous_program" id="previous_program" style="background:white">
+                                        <option value="" <?= $cur_prev_program === '' ? 'selected' : '' ?>>— <?= $t[$lang]['select_placeholder'] ?> —</option>
+                                        <?php
+                                        if ($cur_prev_strand !== '' && isset($STRAND_PROGRAMS[$cur_prev_strand])) {
+                                            foreach ($STRAND_PROGRAMS[$cur_prev_strand] as $p) {
+                                                echo '<option value="' . htmlspecialchars($p) . '"' . ($cur_prev_program === $p ? ' selected' : '') . '>' . htmlspecialchars($p) . '</option>';
+                                            }
+                                        }
+                                        ?>
+                                    </select>
                                     <label for="previous_program"><?= $t[$lang]['prev_program'] ?></label>
                                 </div>
                                 <div class="col-md-4 form-group">
@@ -1653,10 +1938,131 @@ $total_steps = 5;
                 <?php endif; ?>
             </section>
 
+            <?php
+            /* -------------------------------------------------------------
+               JHS Certificate (Front) — Identity verification card.
+               Rendered only when the POST handler stored a result in
+               $_SESSION['name_verify'] for this session.
+               ------------------------------------------------------------- */
+            $nv = $_SESSION['name_verify'] ?? null;
+            if (is_array($nv)):
+                $status      = $nv['status']     ?? 'unverifiable';
+                $message     = $nv['message']    ?? '';
+                $extracted   = $nv['extracted']  ?? null;
+                $parts       = $nv['parts']      ?? [];
+                $nv_name     = $nv['name'] ?? ['status' => 'unverifiable', 'parts' => [], 'message' => ''];
+                $nv_lrn      = $nv['lrn']  ?? ['status' => 'unverifiable', 'expected' => '', 'best' => null, 'distance' => null, 'message' => ''];
+                $nv_name_parts = $nv_name['parts'] ?? [];
+
+                $theme = [
+                    'match'        => ['cls' => 'nv-match',        'icon' => 'fa-circle-check',         'label' => 'Verified',            'sub' => 'Form details match the document.'],
+                    'partial'      => ['cls' => 'nv-partial',      'icon' => 'fa-triangle-exclamation', 'label' => 'Partial match',       'sub' => 'Some details were not found on the document.'],
+                    'mismatch'     => ['cls' => 'nv-mismatch',     'icon' => 'fa-circle-xmark',         'label' => 'Mismatch',            'sub' => 'The document does not match the form.'],
+                    'unverifiable' => ['cls' => 'nv-unverifiable', 'icon' => 'fa-circle-info',          'label' => 'Manual check needed', 'sub' => 'Automatic reading was not possible.'],
+                ][$status] ?? ['cls' => 'nv-unverifiable', 'icon' => 'fa-circle-info', 'label' => 'Verification', 'sub' => ''];
+
+                $lrn_status_map = [
+                    'match'        => ['cls' => 'ok',   'icon' => 'fa-check', 'label' => 'LRN verified'],
+                    'close'        => ['cls' => 'warn', 'icon' => 'fa-check', 'label' => 'LRN close match'],
+                    'mismatch'     => ['cls' => 'miss', 'icon' => 'fa-xmark', 'label' => 'LRN mismatch'],
+                    'invalid'      => ['cls' => 'miss', 'icon' => 'fa-xmark', 'label' => 'LRN invalid'],
+                    'unverifiable' => ['cls' => 'skip', 'icon' => 'fa-minus', 'label' => 'LRN not readable'],
+                    'skipped'      => ['cls' => 'skip', 'icon' => 'fa-minus', 'label' => 'LRN not provided'],
+                ];
+                $ls = $lrn_status_map[$nv_lrn['status']] ?? $lrn_status_map['unverifiable'];
+            ?>
+            <section class="review-section name-verify-card <?= $theme['cls'] ?>" role="status" aria-live="polite">
+                <div class="name-verify-head">
+                    <div class="name-verify-icon"><i class="fas <?= $theme['icon'] ?>"></i></div>
+                    <div class="name-verify-titles">
+                        <h2 style="font-size:1.15rem;margin:0;">
+                            <i class="fas fa-id-card-clip me-2"></i>JHS Certificate (Front) — Identity Check
+                        </h2>
+                        <div class="name-verify-sub"><?= htmlspecialchars($theme['sub']) ?></div>
+                    </div>
+                    <span class="name-verify-badge"><?= htmlspecialchars($theme['label']) ?></span>
+                </div>
+
+                <!-- NAME row -->
+                <div class="verify-block">
+                    <div class="verify-block-title">
+                        <i class="fas fa-user me-1"></i>Name
+                        <?php if ($nv_name['status'] === 'match'): ?>
+                            <span class="verify-block-verdict ok"><i class="fas fa-check"></i> Matched</span>
+                        <?php elseif ($nv_name['status'] === 'partial'): ?>
+                            <span class="verify-block-verdict warn"><i class="fas fa-exclamation"></i> Partial</span>
+                        <?php elseif ($nv_name['status'] === 'mismatch'): ?>
+                            <span class="verify-block-verdict miss"><i class="fas fa-xmark"></i> Mismatch</span>
+                        <?php else: ?>
+                            <span class="verify-block-verdict skip"><i class="fas fa-minus"></i> Unverified</span>
+                        <?php endif; ?>
+                    </div>
+                    <div class="name-verify-grid">
+                        <div class="name-verify-part <?= !empty($nv_name_parts['first']) ? 'ok' : 'miss' ?>">
+                            <i class="fas <?= !empty($nv_name_parts['first']) ? 'fa-check' : 'fa-xmark' ?>"></i>
+                            First name
+                        </div>
+                        <div class="name-verify-part <?= ($nv_name_parts['middle'] === true ? 'ok' : ($nv_name_parts['middle'] === false ? 'miss' : 'skip')) ?>">
+                            <i class="fas <?= ($nv_name_parts['middle'] === true ? 'fa-check' : ($nv_name_parts['middle'] === false ? 'fa-xmark' : 'fa-minus')) ?>"></i>
+                            Middle name
+                        </div>
+                        <div class="name-verify-part <?= !empty($nv_name_parts['last']) ? 'ok' : 'miss' ?>">
+                            <i class="fas <?= !empty($nv_name_parts['last']) ? 'fa-check' : 'fa-xmark' ?>"></i>
+                            Last name
+                        </div>
+                    </div>
+                    <div class="verify-block-msg"><?= htmlspecialchars($nv_name['message']) ?></div>
+                </div>
+
+                <!-- LRN row -->
+                <div class="verify-block">
+                    <div class="verify-block-title">
+                        <i class="fas fa-id-card me-1"></i>LRN
+                        <span class="verify-block-verdict <?= $ls['cls'] ?>">
+                            <i class="fas <?= $ls['icon'] ?>"></i> <?= $ls['label'] ?>
+                        </span>
+                    </div>
+                    <div class="name-verify-grid">
+                        <div class="name-verify-part <?= $nv_lrn['status'] === 'match' ? 'ok' : ($nv_lrn['status'] === 'skipped' ? 'skip' : ($nv_lrn['status'] === 'close' ? 'ok' : 'miss')) ?>">
+                            <i class="fas fa-arrow-right"></i>
+                            Expected: <strong style="margin-left:.2rem"><?= htmlspecialchars($nv_lrn['expected'] ?: '—') ?></strong>
+                        </div>
+                        <?php if (!empty($nv_lrn['best'])): ?>
+                            <div class="name-verify-part <?= $nv_lrn['status'] === 'match' ? 'ok' : 'miss' ?>">
+                                <i class="fas fa-magnifying-glass"></i>
+                                Found: <strong style="margin-left:.2rem"><?= htmlspecialchars($nv_lrn['best']) ?></strong>
+                                <?php if ($nv_lrn['distance'] !== null && $nv_lrn['distance'] > 0): ?>
+                                    <span class="lrn-distance">(<?= (int)$nv_lrn['distance'] ?> digit<?= $nv_lrn['distance'] == 1 ? '' : 's' ?> off)</span>
+                                <?php endif; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                    <div class="verify-block-msg"><?= htmlspecialchars($nv_lrn['message']) ?></div>
+                </div>
+
+                <?php if ($extracted !== null && $extracted !== ''): ?>
+                    <details class="name-verify-details">
+                        <summary><i class="fas fa-file-lines me-1"></i>Show text extracted from the document</summary>
+                        <pre class="name-verify-pre"><?= htmlspecialchars($extracted) ?></pre>
+                    </details>
+                <?php endif; ?>
+
+                <?php if ($status === 'mismatch' || $status === 'partial'): ?>
+                    <div class="name-verify-warn">
+                        <i class="fas fa-triangle-exclamation"></i>
+                        <span>
+                            Please double-check the uploaded file. If this is genuinely the correct
+                            document, you can still submit — but a registrar will manually review it.
+                        </span>
+                    </div>
+                <?php endif; ?>
+            </section>
+            <?php endif; ?>
+
             <form method="POST" action="process_enroll.php" class="text-center mt-5">
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
                 <?php
-                $skip_keys = ['existing_file', 'keep_existing_file', 'camera_data', 'entrance_files'];
+                $skip_keys = ['existing_file', 'keep_existing_file', 'camera_data', 'entrance_files', 'csrf_token'];
                 foreach ($_POST as $k => $v):
                     if (in_array($k, $skip_keys, true)) continue;
                     if (is_array($v)):
@@ -1681,6 +2087,11 @@ $total_steps = 5;
                 <a href="?edit=1" class="btn-custom" style="background:linear-gradient(135deg,#6c757d,#5a6268);color:#fff;text-decoration:none;padding:.8rem 1.75rem;border-radius:50px;font-weight:600;display:inline-block">
                     <i class="fas fa-edit me-2"></i> <?= $t[$lang]['edit_btn'] ?>
                 </a>
+                <?php
+                /* The user is going back to edit — drop the previous
+                   verification result so a stale card can't linger. */
+                unset($_SESSION['name_verify']);
+                ?>
             </div>
         </div>
     <?php endif; ?>
@@ -1699,12 +2110,57 @@ $total_steps = 5;
 </div>
 
 <script>
-/* ---------------- Language ---------------- */
+/* =====================================================
+   SweetAlert body-state cleanup
+   ===================================================== */
+function ensurePageUnfrozen() {
+    const stillShowing = document.querySelector('.swal2-container');
+    if (stillShowing) return;
+    document.body.classList.remove('swal2-shown', 'swal2-height-auto', 'swal2-no-backdrop');
+    document.documentElement.classList.remove('swal2-shown');
+    document.body.style.removeProperty('overflow');
+    document.body.style.removeProperty('padding-right');
+    document.body.style.removeProperty('padding-left');
+}
+document.addEventListener('DOMContentLoaded', function () {
+    let n = 0;
+    const iv = setInterval(function () {
+        ensurePageUnfrozen();
+        if (++n >= 20) clearInterval(iv);
+    }, 500);
+});
+window.addEventListener('pageshow', function (e) {
+    ensurePageUnfrozen();
+    if (e.persisted) {
+        const submitBtn = document.getElementById('submitBtn');
+        if (submitBtn && submitBtn.disabled) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> ' + <?= json_encode($t[$lang]['submit']) ?>;
+        }
+    }
+});
+document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) ensurePageUnfrozen();
+});
+
+/* =====================================================
+   Shared data from PHP
+   ===================================================== */
+const STRAND_PROGRAMS = <?= json_encode($STRAND_PROGRAMS, JSON_UNESCAPED_UNICODE) ?>;
+const strandKeywords = {
+    "Automotive and Small Engine Technologies": ["automotive","car","cars","auto ","engine","mechanic","motorcycle","motor ","driving","truck","vehicle","diesel"],
+    "Construction and Building Technologies": ["carpentry","carpenter","weld","welder","welding","construction","building","masonry","mason","plumbing","plumber","woodwork"],
+    "ICT Support and Computer Programming Technologies": ["computer","programming","programmer","coding","coder","java",".net","software","network","networking","web design","web development","html","css","python","php","systems","database","server"],
+    "Industrial Technologies": ["electronics","electronic","electrical","circuit","soldering","solder","assembly","industrial","machine operator"],
+    "Agri-Fishery Business and Food Innovation": ["agriculture","agricultural","farming","farmer","fishery","fishing","fisherman","crops","gardening","gardener","livestock","poultry","aquaculture","planting"],
+    "Hospitality and Tourism": ["cooking","cook","baking","baker","culinary","chef","hotel","hospitality","tourism","tourist","restaurant","waiter","waitress","server","barista","food service","food and beverage","housekeeping"]
+};
+const progs = STRAND_PROGRAMS;
+
 function switchLang(lang){const url=new URL(window.location.href);url.searchParams.set('lang',lang);window.location.href=url.toString()}
 function capitalize(str){if(!str||typeof str!=='string')return str;return str.replace(/\b\w+/g,function(w){return w.charAt(0).toUpperCase()+w.slice(1).toLowerCase()})}
 const nameFields=['last_name','first_name','middle_name','nick_name','ext_name','father_name','mother_maiden_name','guardian_fullname'];
 
-/* ---------------- Floating labels ---------------- */
 function initFloatingLabels(container=document){
     container.querySelectorAll('.form-group').forEach(group=>{
         const input=group.querySelector('input,select,textarea');
@@ -1718,7 +2174,6 @@ function initFloatingLabels(container=document){
     });
 }
 
-/* ---------------- Age calc ---------------- */
 const bd=document.getElementById('birth_date'),ai=document.getElementById('age');
 function calcAge(){
     if(!bd||!bd.value)return;
@@ -1740,9 +2195,21 @@ document.addEventListener('DOMContentLoaded',()=>{
     initFloatingLabels();
 });
 
-/* =====================================================
-   LRN LIVE CHECK
-   ===================================================== */
+function syncReligion(){
+    const sel = document.getElementById('religion_select');
+    const inp = document.getElementById('religion_other');
+    if (!sel || !inp) return;
+    if (sel.value === '__other__') {
+        inp.style.display = 'block';
+        setTimeout(() => inp.focus(), 50);
+    } else {
+        inp.style.display = 'none';
+        inp.value = '';
+    }
+}
+document.addEventListener('DOMContentLoaded', syncReligion);
+
+/* LRN LIVE CHECK */
 (function(){
     const lrnEl = document.getElementById('lrn');
     const hint  = document.getElementById('lrnHint');
@@ -1757,18 +2224,12 @@ document.addEventListener('DOMContentLoaded',()=>{
     }
 
     lrnEl.addEventListener('input', function(){
-        // Enforce digits only, max 12
         this.value = this.value.replace(/\D/g, '').slice(0, 12);
-
         clearTimeout(lrnTimer);
         const v = this.value.trim();
 
         if (!v) { setHint('', ''); lastChecked = ''; return; }
-        if (v.length < 12) {
-            setHint('pending', '<i class="fas fa-hourglass-half"></i> <?= $t[$lang]['checking'] ?>');
-            lastChecked = '';
-            return;
-        }
+        if (v.length < 12) { setHint('pending', '<i class="fas fa-hourglass-half"></i> <?= $t[$lang]['checking'] ?>'); lastChecked = ''; return; }
         if (v === lastChecked) return;
 
         lrnTimer = setTimeout(async () => {
@@ -1779,31 +2240,18 @@ document.addEventListener('DOMContentLoaded',()=>{
                 fd.append('lrn', v);
                 const r = await fetch('?action=check_lrn', { method: 'POST', body: fd });
                 const j = await r.json();
-
-                if (lrnEl.value.trim() !== v) return; // stale
-
-                if (!j.valid) {
-                    setHint('error', '<i class="fas fa-exclamation-circle"></i> ' + (j.message || 'Invalid LRN'));
-                    return;
-                }
+                if (lrnEl.value.trim() !== v) return;
+                if (!j.valid) { setHint('error', '<i class="fas fa-exclamation-circle"></i> ' + (j.message || 'Invalid LRN')); return; }
                 if (j.exists) {
                     const nm = j.existing?.name || '';
-                    setHint('error',
-                        '<i class="fas fa-times-circle"></i> <?= $t[$lang]['lrn_exists'] ?>'
-                        + (nm ? ' <span class="existing-name">(' + nm + ')</span>' : ''));
-                } else {
-                    setHint('ok', '<i class="fas fa-check-circle"></i> <?= $t[$lang]['lrn_available'] ?>');
-                }
-            } catch (e) {
-                setHint('', '');
-            }
+                    setHint('error', '<i class="fas fa-times-circle"></i> <?= $t[$lang]['lrn_exists'] ?>' + (nm ? ' <span class="existing-name">(' + nm + ')</span>' : ''));
+                } else setHint('ok', '<i class="fas fa-check-circle"></i> <?= $t[$lang]['lrn_available'] ?>');
+            } catch (e) { setHint('', ''); }
         }, 400);
     });
 })();
 
-/* =====================================================
-   NAME DUPLICATE LIVE CHECK
-   ===================================================== */
+/* NAME DUPLICATE LIVE CHECK */
 (function(){
     const fnEl = document.getElementById('first_name');
     const mnEl = document.getElementById('middle_name');
@@ -1816,32 +2264,19 @@ document.addEventListener('DOMContentLoaded',()=>{
     let lastSig = '';
     let currentMatches = [];
 
-    function clearAlert(){
-        container.style.display = 'none';
-        alertEl.innerHTML = '';
-        currentMatches = [];
-    }
+    function clearAlert(){ container.style.display = 'none'; alertEl.innerHTML = ''; currentMatches = []; }
 
     function renderMatches(matches){
         currentMatches = matches;
         if (!matches || matches.length === 0){ clearAlert(); return; }
-
         const items = matches.map(m => {
             let line = '<strong>' + m.name + '</strong>';
-            if (m.lrn)        line += ' · LRN: ' + m.lrn;
+            if (m.lrn) line += ' · LRN: ' + m.lrn;
             if (m.grade_level) line += ' · ' + m.grade_level;
             if (m.school_year) line += ' (' + m.school_year + ')';
             return '<li>' + line + '</li>';
         }).join('');
-
-        alertEl.innerHTML =
-            '<i class="fas fa-exclamation-triangle"></i>' +
-            '<div>' +
-                '<div><strong>Possible duplicate name detected.</strong> ' +
-                'These existing students have the same name:</div>' +
-                '<ul>' + items + '</ul>' +
-                '<div style="margin-top:.4rem;font-size:.8rem;opacity:.85">If this is a different person, you can continue — you\'ll be asked to confirm on submit.</div>' +
-            '</div>';
+        alertEl.innerHTML = '<i class="fas fa-exclamation-triangle"></i><div><div><strong>Possible duplicate name detected.</strong> These existing students have the same name:</div><ul>' + items + '</ul><div style="margin-top:.4rem;font-size:.8rem;opacity:.85">If this is a different person, you can continue — you\'ll be asked to confirm on submit.</div></div>';
         container.style.display = 'block';
     }
 
@@ -1849,12 +2284,7 @@ document.addEventListener('DOMContentLoaded',()=>{
         const fn = fnEl.value.trim();
         const mn = mnEl.value.trim();
         const ln = lnEl.value.trim();
-
-        if (fn.length < 2 || ln.length < 2){
-            clearAlert();
-            lastSig = '';
-            return;
-        }
+        if (fn.length < 2 || ln.length < 2){ clearAlert(); lastSig = ''; return; }
 
         const sig = (fn + '|' + mn + '|' + ln).toLowerCase();
         if (sig === lastSig) return;
@@ -1869,56 +2299,241 @@ document.addEventListener('DOMContentLoaded',()=>{
                 fd.append('last_name', ln);
                 const r = await fetch('?action=check_name', { method: 'POST', body: fd });
                 const j = await r.json();
-
                 const curSig = (fnEl.value.trim() + '|' + mnEl.value.trim() + '|' + lnEl.value.trim()).toLowerCase();
-                if (curSig !== sig) return; // stale
-
-                if (j.checked && Array.isArray(j.matches) && j.matches.length){
-                    renderMatches(j.matches);
-                } else {
-                    clearAlert();
-                }
-            } catch (e) { /* silent */ }
+                if (curSig !== sig) return;
+                if (j.checked && Array.isArray(j.matches) && j.matches.length) renderMatches(j.matches);
+                else clearAlert();
+            } catch (e) {}
         }, 500);
     }
 
-    [fnEl, mnEl, lnEl].forEach(el => {
-        if (el) el.addEventListener('input', checkNames);
-    });
-
-    // Expose for submit-time use
+    [fnEl, mnEl, lnEl].forEach(el => { if (el) el.addEventListener('input', checkNames); });
     window.__getNameMatches = function(){ return currentMatches; };
 })();
 
-/* ---------------- Strand/Program linkage ---------------- */
-const ss=document.getElementById('strand'),ps=document.getElementById('program');
-const progs={
-    "Automotive and Small Engine Technologies":["Driving and Automotive Servicing","Automotive Servicing (Electrical Repair)","Automotive Servicing (Engine and Chassis Repairs)"],
-    "Construction and Building Technologies":["Carpentry","Manual Metal Arc Welding"],
-    "ICT Support and Computer Programming Technologies":["Computer Programming (Java)","Computer Programming (.NET)","Computer System Servicing"],
-    "Industrial Technologies":["Electronics Product Assembly and Servicing"],
-    "Agri-Fishery Business and Food Innovation":["Agricultural Crops Production"],
-    "Hospitality and Tourism":["Food and Beverage Operation","Hotel Operation (Housekeeping)"]
-};
-if(ss){
-    ss.innerHTML='<option value="" disabled selected></option>';
-    Object.keys(progs).forEach(k=>{let o=document.createElement("option");o.value=o.textContent=k;ss.appendChild(o)});
-    ss.addEventListener("change",()=>{
-        ps.innerHTML='<option value="" disabled selected></option>';
-        if(progs[ss.value])progs[ss.value].forEach(p=>{let o=document.createElement("option");o.value=o.textContent=p;ps.appendChild(o)});
-        initFloatingLabels(ps.parentElement);
+/* STRAND / PROGRAM LINKAGE */
+(function(){
+    const ss = document.getElementById('strand');
+    const ps = document.getElementById('program');
+    if (!ss || !ps) return;
+
+    ss.innerHTML = '<option value="" disabled selected></option>';
+    Object.keys(progs).forEach(k => {
+        const o = document.createElement("option");
+        o.value = o.textContent = k;
+        ss.appendChild(o);
     });
-    const cs=<?= json_encode($_POST['strand']??'') ?>,cp=<?= json_encode($_POST['program']??'') ?>;
-    if(cs){
-        ss.value=cs;ss.dispatchEvent(new Event('change'));
-        if(cp){
-            const chk=()=>{if(ps.options.length>1){ps.value=cp;if(ps.value)ps.parentElement.classList.add('filled')}else setTimeout(chk,10)};
+    ss.addEventListener("change", () => {
+        ps.innerHTML = '<option value="" disabled selected></option>';
+        if (progs[ss.value]) progs[ss.value].forEach(p => {
+            const o = document.createElement("option");
+            o.value = o.textContent = p;
+            ps.appendChild(o);
+        });
+        initFloatingLabels(ps.parentElement);
+        if (typeof renderStrandRecommendation === 'function') renderStrandRecommendation();
+    });
+
+    const cs = <?= json_encode($_POST['strand'] ?? '') ?>;
+    const cp = <?= json_encode($_POST['program'] ?? '') ?>;
+    if (cs) {
+        ss.value = cs;
+        ss.dispatchEvent(new Event('change'));
+        if (cp) {
+            const chk = () => {
+                if (ps.options.length > 1) {
+                    ps.value = cp;
+                    if (ps.value) ps.parentElement.classList.add('filled');
+                    if (typeof renderStrandRecommendation === 'function') renderStrandRecommendation();
+                } else setTimeout(chk, 10);
+            };
             chk();
         }
     }
+})();
+
+/* Previous strand/program linkage */
+(function(){
+    const ps = document.getElementById('previous_strand');
+    const pp = document.getElementById('previous_program');
+    if (!ps || !pp) return;
+
+    ps.addEventListener('change', () => {
+        pp.innerHTML = '<option value="" selected>— Select —</option>';
+        if (progs[ps.value]) progs[ps.value].forEach(p => {
+            const o = document.createElement('option');
+            o.value = o.textContent = p;
+            pp.appendChild(o);
+        });
+        initFloatingLabels(pp.parentElement);
+    });
+})();
+
+/* STRAND RECOMMENDATION */
+let liveStrandTrends = { trends: {}, sy: null, total: 0 };
+
+async function loadStrandTrends(){
+    try {
+        const r = await fetch('?action=strand_trends', { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json();
+        liveStrandTrends = {
+            trends: j.trends || {},
+            sy: j.sy || null,
+            total: j.total || 0
+        };
+    } catch (e) {}
 }
 
-/* ---------------- Add education ---------------- */
+function escapeRec(s){
+    return String(s || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+}
+
+function analyzeStrand(curStrand, curProgram, skills, isTransferred, prevStrand){
+    const sk  = (skills || '').toLowerCase().trim();
+    const cur = (curStrand || '').trim();
+    const prog = (curProgram || '').trim();
+
+    if (cur && prog && progs[cur] && progs[cur].indexOf(prog) === -1) {
+        return { status:'mismatch', icon:'bi bi-exclamation-triangle-fill', title:'Program does not match strand',
+                 message:`"${prog}" is not a standard program under ${cur}. Please review your selection.`, suggestion:null };
+    }
+    if (isTransferred && prevStrand) {
+        if (prevStrand.toLowerCase() === cur.toLowerCase()) {
+            return { status:'aligned', icon:'bi bi-check2-circle', title:'Aligned with your previous strand',
+                     message:`You're continuing from ${prevStrand}. This is a strong continuity choice.`, suggestion:null };
+        }
+        return { status:'changed', icon:'bi bi-arrow-left-right', title:'Different from your previous strand',
+                 message:`You were in ${prevStrand} at your previous school. Confirm this change is intentional before submitting.`, suggestion:null };
+    }
+    const t = liveStrandTrends.trends[cur];
+    if (t && t.current <= 1 && liveStrandTrends.sy) {
+        return { status:'changed', icon:'bi bi-exclamation-triangle-fill', title:'Low enrollment for this strand',
+                 message:`Only ${t.current} student(s) enrolled in ${cur} for ${liveStrandTrends.sy}. Verify this strand will run.`, suggestion:null };
+    }
+    if (t && typeof t.growth === 'number' && t.growth < -30) {
+        return { status:'changed', icon:'bi bi-graph-down-arrow', title:'Strand trending downward',
+                 message:`${cur} enrollment dropped ${Math.abs(t.growth)}% vs last year (${t.previous} → ${t.current}). Verify capacity.`, suggestion:null };
+    }
+    if (sk) {
+        let bestMatch = null, bestScore = 0, currentScore = 0;
+        for (const strand in strandKeywords) {
+            let score = 0;
+            for (const kw of strandKeywords[strand]) if (kw !== '' && sk.indexOf(kw) !== -1) score++;
+            if (strand === cur) currentScore = score;
+            if (score > bestScore) { bestScore = score; bestMatch = strand; }
+        }
+        if (currentScore >= 2 && bestMatch === cur) {
+            let extra = '';
+            if (t && typeof t.growth === 'number' && t.growth > 20) extra = ` Enrollment in this strand is also up ${t.growth}% year-over-year.`;
+            return { status:'strong', icon:'bi bi-star-fill', title:'Strong fit for your chosen strand',
+                     message:`Your listed skills align well with ${cur}.${extra}`, suggestion:null };
+        }
+        if (bestScore >= 2 && bestMatch && bestMatch !== cur) {
+            const altT = liveStrandTrends.trends[bestMatch];
+            let note = '';
+            if (altT && typeof altT.growth === 'number' && altT.growth > 20) note = ` (up ${altT.growth}% YoY)`;
+            return { status:'alternative', icon:'bi bi-lightbulb-fill', title:'Consider: ' + bestMatch,
+                     message:`Based on your skills, ${bestMatch} may be a better fit than ${cur || 'your current choice'}${note}. You can switch above or continue with your current selection.`, suggestion:bestMatch };
+        }
+    }
+    return { status:'insufficient', icon:'bi bi-info-circle', title:'Add your skills in Step 1 for a recommendation',
+             message:'We can suggest a strand based on your special skills. Go back to Step 1 and list a few, then return here.', suggestion:null };
+}
+
+function renderStrandRecommendation(){
+    const container = document.getElementById('strandRecommendation');
+    if (!container) return;
+
+    const strandEl   = document.getElementById('strand');
+    const programEl  = document.getElementById('program');
+    const skillsEl   = document.getElementById('special_skills');
+    const transferEl = document.getElementById('is_transferred');
+    const prevEl     = document.getElementById('previous_strand');
+
+    const cur  = strandEl ? strandEl.value : '';
+    const prog = programEl ? programEl.value : '';
+    const skills = skillsEl ? skillsEl.value : '';
+    const isTransferred = transferEl ? transferEl.checked : false;
+    const prevStrand = prevEl ? prevEl.value : '';
+
+    if (!cur) { container.style.display = 'none'; return; }
+    container.style.display = 'block';
+
+    const rec = analyzeStrand(cur, prog, skills, isTransferred, prevStrand);
+
+    let suggestionBlock = '';
+    if (rec.suggestion) {
+        suggestionBlock = `<div class="rec-suggestion"><i class="fas fa-arrow-right"></i> Suggested: <strong>${escapeRec(rec.suggestion)}</strong></div>`;
+    }
+
+    let trendsBlock = '';
+    const t = liveStrandTrends.trends[cur];
+    if (t && liveStrandTrends.sy) {
+        let growthChip = '<span class="rec-growth flat"><i class="fas fa-minus"></i>No prior data</span>';
+        if (t.growth === 'new') {
+            growthChip = '<span class="rec-growth new"><i class="fas fa-star"></i>New strand</span>';
+        } else if (typeof t.growth === 'number') {
+            const up = t.growth >= 0;
+            growthChip = `<span class="rec-growth ${up ? 'up' : 'down'}"><i class="fas fa-arrow-${up ? 'up' : 'down'}"></i>${up ? '+' : ''}${t.growth}% YoY</span>`;
+        }
+
+        const sorted = Object.entries(liveStrandTrends.trends)
+            .sort((a, b) => b[1].current - a[1].current)
+            .slice(0, 3);
+        let maxCurr = Math.max(t.current, ...sorted.map(([_, d]) => d.current), 1);
+        let bars = '';
+        sorted.forEach(([name, data]) => {
+            const w = Math.max(8, Math.round((data.current / maxCurr) * 100));
+            const isChosen = name === cur;
+            bars += `<div class="rec-bar-row ${isChosen ? 'is-chosen' : ''}">
+                <div class="rec-bar-label"><span>${escapeRec(name)}</span><span class="rec-bar-count">${data.current}</span></div>
+                <div class="rec-bar-track"><div class="rec-bar-fill" style="width:${w}%"></div></div>
+            </div>`;
+        });
+
+        trendsBlock = `<div class="rec-trends">
+            <div class="rec-trends-head">
+                <span class="rec-trends-title"><i class="fas fa-chart-bar me-1"></i>Live enrollment (${escapeRec(liveStrandTrends.sy)})</span>
+                ${growthChip}
+            </div>
+            <div class="rec-bars">${bars}</div>
+        </div>`;
+    }
+
+    container.innerHTML = `
+        <div class="rec-card rec-${rec.status}">
+            <div class="rec-icon"><i class="fas ${rec.icon.replace('bi bi-','')}"></i></div>
+            <div class="rec-body">
+                <div class="rec-title">${escapeRec(rec.title)}</div>
+                <div class="rec-message">${escapeRec(rec.message)}</div>
+                ${suggestionBlock}
+                ${trendsBlock}
+            </div>
+        </div>
+    `;
+}
+
+(function bindRecommendation(){
+    const strandEl   = document.getElementById('strand');
+    const skillsEl   = document.getElementById('special_skills');
+    const programEl  = document.getElementById('program');
+    const transferEl = document.getElementById('is_transferred');
+    const prevEl     = document.getElementById('previous_strand');
+
+    if (strandEl)   strandEl.addEventListener('change', renderStrandRecommendation);
+    if (skillsEl)   skillsEl.addEventListener('input', renderStrandRecommendation);
+    if (programEl)  programEl.addEventListener('change', renderStrandRecommendation);
+    if (transferEl) transferEl.addEventListener('change', renderStrandRecommendation);
+    if (prevEl)     prevEl.addEventListener('change', renderStrandRecommendation);
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        await loadStrandTrends();
+        renderStrandRecommendation();
+    });
+    setTimeout(renderStrandRecommendation, 300);
+})();
+
 function addEdu(){
     const c=document.getElementById('edu-container'),idx=c.querySelectorAll('.edu-entry').length,t=document.createElement('div');
     t.className='edu-entry row g-3 align-items-end';
@@ -1929,7 +2544,6 @@ function addEdu(){
 }
 document.getElementById('addEduBtn')?.addEventListener('click',addEdu);
 
-/* ---------------- Transferee toggle ---------------- */
 const tc=document.getElementById('is_transferred'),ts=document.getElementById('transferee-fields');
 if(tc&&ts){
     const tg=()=>{ts.style.display=tc.checked?'block':'none';if(tc.checked)initFloatingLabels(ts)};
@@ -1937,14 +2551,12 @@ if(tc&&ts){
     window.addEventListener('load',tg);
 }
 
-/* ---------------- Document upload rows ---------------- */
 document.querySelectorAll('input[name="entrance_data[]"]').forEach(cb=>{
     cb.addEventListener('change',function(){
         const rowId='uploadRow_'+this.id,row=document.getElementById(rowId);
         if(!row)return;
-        if(this.checked){
-            row.classList.add('visible');
-        } else {
+        if(this.checked){ row.classList.add('visible'); }
+        else {
             row.classList.remove('visible');
             const fi=row.querySelector('input[type="file"]');
             if(fi){fi.value='';fi.disabled=false;}
@@ -1956,7 +2568,6 @@ document.querySelectorAll('input[name="entrance_data[]"]').forEach(cb=>{
     });
 });
 
-/* ---------------- Camera ---------------- */
 let currentRow=null,stream=null,lastFocusedElement=null;
 async function openCamera(rowId){
     currentRow=rowId;
@@ -1967,10 +2578,7 @@ async function openCamera(rowId){
     try{
         stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});
         video.srcObject=stream;
-    }catch(e){
-        alert('Cannot access camera. Please check permissions.');
-        closeCamera();
-    }
+    }catch(e){ alert('Cannot access camera. Please check permissions.'); closeCamera(); }
 }
 function closeCamera(){
     const modal=document.getElementById('cameraModal');
@@ -1993,10 +2601,7 @@ function capturePhoto(){
             if(img){img.src=dataUrl;preview.style.display='block';}
         }
         const row=document.querySelector('#uploadRow_'+currentRow);
-        if(row){
-            const fi=row.querySelector('input[type="file"]');
-            if(fi)fi.value='';
-        }
+        if(row){ const fi=row.querySelector('input[type="file"]'); if(fi)fi.value=''; }
     }
     closeCamera();
 }
@@ -2013,13 +2618,11 @@ document.addEventListener('DOMContentLoaded',()=>{
     });
 });
 
-/* =====================================================
-   WIZARD
-   ===================================================== */
+/* WIZARD */
 (function(){
     const TOTAL_STEPS = 5;
     const form = document.getElementById('enrollForm');
-    if (!form) return; // review mode — no wizard
+    if (!form) return;
 
     const stepContents = form.querySelectorAll('.wizard-step-content');
     const indicators   = document.querySelectorAll('.wizard-step-indicator');
@@ -2034,72 +2637,142 @@ document.addEventListener('DOMContentLoaded',()=>{
         5: ['school_year','grade_level','term','strand','program'],
     };
 
-    function validateStep(step){
-        let valid = true;
+    const STEP_NAMES = {
+        1: 'Student Info',
+        2: 'Parents & Guardian',
+        3: 'Address',
+        4: 'Education',
+        5: 'Enrollment & Documents'
+    };
+
+    const STEP_FIELD_LABELS = {
+        1: {
+            lrn: 'LRN',
+            last_name: 'Last Name',
+            first_name: 'First Name',
+            sex: 'Sex',
+            birth_date: 'Birth Date',
+            height: 'Height',
+            weight: 'Weight'
+        },
+        2: { is_4ps: 'CCT/4Ps Recipient' },
+        5: {
+            school_year: 'School Year',
+            grade_level: 'Grade Level',
+            term: 'Term',
+            strand: 'Strand',
+            program: 'Program'
+        }
+    };
+
+    function documentHasAnyFile() {
+        const checks = form.querySelectorAll('input[name="entrance_data[]"]:checked');
+        if (checks.length === 0) return false;
+
+        let hasAnyFile = false;
+        checks.forEach(cb => {
+            const row = document.getElementById('uploadRow_' + cb.id);
+            if (!row) return;
+
+            if (row.querySelector('.upload-row.has-file')) { hasAnyFile = true; return; }
+
+            const fi = row.querySelector('input[type="file"]');
+            if (fi && fi.files && fi.files.length > 0) { hasAnyFile = true; return; }
+
+            const cd = row.querySelector('input[name^="camera_data"]');
+            if (cd && cd.value && cd.value.trim() !== '') { hasAnyFile = true; return; }
+        });
+        return hasAnyFile;
+    }
+
+    function getStepError(step) {
+        const missing = [];
         const names = STEP_REQUIRED[step] || [];
-        for (const name of names){
+
+        for (const name of names) {
             const el = form.querySelector(`[name="${name}"]`);
             if (!el) continue;
             const group = el.closest('.form-group');
             if (group) group.classList.remove('error');
             el.removeAttribute('aria-invalid');
-            if (!el.checkValidity() || el.value.trim() === ''){
-                valid = false;
+            if (!el.checkValidity() || el.value.trim() === '') {
+                missing.push(name);
                 if (group) group.classList.add('error');
                 el.setAttribute('aria-invalid','true');
             }
         }
-        if (step === 1){
+
+        if (step === 1) {
             const lrn = form.querySelector('#lrn');
-            if (lrn && lrn.value && !/^\d{12}$/.test(lrn.value)){
-                valid = false;
+            if (lrn && lrn.value && !/^\d{12}$/.test(lrn.value)) {
+                if (!missing.includes('lrn')) missing.push('lrn');
                 lrn.closest('.form-group')?.classList.add('error');
                 lrn.setAttribute('aria-invalid','true');
             }
             const h = form.querySelector('#height');
-            if (h && h.value !== ''){
+            if (h && h.value !== '') {
                 const hv = parseFloat(h.value);
-                if (isNaN(hv) || hv < <?= HEIGHT_MIN ?> || hv > <?= HEIGHT_MAX ?>){
-                    valid = false;
+                if (isNaN(hv) || hv < <?= HEIGHT_MIN ?> || hv > <?= HEIGHT_MAX ?>) {
+                    if (!missing.includes('height')) missing.push('height');
                     h.closest('.form-group')?.classList.add('error');
                 }
             }
             const w = form.querySelector('#weight');
-            if (w && w.value !== ''){
+            if (w && w.value !== '') {
                 const wv = parseFloat(w.value);
-                if (isNaN(wv) || wv < <?= WEIGHT_MIN ?> || wv > <?= WEIGHT_MAX ?>){
-                    valid = false;
+                if (isNaN(wv) || wv < <?= WEIGHT_MIN ?> || wv > <?= WEIGHT_MAX ?>) {
+                    if (!missing.includes('weight')) missing.push('weight');
                     w.closest('.form-group')?.classList.add('error');
                 }
             }
         }
-        if (step === 5){
+
+        if (missing.length > 0) {
+            const labels = missing
+                .map(f => (STEP_FIELD_LABELS[step] && STEP_FIELD_LABELS[step][f]) || f)
+                .join(', ');
+            return {
+                title: 'Incomplete: ' + (STEP_NAMES[step] || ('Step ' + step)),
+                html:  'Please fill in the following before continuing:<br><strong>' + labels + '</strong>'
+            };
+        }
+
+        if (step === 5) {
             const checks = form.querySelectorAll('input[name="entrance_data[]"]:checked');
-            if (checks.length === 0){
-                valid = false;
-                Swal.fire({
-                    icon: 'warning',
-                    title: 'Select at least one document',
-                    text: '<?= $t[$lang]['select_one_entrance'] ?>',
-                    confirmButtonColor: '#1565c0'
-                });
+            if (checks.length === 0) {
+                return {
+                    title: 'No documents selected',
+                    html:  'Please tick at least one document in the <strong>Entrance Data Presented</strong> section.'
+                };
+            }
+            if (!documentHasAnyFile()) {
+                return {
+                    title: 'No file attached',
+                    html:  'You ticked a document but didn\'t attach a file.<br><br>' +
+                           '<strong>Please upload a document before submitting for review.</strong>'
+                };
             }
         }
-        return valid;
+
+        return null;
     }
 
-    function stepIsComplete(step){
+    function stepIsComplete(step) {
         const names = STEP_REQUIRED[step] || [];
-        if (names.length === 0) return visited.has(step);
-        for (const name of names){
+        if (names.length === 0 && step !== 5) return visited.has(step);
+
+        for (const name of names) {
             const el = form.querySelector(`[name="${name}"]`);
             if (!el) continue;
             if (!el.checkValidity() || el.value.trim() === '') return false;
         }
-        if (step === 5){
+
+        if (step === 5) {
             const checks = form.querySelectorAll('input[name="entrance_data[]"]:checked');
             if (checks.length === 0) return false;
+            if (!documentHasAnyFile()) return false;
         }
+
         return true;
     }
 
@@ -2119,13 +2792,14 @@ document.addEventListener('DOMContentLoaded',()=>{
             if (s === n){
                 el.classList.add('active');
                 el.setAttribute('aria-current','step');
-            } else if (stepIsComplete(s)){
-                el.classList.add('completed');
-            } else if (visited.has(s)){
-                el.classList.add('invalid');
-            }
+            } else if (stepIsComplete(s)) el.classList.add('completed');
+            else if (visited.has(s)) el.classList.add('invalid');
             el.disabled = !(s <= n || visited.has(s));
         });
+
+        if (n === 5 && typeof renderStrandRecommendation === 'function') {
+            setTimeout(renderStrandRecommendation, 50);
+        }
 
         const target = document.querySelector('.wizard-progress-wrap');
         if (target){
@@ -2138,12 +2812,15 @@ document.addEventListener('DOMContentLoaded',()=>{
         btn.addEventListener('click', () => {
             const target = parseInt(btn.dataset.next, 10);
             const from   = target - 1;
-            if (!validateStep(from)){
+            const err    = getStepError(from);
+            if (err){
                 Swal.fire({
                     icon: 'warning',
-                    title: 'Please complete this step',
-                    text: 'Some required fields need your attention before continuing.',
+                    title: err.title,
+                    html: err.html,
                     confirmButtonColor: '#1565c0'
+                }).then(function () {
+                    setTimeout(ensurePageUnfrozen, 250);
                 });
                 return;
             }
@@ -2160,39 +2837,51 @@ document.addEventListener('DOMContentLoaded',()=>{
     indicators.forEach(el => {
         el.addEventListener('click', () => {
             const s = parseInt(el.dataset.step, 10);
-            if (s <= currentStep || visited.has(s)){
-                showStep(s);
-            }
+            if (s <= currentStep || visited.has(s)) showStep(s);
         });
     });
 
-    /* -------- Submit-time name duplicate confirmation -------- */
     form.addEventListener('submit', async function(e){
-        // 1) validate all steps
-        let allValid = true;
         let firstBadStep = null;
+        let firstErr     = null;
         for (let s = 1; s <= TOTAL_STEPS; s++){
-            if (!validateStep(s)){
-                allValid = false;
-                if (firstBadStep === null) firstBadStep = s;
+            const err = getStepError(s);
+            if (err && firstBadStep === null) {
+                firstBadStep = s;
+                firstErr     = err;
             }
         }
-        if (!allValid){
+        if (firstBadStep !== null){
             e.preventDefault();
-            showStep(firstBadStep || 1);
+            showStep(firstBadStep);
             Swal.fire({
                 icon: 'warning',
-                title: 'Please complete the form',
-                text: 'Some required fields need your attention before submitting.',
+                title: firstErr.title,
+                html: firstErr.html,
                 confirmButtonColor: '#1565c0'
+            }).then(function () {
+                setTimeout(ensurePageUnfrozen, 250);
             });
             return;
         }
 
-        // 2) name duplicate confirmation (skip if already acknowledged)
+        const relSel = document.getElementById('religion_select');
+        const relOther = document.getElementById('religion_other');
+        if (relSel && relOther && relSel.value === '__other__') {
+            let hidden = document.getElementById('religion_actual');
+            if (!hidden) {
+                hidden = document.createElement('input');
+                hidden.type = 'hidden';
+                hidden.name = 'religion';
+                hidden.id = 'religion_actual';
+                form.appendChild(hidden);
+            }
+            hidden.value = relOther.value.trim();
+            relSel.removeAttribute('name');
+        }
+
         const ack = document.getElementById('acknowledgeDuplicateName');
         if (ack && ack.value === '1'){
-            // already acknowledged — proceed
             const btn = document.getElementById('submitBtn');
             if (btn){ btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Submitting...'; }
             return;
@@ -2204,7 +2893,7 @@ document.addEventListener('DOMContentLoaded',()=>{
 
             const items = matches.map(m => {
                 let line = '<strong>' + m.name + '</strong>';
-                if (m.lrn)         line += ' · LRN: ' + m.lrn;
+                if (m.lrn) line += ' · LRN: ' + m.lrn;
                 if (m.grade_level) line += ' · ' + m.grade_level;
                 return '<li style="text-align:left">' + line + '</li>';
             }).join('');
@@ -2212,8 +2901,7 @@ document.addEventListener('DOMContentLoaded',()=>{
             const res = await Swal.fire({
                 icon: 'warning',
                 title: '<?= $t[$lang]['name_duplicate_title'] ?>',
-                html: '<p style="margin-bottom:.5rem"><?= $t[$lang]['name_duplicate_msg'] ?></p>'
-                    + '<ul style="display:inline-block;margin:0;padding-left:1.2rem;font-size:.9rem">' + items + '</ul>',
+                html: '<p style="margin-bottom:.5rem"><?= $t[$lang]['name_duplicate_msg'] ?></p>' + '<ul style="display:inline-block;margin:0;padding-left:1.2rem;font-size:.9rem">' + items + '</ul>',
                 showCancelButton: true,
                 confirmButtonText: '<?= $t[$lang]['name_duplicate_yes'] ?>',
                 cancelButtonText: '<?= $t[$lang]['name_duplicate_no'] ?>',
@@ -2221,17 +2909,15 @@ document.addEventListener('DOMContentLoaded',()=>{
                 cancelButtonColor: '#6c757d',
                 reverseButtons: true
             });
+            setTimeout(ensurePageUnfrozen, 250);
 
             if (res.isConfirmed){
                 if (ack) ack.value = '1';
-                // Re-submit programmatically — this time validation will pass
-                // because ack is set, and the server will accept the name dup.
                 form.submit();
             }
             return;
         }
 
-        // 3) no duplicates — proceed
         const btn = document.getElementById('submitBtn');
         if (btn){
             btn.disabled = true;
@@ -2251,31 +2937,56 @@ document.addEventListener('DOMContentLoaded',()=>{
 
     showStep(currentStep);
 
-    // If the server rejected with a name_duplicate, prompt now.
     <?php if ($name_dup_pending): ?>
     setTimeout(() => { form.requestSubmit(); }, 300);
     <?php endif; ?>
 })();
 
-/* ---------------- Alerts ---------------- */
 document.addEventListener('DOMContentLoaded',function(){
     <?php if (isset($_SESSION['success']) && $_SESSION['success'] === true): ?>
         Swal.fire({
-            icon: 'success',
-            title: 'Enrollment Successful!',
+            icon: 'info',
+            title: 'Enrollment Submitted for Review',
             html: <?= json_encode($_SESSION['success_message'] ?? 'Student successfully enrolled!') ?>,
             confirmButtonColor: '#1565c0',
             confirmButtonText: 'Continue',
             allowOutsideClick: false
         }).then(()=>{window.location.href='enroll_form.php';});
         <?php unset($_SESSION['success'],$_SESSION['success_message']); ?>
+    <?php elseif (!empty($enroll_error)): ?>
+        <?php
+        $swal_html = '<div style="text-align:left;padding:.5rem 0">'
+            . '<p style="margin:0 0 .85rem;font-size:1rem;font-weight:600;color:#0f172a;line-height:1.45">'
+            . htmlspecialchars($enroll_error['message'])
+            . '</p>'
+            . '<div style="background:#fef2f2;border-left:4px solid #dc3545;padding:.85rem 1rem;border-radius:8px;font-size:.9rem;color:#7f1d1d;line-height:1.55">'
+            . htmlspecialchars($enroll_error['action'])
+            . '</div>'
+            . '<p style="margin:1rem 0 0;font-size:.7rem;color:#94a3b8;text-align:center;font-family:ui-monospace,monospace">'
+            . 'Reference: ' . htmlspecialchars($enroll_error['ref'])
+            . '</p>'
+            . '</div>';
+        ?>
+        Swal.fire({
+            icon: 'error',
+            title: 'Enrollment could not be completed',
+            html: <?= json_encode($swal_html, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>,
+            confirmButtonColor: '#dc3545',
+            confirmButtonText: 'Fix and Retry',
+            allowOutsideClick: false,
+            width: 520
+        }).then(function () {
+            setTimeout(ensurePageUnfrozen, 350);
+        });
     <?php elseif (isset($_SESSION['error'])): ?>
         Swal.fire({
-            icon:'error',
-            title:'Enrollment Failed',
-            html:'<div style="text-align:left;padding:0.5rem 0"><p style="margin-bottom:0.75rem">We couldn\'t complete the enrollment.</p><div style="background:#fef2f2;border-left:4px solid #dc3545;padding:0.75rem 1rem;border-radius:8px;font-size:0.9rem;color:#991b1b">'+<?= json_encode($_SESSION['error']) ?>+'</div></div>',
-            confirmButtonColor:'#dc3545',
-            confirmButtonText:'Try Again'
+            icon: 'error',
+            title: 'Enrollment Failed',
+            html: '<div style="text-align:left;padding:0.5rem 0"><p style="margin-bottom:0.75rem">We couldn\'t complete the enrollment.</p><div style="background:#fef2f2;border-left:4px solid #dc3545;padding:0.75rem 1rem;border-radius:8px;font-size:0.9rem;color:#991b1b">' + <?= json_encode($_SESSION['error']) ?> + '</div></div>',
+            confirmButtonColor: '#dc3545',
+            confirmButtonText: 'Try Again'
+        }).then(function () {
+            setTimeout(ensurePageUnfrozen, 350);
         });
         <?php unset($_SESSION['error']); ?>
     <?php endif; ?>

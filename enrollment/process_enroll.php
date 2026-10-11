@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . '/../config/bootstrap.php';
 require_once __DIR__ . '/../config/crypto.php';
+require_once __DIR__ . '/../config/file_verify.php';
+require_once __DIR__ . '/../config/document_content_verify.php';
 
 // Check request method
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -11,11 +13,20 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 // Verify CSRF token
 if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'] ?? '', $_POST['csrf_token'])) {
-    $_SESSION['error'] = 'Invalid security token. Please try again.';
-    header('Location: enroll_form.php');
+    // Preserve the user's work so they don't lose their form data.
+    if (!isset($_SESSION['form_data']) && !empty($_POST)) {
+        $restore = $_POST;
+        unset($restore['csrf_token']);                 // don't cache the stale token
+        $_SESSION['form_data'] = $restore;
+    }
+
+    // Refresh the session token so the next attempt has a valid one.
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+
+    $_SESSION['error'] = 'Your session expired. Please review and submit again.';
+    header('Location: enroll_form.php?edit=1');
     exit();
 }
-
 /**
  * Auto-detect types and bind params safely.
  */
@@ -85,29 +96,151 @@ function assignProvisionalSection(
 }
 
 /**
- * Encrypt and store a staged file.
+ * Turn a raw exception message into [user_message, action_hint, step_number].
+ *
+ * The step number is which wizard step the user should be sent back to so
+ * they can fix the problem. Steps: 1=Student, 2=Parents, 3=Address,
+ * 4=Education, 5=Enrollment/Documents.
+ */
+function classify_enrollment_error(string $msg, string $corr): array
+{
+    $m = strtolower($msg);
+
+    // ---- Document / upload problems → step 5 ----
+    if (str_contains($m, 'file verification failed')) {
+        return [
+            'One of your uploaded documents was rejected by the file checker.',
+            'Please make sure the file is a valid PDF, JPG, or PNG under the size limit, then re-upload it.',
+            5,
+        ];
+    }
+    if (str_contains($m, 'staged file missing')) {
+        return [
+            'One of your uploaded documents could not be found.',
+            'Please re-upload the affected document and submit again.',
+            5,
+        ];
+    }
+    if (str_contains($m, 'empty file')) {
+        return [
+            'One of your uploaded documents is empty or unreadable.',
+            'Please re-upload a valid copy of the document.',
+            5,
+        ];
+    }
+    if (str_contains($m, 'too many files')) {
+        return [
+            'You tried to upload too many documents.',
+            'Please keep the total number of uploads to 10 or fewer.',
+            5,
+        ];
+    }
+    if (str_contains($m, 'cannot write encrypted file') || str_contains($m, 'storage write failed')) {
+        return [
+            'The system could not save your uploaded documents.',
+            'Please try again in a moment. If it keeps failing, contact the registrar with reference: ' . $corr,
+            5,
+        ];
+    }
+    if (str_contains($m, 'upload at least one')) {
+        return [
+            'You did not upload any entrance documents.',
+            'Please tick at least one document checkbox and upload the file for it.',
+            5,
+        ];
+    }
+    if (str_contains($m, 'unsupported file type') || str_contains($m, 'not valid for')) {
+        return [
+            'One of your files is the wrong type for that document slot.',
+            'Photos accept only JPG/PNG. Certificates accept PDF, JPG, or PNG.',
+            5,
+        ];
+    }
+
+    // ---- Personal info problems → step 1 ----
+    if (str_contains($m, 'birth date')) {
+        return [
+            'Your birth date is missing or invalid.',
+            'Please return to Step 1 and enter a valid birth date.',
+            1,
+        ];
+    }
+    if (str_contains($m, 'age must be')) {
+        return [
+            'Your age is outside the allowed range (14–25).',
+            'Check your birth date — the age field is calculated from it automatically.',
+            1,
+        ];
+    }
+
+    // ---- Student ID generation — system issue ----
+    if (str_contains($m, 'student id') && str_contains($m, 'unique')) {
+        return [
+            'The system could not assign a unique Student ID.',
+            'Please try submitting again. If it keeps failing, contact the registrar with reference: ' . $corr,
+            1,
+        ];
+    }
+
+    // ---- SQL / DB layer — user cannot fix these ----
+    if (str_contains($m, 'prepare failed') || str_contains($m, 'execute failed') || str_contains($m, 'column')) {
+        return [
+            'A system error occurred while saving your enrollment.',
+            'Please try submitting again in a moment. If the problem persists, contact the registrar with reference: ' . $corr,
+            1,
+        ];
+    }
+
+    // ---- Fallback ----
+    return [
+        'We could not complete your enrollment.',
+        'Please review your entries carefully and submit again. If it keeps failing, contact the registrar with reference: ' . $corr,
+        1,
+    ];
+}
+
+/**
+ * Verify, encrypt, and store a staged file.
+ *
+ * Structural checks are HARD failures. Content checks are SOFT failures —
+ * a mismatch is recorded for the registrar, but does not block enrollment.
  */
 function store_encrypted_file(
     string $staging_path,
     int $student_id,
-    int $max_bytes = 5 * 1024 * 1024
+    string $doc_label = ''
 ): array {
-    if (!is_file($staging_path)) throw new Exception("Staged file missing");
-    if (filesize($staging_path) > $max_bytes) throw new Exception("File too large");
+    if (!is_file($staging_path)) {
+        throw new Exception("Staged file missing.");
+    }
+
+    $verify = verify_document_file($staging_path, $doc_label);
+    if (!$verify['ok']) {
+        throw new Exception("File verification failed: " . ($verify['error'] ?? 'unknown'));
+    }
+
+    $content = verify_document_content($staging_path, $doc_label);
+    $content_status = $content['status'] ?? 'skipped';
+
+    if ($content_status === 'failed') {
+        error_log(sprintf(
+            'store_encrypted_file: content mismatch for "%s" (score=%d) — downgraded to needs_review. Notes: %s',
+            $doc_label,
+            (int)($content['score'] ?? 0),
+            implode(' | ', $content['notes'] ?? [])
+        ));
+
+        $content['status'] = 'needs_review';
+        $content['notes']  = array_merge(
+            (array)($content['notes'] ?? []),
+            ['Auto-flagged by system: content did not match expected keywords. Registrar must verify manually.']
+        );
+    }
 
     $plain = file_get_contents($staging_path);
-    if ($plain === false || $plain === '') throw new Exception("Empty file");
-
-    $fi = finfo_open(FILEINFO_MIME_TYPE);
-    $mime = finfo_file($fi, $staging_path);
-    finfo_close($fi);
-
-    $allowed = [
-        'application/pdf' => 'pdf',
-        'image/jpeg'      => 'jpg',
-        'image/png'       => 'png',
-    ];
-    if (!isset($allowed[$mime])) throw new Exception("Invalid file type: {$mime}");
+    if ($plain === false || $plain === '') {
+        throw new Exception("Empty file after verification.");
+    }
 
     $blob = doc_encrypt($plain);
 
@@ -117,19 +250,31 @@ function store_encrypted_file(
         $token = bin2hex(openssl_random_pseudo_bytes(16));
     }
 
-    $filename = "enroll_{$student_id}_{$token}.{$allowed[$mime]}.enc";
+    $ext_map = [
+        'application/pdf' => 'pdf',
+        'image/jpeg'      => 'jpg',
+        'image/png'       => 'png',
+    ];
+    $ext = $ext_map[$verify['mime']] ?? 'bin';
+
+    $filename = "enroll_{$student_id}_{$token}.{$ext}.enc";
     $abs_path = DOCUMENTS_DIR . $filename;
 
     if (file_put_contents($abs_path, $blob, LOCK_EX) === false) {
-        throw new Exception("Cannot write encrypted file");
+        throw new Exception("Cannot write encrypted file.");
     }
     @chmod($abs_path, 0600);
     @unlink($staging_path);
 
     return [
         'filename' => $filename,
-        'mime'     => $mime,
+        'mime'     => $verify['mime'],
         'size'     => strlen($plain),
+        'hash'     => $verify['hash'],
+        'width'    => $verify['width'],
+        'height'   => $verify['height'],
+        'notes'    => array_merge($verify['notes'] ?? [], $content['notes'] ?? []),
+        'content'  => $content,
     ];
 }
 
@@ -165,7 +310,6 @@ if (!empty($_SESSION['uploaded_files']) && is_array($_SESSION['uploaded_files'])
             $staged_files[$key] = $f;
         }
     }
-    // Drop stale entries whose staging file no longer exists
     $_SESSION['uploaded_files'] = $staged_files;
 }
 
@@ -234,8 +378,6 @@ try {
 
     // ============================================
     // 2. GENERATE STUDENT ID NUMBER
-    //    Format: UCSCI-{year enrolled}-{6 random digits}
-    //    Example: UCSCI-2026-483920
     // ============================================
     $school_year = $_POST['school_year'] ?? '';
     $sy_parts = explode('-', $school_year);
@@ -362,15 +504,14 @@ try {
     }
 
     // ============================================
-    // 6. INSERT INTO enrollment_form
-    //    Uses `term` column (not `semester`)
+    // 6. INSERT INTO enrollment_form (status = Pending)
     // ============================================
     $stmt = $conn->prepare("INSERT INTO enrollment_form 
         (student_id, school_year, grade_level, term, track, strand, program, section,
          household_id, is_transferred, previous_school_name, previous_school_address, 
          previous_track, previous_strand, previous_program, previous_year_completed, 
          voucher_status, cct_4ps, status) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')");
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')");
 
     if (!$stmt) throw new Exception("Prepare failed for enrollment_form: " . $conn->error);
 
@@ -382,7 +523,6 @@ try {
     if ($strand === '') $strand = 'General';
     $program = $_POST['program'] ?? '';
 
-    // Section assignment
     if (!empty($_POST['section'])) {
         $section = trim($_POST['section']);
     } else {
@@ -469,12 +609,22 @@ try {
 
         if ($uploaded_by !== null) {
             $file_stmt = $conn->prepare("INSERT INTO entrance_documents 
-                (student_id, document_name, submitted, uploaded_at, file_path, file_mime, file_name, uploaded_by) 
-                VALUES (?, ?, 1, NOW(), ?, ?, ?, ?)");
+                (student_id, document_name, submitted, uploaded_at,
+                 file_path, file_hash, file_size, file_width, file_height,
+                 verification_notes, file_mime, file_name, uploaded_by,
+                 content_status, content_score, content_engine, content_excerpt,
+                 content_matched, content_checked_at)
+                VALUES (?, ?, 1, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, NOW())");
         } else {
             $file_stmt = $conn->prepare("INSERT INTO entrance_documents 
-                (student_id, document_name, submitted, uploaded_at, file_path, file_mime, file_name) 
-                VALUES (?, ?, 1, NOW(), ?, ?, ?)");
+                (student_id, document_name, submitted, uploaded_at,
+                 file_path, file_hash, file_size, file_width, file_height,
+                 verification_notes, file_mime, file_name,
+                 content_status, content_score, content_engine, content_excerpt,
+                 content_matched, content_checked_at)
+                VALUES (?, ?, 1, NOW(), ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, NOW())");
         }
 
         if (!$file_stmt) throw new Exception("Prepare failed for file insert: " . $conn->error);
@@ -486,21 +636,37 @@ try {
 
             if ($staging === '' || !is_file($staging)) continue;
 
-            $stored = store_encrypted_file($staging, $student_info_id);
+            $stored = store_encrypted_file($staging, $student_info_id, $label);
             $written_files[] = DOCUMENTS_DIR . $stored['filename'];
 
             $safe_name = preg_replace('/[^A-Za-z0-9._\- ]/', '_', $name);
             if ($safe_name === '' || $safe_name === null) $safe_name = $stored['filename'];
 
+            $notes_json   = !empty($stored['notes']) ? json_encode($stored['notes']) : null;
+            $content      = $stored['content'] ?? [];
+            $content_stat = $content['status'] ?? 'skipped';
+            $content_sc   = (int)($content['score'] ?? 0);
+            $content_eng  = $content['engine'] ?? null;
+            $content_exc  = $content['text_excerpt'] ?? null;
+            $content_mt   = !empty($content['matched']) ? json_encode($content['matched']) : null;
+
             if ($uploaded_by !== null) {
                 bind_params($file_stmt, [
                     $student_info_id, $label, $stored['filename'],
+                    $stored['hash'], $stored['size'],
+                    (int)($stored['width'] ?? 0), (int)($stored['height'] ?? 0),
+                    $notes_json,
                     $stored['mime'], $safe_name, (int)$uploaded_by,
+                    $content_stat, $content_sc, $content_eng, $content_exc, $content_mt,
                 ]);
             } else {
                 bind_params($file_stmt, [
                     $student_info_id, $label, $stored['filename'],
+                    $stored['hash'], $stored['size'],
+                    (int)($stored['width'] ?? 0), (int)($stored['height'] ?? 0),
+                    $notes_json,
                     $stored['mime'], $safe_name,
+                    $content_stat, $content_sc, $content_eng, $content_exc, $content_mt,
                 ]);
             }
 
@@ -517,7 +683,6 @@ try {
     $conn->commit();
     $conn->query("SELECT RELEASE_LOCK('enroll_global')");
 
-    // Audit log — only if an admin is logged in (student submissions skip)
     if (!empty($_SESSION['admin_id'])) {
         require_once __DIR__ . '/../config/audit.php';
         audit_log($conn, 'student.enroll', [
@@ -530,22 +695,19 @@ try {
         ]);
     }
 
-    // Rotate CSRF token
     unset($_SESSION['csrf_token']);
+    unset($_SESSION['form_data'], $_SESSION['uploaded_files'], $_SESSION['enroll_error']);
 
     $_SESSION['success'] = true;
-    $_SESSION['success_message'] = "Student successfully enrolled!<br><br>
+    $_SESSION['success_message'] = "Your enrollment has been <strong>submitted for review</strong>.<br><br>
         <strong>Student ID:</strong> " . htmlspecialchars($student_id_number) . "<br>
         <strong>LRN:</strong> " . htmlspecialchars($lrn) . "<br>
         <strong>Name:</strong> " . htmlspecialchars($first_name . ' ' . $last_name) . "<br>
-        <strong>Birth Date:</strong> " . htmlspecialchars($birth_date) . "<br>
         <strong>School Year:</strong> " . htmlspecialchars($school_year) . "<br>
         <strong>Grade Level:</strong> " . htmlspecialchars($grade_level) . "<br>
-        <strong>Term:</strong> " . htmlspecialchars($term) . "<br>
-        <strong>Strand:</strong> " . htmlspecialchars($strand) . "<br>
-        <strong>Section:</strong> " . htmlspecialchars($section);
-
-    unset($_SESSION['form_data'], $_SESSION['uploaded_files']);
+        <strong>Strand:</strong> " . htmlspecialchars($strand) . "<br><br>
+        <em>The registrar will review your documents. You'll receive a confirmation email at 
+        <strong>" . htmlspecialchars($email ?: 'your registered email') . "</strong> once approved.</em>";
 
     header('Location: enroll_form.php');
     exit();
@@ -554,17 +716,54 @@ try {
     $conn->rollback();
     $conn->query("SELECT RELEASE_LOCK('enroll_global')");
 
-    // Clean up encrypted files written before the failure
+    // Clean up any encrypted files that were written before the failure
     foreach ($written_files as $abs) {
         if (file_exists($abs)) @unlink($abs);
     }
 
-    $corr = bin2hex(random_bytes(4));
-    error_log("Enrollment Error [{$corr}]: " . $e->getMessage());
+    $corr    = bin2hex(random_bytes(4));
+    $raw_msg = $e->getMessage();
+
+    error_log("Enrollment Error [{$corr}]: " . $raw_msg);
     error_log("Error Trace [{$corr}]: " . $e->getTraceAsString());
 
-    $_SESSION['error'] = 'Failed to enroll student. Please try again. Reference: ' . $corr;
+    // Debug log for support
+    @file_put_contents(
+        __DIR__ . '/../enroll_debug.log',
+        date('c') . " [{$corr}]\n"
+        . "MESSAGE: " . $raw_msg . "\n"
+        . "FILE:    " . $e->getFile() . ":" . $e->getLine() . "\n"
+        . "TRACE:\n" . $e->getTraceAsString() . "\n\n",
+        FILE_APPEND
+    );
 
-    header('Location: enroll_form.php');
+    // ---- Preserve the student's form data so they don't lose their work ----
+    if (!isset($_SESSION['form_data']) && !empty($_POST)) {
+        $_SESSION['form_data'] = $_POST;
+    }
+
+    // ---- Preserve staged files that still exist on disk ----
+    if (!empty($_SESSION['uploaded_files']) && is_array($_SESSION['uploaded_files'])) {
+        $survivors = [];
+        foreach ($_SESSION['uploaded_files'] as $k => $f) {
+            $p = $f['staging_path'] ?? '';
+            if ($p !== '' && is_file($p)) {
+                $survivors[$k] = $f;
+            }
+        }
+        $_SESSION['uploaded_files'] = $survivors;
+    }
+
+    // ---- Classify the error into a user-readable message + step to return to ----
+    [$user_msg, $user_action, $error_step] = classify_enrollment_error($raw_msg, $corr);
+
+    $_SESSION['enroll_error'] = [
+        'ref'     => $corr,
+        'message' => $user_msg,
+        'action'  => $user_action,
+        'step'    => $error_step,
+    ];
+
+    header('Location: enroll_form.php?error=1');
     exit();
 }

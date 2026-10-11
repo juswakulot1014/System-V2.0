@@ -6,7 +6,8 @@ require_once __DIR__ . '/../config/crypto.php';
 // ==================== REQUIRED DOCUMENTS CONFIG ====================
 $REQUIRED_DOCS = [
     'Good Moral Certificate',
-    'Junior High School Certificate (Original)',
+    'Junior High School Certificate (Front)',
+    'Junior High School Certificate (Back)',
     'NSO/PSA Birth Certificate (Original)',
     '2 pcs. 2×2 picture',
 ];
@@ -340,6 +341,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_photo'])) {
     } else {
         $_SESSION['error'] = 'No file.';
     }
+    header("Location: view_student.php?id=$sid"); exit();
+}
+
+// --- Delete student photo ---
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_photo'])) {
+    verify_csrf();
+
+    $sid = (int)($_POST['student_id'] ?? 0);
+
+    if ($sid <= 0) {
+        $_SESSION['error'] = 'Invalid student.';
+        header("Location: student_profile.php"); exit();
+    }
+
+    // Fetch the current photo filename (may be NULL).
+    $q = $conn->prepare("SELECT photo FROM students_info WHERE student_id = ?");
+    $q->bind_param("i", $sid);
+    $q->execute();
+    $row = $q->get_result()->fetch_assoc();
+    $q->close();
+
+    if (!$row) {
+        $_SESSION['error'] = 'Student not found.';
+        header("Location: student_profile.php"); exit();
+    }
+
+    $old_photo = $row['photo'] ?? null;
+
+    // Clear the DB pointer first — if the UPDATE succeeds we can safely unlink.
+    // This guarantees we never leave a dangling reference to a deleted file.
+    $u = $conn->prepare("UPDATE students_info SET photo = NULL WHERE student_id = ?");
+    $u->bind_param("i", $sid);
+    $u->execute();
+    $u->close();
+
+    // Best-effort unlink, guarded so we never touch a path outside STUDENTS_PHOTO_DIR.
+    // realpath() resolves symlinks, so an attacker-controlled value in `photo`
+    // can't escape the directory even if it was injected some other way.
+    if (!empty($old_photo)) {
+        $abs  = student_photo_abs_path($old_photo);
+        $root = realpath(STUDENTS_PHOTO_DIR);
+        $real = $abs ? realpath($abs) : false;
+        if ($real && $root && str_starts_with($real, $root . DIRECTORY_SEPARATOR)) {
+            @unlink($real);
+        }
+    }
+
+    audit_log($conn, 'student.photo_delete', [
+        'type'     => 'student',
+        'id'       => $sid,
+        'filename' => $old_photo,
+    ]);
+
+    $_SESSION['success'] = 'Profile photo removed.';
     header("Location: view_student.php?id=$sid"); exit();
 }
 
@@ -854,7 +909,10 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 $initials = strtoupper(substr($student['first_name'] ?? '', 0, 1) . substr($student['last_name'] ?? '', 0, 1));
 
 $photo_abs = !empty($student['photo']) ? student_photo_abs_path($student['photo']) : '';
-$photo = ($photo_abs && is_file($photo_abs)) ? 'photo.php?id=' . (int)$student_id : '';
+// mtime cache-buster so the browser picks up a new image after upload/removal.
+$photo = ($photo_abs && is_file($photo_abs))
+    ? 'photo.php?id=' . (int)$student_id . '&v=' . filemtime($photo_abs)
+    : '';
 
 $fullName = htmlspecialchars(formatStudentName($student));
 
@@ -1073,6 +1131,14 @@ $csrf_token  = csrf_token();
             color:var(--accent);transition:all .15s;
         }
         .hero-avatar .camera-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+        .hero-avatar .trash-btn{
+            position:absolute;bottom:2px;left:2px;
+            width:32px;height:32px;border-radius:50%;
+            background:var(--surface);border:2px solid var(--border);
+            cursor:pointer;display:flex;align-items:center;justify-content:center;
+            color:var(--red);transition:all .15s;
+        }
+        .hero-avatar .trash-btn:hover{background:var(--red);color:#fff;border-color:var(--red)}
 
         .hero-info{flex:1;min-width:0}
         .hero-info h1{
@@ -1364,6 +1430,115 @@ $csrf_token  = csrf_token();
         }
 
         /* ============================================================
+           Grade modal — enhanced form
+           ============================================================ */
+        .modal-subtitle{
+            font-size:.75rem;color:var(--text-2);font-weight:500;
+            margin-top:.15rem;
+        }
+        .form-label .req{color:var(--red);font-weight:700;margin-left:.1rem}
+
+        .grade-context{
+            display:flex;align-items:center;gap:.75rem;
+            padding:.65rem .85rem;
+            background:var(--accent-soft);
+            border:1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+            border-radius:var(--radius);
+            margin-bottom:1rem;
+        }
+        .grade-context-icon{
+            width:38px;height:38px;border-radius:50%;
+            background:var(--surface);color:var(--accent);
+            display:flex;align-items:center;justify-content:center;
+            font-size:1.15rem;flex-shrink:0;
+        }
+        .grade-context-body{min-width:0;flex:1}
+        .grade-context-name{
+            font-weight:700;font-size:.88rem;color:var(--text);
+            white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+        }
+        .grade-context-meta{
+            display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;
+            font-size:.72rem;color:var(--text-2);font-weight:500;
+            margin-top:.15rem;
+        }
+        .grade-context-meta i{color:var(--accent);font-size:.75rem;margin-right:.2rem}
+        .grade-context-meta .dot{
+            width:3px;height:3px;border-radius:50%;
+            background:var(--text-3);opacity:.6;
+        }
+
+        /* Segmented term control */
+        .term-segments{
+            display:grid;
+            grid-template-columns:repeat(3,1fr);
+            gap:.3rem;
+            background:var(--surface-2);
+            padding:.3rem;
+            border-radius:11px;
+            border:1px solid var(--border);
+        }
+        .term-segments input[type=radio]{
+            position:absolute;opacity:0;pointer-events:none;
+        }
+        .term-segments label{
+            display:flex;align-items:center;justify-content:center;
+            padding:.5rem .25rem;
+            font-size:.78rem;font-weight:600;
+            color:var(--text-2);
+            border-radius:8px;
+            cursor:pointer;
+            transition:background .15s, color .15s, box-shadow .15s;
+            user-select:none;text-align:center;
+            margin:0;
+        }
+        .term-segments label:hover{
+            color:var(--text);
+            background:color-mix(in srgb, var(--accent) 8%, transparent);
+        }
+        .term-segments input[type=radio]:checked + label{
+            background:var(--accent);color:#fff;
+            box-shadow:0 2px 8px -2px rgba(79,70,229,.5);
+        }
+        .term-segments input[type=radio]:focus-visible + label{
+            outline:2px solid var(--accent);outline-offset:2px;
+        }
+
+        /* Grade input with live pass/fail feedback */
+        .grade-input-wrap{position:relative}
+        .grade-input-wrap .form-control{
+            padding-right:78px;
+            font-size:1.02rem;font-weight:700;
+            font-variant-numeric:tabular-nums;
+            letter-spacing:-.01em;
+            transition:border-color .15s, box-shadow .15s;
+        }
+        .grade-input-wrap .grade-badge{
+            position:absolute;right:8px;top:50%;
+            transform:translateY(-50%);
+            font-size:.68rem;font-weight:700;
+            padding:.2rem .55rem;border-radius:999px;
+            pointer-events:none;
+            display:none;
+            text-transform:uppercase;letter-spacing:.4px;
+        }
+        .grade-input-wrap.has-value .grade-badge{display:inline-block}
+        .grade-input-wrap.is-pass .form-control{
+            border-color:var(--green);
+            box-shadow:0 0 0 3px color-mix(in srgb, var(--green) 16%, transparent);
+        }
+        .grade-input-wrap.is-pass .grade-badge{
+            background:var(--green-soft);color:var(--green);
+        }
+        .grade-input-wrap.is-fail .form-control{
+            border-color:var(--red);
+            box-shadow:0 0 0 3px color-mix(in srgb, var(--red) 16%, transparent);
+        }
+        .grade-input-wrap.is-fail .grade-badge{
+            background:var(--red-soft);color:var(--red);
+        }
+
+        /* ============================================================
            Empty state
            ============================================================ */
         .empty{
@@ -1420,7 +1595,7 @@ $csrf_token  = csrf_token();
     $__current = basename($_SERVER['PHP_SELF']);
     $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
     // Student sub-pages all highlight "Students"
-    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php','student_documents.php'];
+    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
     $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
     $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
 ?>
@@ -1428,15 +1603,26 @@ $csrf_token  = csrf_token();
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
         <img src="../assets/img/usat.jpg" alt="USAT" onerror="this.style.background='var(--accent)'">
-        <div class="brand-text">
-            <span class="brand-name">USAT Admin</span>
-            <span class="brand-sub">Enrollment System</span>
+        <div>
+            <div class="brand-name">USAT Admin</div>
+            <div class="brand-sub">Enrollment System</div>
         </div>
     </div>
     <nav class="sidebar-nav">
         <div class="nav-label">Overview</div>
         <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
+        <?php
+    $__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
+?>
+<a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
+    <i class="bi bi-hourglass-split"></i> Pending
+    <?php if ($__pending_count > 0): ?>
+        <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
+            <?= $__pending_count ?>
+        </span>
+    <?php endif; ?>
+</a>
         <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
 
         <?php if ($__super): ?>
@@ -1454,6 +1640,7 @@ $csrf_token  = csrf_token();
         </a>
     </div>
 </aside>
+>
 
 <div class="main-content" id="mainContent">
 
@@ -1508,6 +1695,9 @@ $csrf_token  = csrf_token();
             <div class="hero-avatar">
                 <?php if($photo): ?>
                     <img src="<?= $photo ?>" alt="Photo">
+                    <button class="trash-btn" data-bs-toggle="modal" data-bs-target="#deletePhotoModal" title="Remove photo">
+                        <i class="bi bi-trash3-fill" style="font-size:.72rem"></i>
+                    </button>
                 <?php else: ?>
                     <div class="avatar-fallback"><?= htmlspecialchars($initials) ?></div>
                 <?php endif; ?>
@@ -1708,7 +1898,7 @@ $csrf_token  = csrf_token();
     </div>
 
     <!-- ================= Required Documents ================= -->
-    <div class="card mt-3">
+    <div class="card mt-3" id="documents">
         <div class="card-header">
             <h3>
                 <i class="bi bi-file-earmark-check"></i> Required Documents
@@ -2036,6 +2226,35 @@ $csrf_token  = csrf_token();
     </div>
 </div>
 
+<!-- Remove photo -->
+<div class="modal fade" id="deletePhotoModal" tabindex="-1">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h6 class="modal-title fw-bold">
+                    <i class="bi bi-trash3 me-2"></i>Remove Photo
+                </h6>
+                <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-0">
+                    Remove the profile photo for <strong><?= $fullName ?></strong>?
+                    This cannot be undone.
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <form method="POST" class="m-0">
+                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
+                    <input type="hidden" name="delete_photo" value="1">
+                    <input type="hidden" name="student_id" value="<?= (int)$student_id ?>">
+                    <button class="btn btn-danger btn-sm">Remove</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Upload document -->
 <div class="modal fade" id="uploadDocumentModal" tabindex="-1">
     <div class="modal-dialog modal-sm modal-dialog-centered">
@@ -2115,34 +2334,89 @@ $csrf_token  = csrf_token();
 
 <!-- Add grade -->
 <div class="modal fade" id="addGradeModal" tabindex="-1">
-    <div class="modal-dialog modal-sm modal-dialog-centered">
+    <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
-                <h6 class="modal-title fw-bold"><i class="bi bi-plus-circle me-2"></i>Add Grade</h6>
+                <div>
+                    <h6 class="modal-title fw-bold">
+                        <i class="bi bi-plus-circle me-2"></i>Add Grade
+                    </h6>
+                    <div class="modal-subtitle">Record a new subject grade for this student</div>
+                </div>
                 <button class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form method="POST">
+            <form method="POST" id="addGradeForm">
                 <div class="modal-body">
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <input type="hidden" name="student_id" value="<?= (int)$student_id ?>">
-                    <select name="term" class="form-select form-select-sm mb-2" required>
-                        <option value="" disabled>Select Term</option>
-                        <?php foreach($terms as $term): ?>
-                            <option value="<?= htmlspecialchars($term) ?>" <?= $currentTerm === $term ? 'selected' : '' ?>><?= htmlspecialchars($term) ?></option>
+
+                    <div class="grade-context">
+                        <div class="grade-context-icon"><i class="bi bi-person-circle"></i></div>
+                        <div class="grade-context-body">
+                            <div class="grade-context-name"><?= $fullName ?></div>
+                            <div class="grade-context-meta">
+                                <span><i class="bi bi-mortarboard"></i><?= htmlspecialchars($enrollment['grade_level'] ?? '—') ?></span>
+                                <span class="dot"></span>
+                                <span><i class="bi bi-calendar3"></i><?= htmlspecialchars($enrollment['school_year'] ?? '—') ?></span>
+                                <span class="dot"></span>
+                                <span><i class="bi bi-upc-scan"></i><?= htmlspecialchars($student['lrn'] ?? 'N/A') ?></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <label class="form-label">Term <span class="req">*</span></label>
+                    <div class="term-segments">
+                        <?php foreach($terms as $i => $term): ?>
+                            <input type="radio" name="term" id="ag_term_<?= $i ?>"
+                                   value="<?= htmlspecialchars($term) ?>"
+                                   <?= $currentTerm === $term ? 'checked' : '' ?> required>
+                            <label for="ag_term_<?= $i ?>"><?= htmlspecialchars($term) ?></label>
                         <?php endforeach; ?>
-                    </select>
-                    <input name="subject_code" class="form-control form-control-sm mb-2" placeholder="Subject Code" required>
-                    <input name="subject_name" class="form-control form-control-sm mb-2" placeholder="Subject Name" required>
-                    <input type="number" step="0.01" name="grade" id="ag_grd"
-                           class="form-control form-control-sm mb-2" placeholder="Grade"
-                           oninput="autoRemarks(this, 'ag_rem')">
-                    <input name="remarks" id="ag_rem"
-                           class="form-control form-control-sm" placeholder="Remarks (auto)"
-                           readonly>
+                    </div>
+
+                    <div class="row g-2 mt-1">
+                        <div class="col-sm-4">
+                            <label class="form-label">Subject Code <span class="req">*</span></label>
+                            <input name="subject_code" class="form-control form-control-sm"
+                                   placeholder="e.g. GEN-MATH" required maxlength="20" autocomplete="off">
+                        </div>
+                        <div class="col-sm-8">
+                            <label class="form-label">Subject Name <span class="req">*</span></label>
+                            <input name="subject_name" class="form-control form-control-sm"
+                                   placeholder="e.g. General Mathematics" required maxlength="100" autocomplete="off">
+                        </div>
+                    </div>
+
+                    <div class="row g-2 mt-1">
+                        <div class="col-sm-5">
+                            <label class="form-label">Grade <span class="req">*</span></label>
+                            <div class="grade-input-wrap" id="ag_grp">
+                                <input type="number" step="0.01" min="0" max="100"
+                                       name="grade" id="ag_grd"
+                                       class="form-control form-control-sm"
+                                       placeholder="0 – 100"
+                                       oninput="autoRemarks(this, 'ag_rem', 'ag_grp')" required>
+                                <span class="grade-badge" id="ag_badge"></span>
+                            </div>
+                        </div>
+                        <div class="col-sm-7">
+                            <label class="form-label">Remarks</label>
+                            <input name="remarks" id="ag_rem"
+                                   class="form-control form-control-sm"
+                                   placeholder="Auto-derived from grade" readonly>
+                        </div>
+                    </div>
+
+                    <div class="form-text mt-2 d-flex align-items-center gap-1">
+                        <i class="bi bi-info-circle"></i>
+                        <span>Passing mark is <strong>75</strong>. Remarks are set automatically.</span>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-                    <button name="add_grade" class="btn btn-primary btn-sm">Save</button>
+                    <button name="add_grade" class="btn btn-primary btn-sm">
+                        <i class="bi bi-check2 me-1"></i> Save Grade
+                    </button>
                 </div>
             </form>
         </div>
@@ -2151,35 +2425,82 @@ $csrf_token  = csrf_token();
 
 <!-- Edit grade -->
 <div class="modal fade" id="editGradeModal" tabindex="-1">
-    <div class="modal-dialog modal-sm modal-dialog-centered">
+    <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
-                <h6 class="modal-title fw-bold"><i class="bi bi-pencil me-2"></i>Edit Grade</h6>
+                <div>
+                    <h6 class="modal-title fw-bold">
+                        <i class="bi bi-pencil me-2"></i>Edit Grade
+                    </h6>
+                    <div class="modal-subtitle">Update this subject's details</div>
+                </div>
                 <button class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form method="POST">
+            <form method="POST" id="editGradeForm">
                 <div class="modal-body">
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <input type="hidden" name="grade_id" id="eg_id">
                     <input type="hidden" name="student_id" value="<?= (int)$student_id ?>">
-                    <select name="term" id="eg_term" class="form-select form-select-sm mb-2" required>
-                        <option value="">Select Term</option>
-                        <?php foreach($terms as $term): ?>
-                            <option value="<?= htmlspecialchars($term) ?>"><?= htmlspecialchars($term) ?></option>
+
+                    <div class="grade-context">
+                        <div class="grade-context-icon"><i class="bi bi-person-circle"></i></div>
+                        <div class="grade-context-body">
+                            <div class="grade-context-name"><?= $fullName ?></div>
+                            <div class="grade-context-meta">
+                                <span><i class="bi bi-mortarboard"></i><?= htmlspecialchars($enrollment['grade_level'] ?? '—') ?></span>
+                                <span class="dot"></span>
+                                <span><i class="bi bi-calendar3"></i><?= htmlspecialchars($enrollment['school_year'] ?? '—') ?></span>
+                                <span class="dot"></span>
+                                <span><i class="bi bi-upc-scan"></i><?= htmlspecialchars($student['lrn'] ?? 'N/A') ?></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <label class="form-label">Term <span class="req">*</span></label>
+                    <div class="term-segments" id="eg_terms">
+                        <?php foreach($terms as $i => $term): ?>
+                            <input type="radio" name="term" id="eg_term_<?= $i ?>"
+                                   value="<?= htmlspecialchars($term) ?>" required>
+                            <label for="eg_term_<?= $i ?>"><?= htmlspecialchars($term) ?></label>
                         <?php endforeach; ?>
-                    </select>
-                    <input name="subject_code" id="eg_code" class="form-control form-control-sm mb-2" required>
-                    <input name="subject_name" id="eg_name" class="form-control form-control-sm mb-2" required>
-                    <input type="number" step="0.01" name="grade" id="eg_grd"
-                           class="form-control form-control-sm mb-2"
-                           oninput="autoRemarks(this, 'eg_rem')">
-                    <input name="remarks" id="eg_rem"
-                           class="form-control form-control-sm" placeholder="Remarks (auto)"
-                           readonly>
+                    </div>
+
+                    <div class="row g-2 mt-1">
+                        <div class="col-sm-4">
+                            <label class="form-label">Subject Code <span class="req">*</span></label>
+                            <input name="subject_code" id="eg_code"
+                                   class="form-control form-control-sm" required maxlength="20">
+                        </div>
+                        <div class="col-sm-8">
+                            <label class="form-label">Subject Name <span class="req">*</span></label>
+                            <input name="subject_name" id="eg_name"
+                                   class="form-control form-control-sm" required maxlength="100">
+                        </div>
+                    </div>
+
+                    <div class="row g-2 mt-1">
+                        <div class="col-sm-5">
+                            <label class="form-label">Grade <span class="req">*</span></label>
+                            <div class="grade-input-wrap" id="eg_grp">
+                                <input type="number" step="0.01" min="0" max="100"
+                                       name="grade" id="eg_grd"
+                                       class="form-control form-control-sm"
+                                       oninput="autoRemarks(this, 'eg_rem', 'eg_grp')" required>
+                                <span class="grade-badge" id="eg_badge"></span>
+                            </div>
+                        </div>
+                        <div class="col-sm-7">
+                            <label class="form-label">Remarks</label>
+                            <input name="remarks" id="eg_rem"
+                                   class="form-control form-control-sm" readonly>
+                        </div>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-                    <button name="edit_grade" class="btn btn-primary btn-sm">Update</button>
+                    <button name="edit_grade" class="btn btn-primary btn-sm">
+                        <i class="bi bi-check2 me-1"></i> Update Grade
+                    </button>
                 </div>
             </form>
         </div>
@@ -2351,40 +2672,61 @@ $('#btnUpDoc').click(function () {
 // ---------- Grade modals ----------
 const PASSING_GRADE = 75;
 
-// Live-derive remarks from the grade value (75 = passing threshold).
-function autoRemarks(gradeEl, remarksId) {
+// Live-derive remarks AND drive the pass/fail visual state on the input wrapper.
+// wrapperId is optional — pass it to enable the border + inline badge feedback.
+function autoRemarks(gradeEl, remarksId, wrapperId) {
     const el = document.getElementById(remarksId);
+    const wrap = wrapperId ? document.getElementById(wrapperId) : null;
+    const badge = wrap ? wrap.querySelector('.grade-badge') : null;
     if (!el) return;
 
     const v = (gradeEl.value || '').trim();
-    if (v === '') { el.value = ''; return; }
+    const clear = () => {
+        el.value = '';
+        if (wrap) wrap.classList.remove('has-value', 'is-pass', 'is-fail');
+        if (badge) badge.textContent = '';
+    };
 
+    if (v === '') return clear();
     const g = parseFloat(v);
-    if (isNaN(g)) { el.value = ''; return; }
+    if (isNaN(g)) return clear();
 
-    el.value = g >= PASSING_GRADE ? 'Passed' : 'Failed';
+    const passed = g >= PASSING_GRADE;
+    el.value = passed ? 'Passed' : 'Failed';
+
+    if (wrap) {
+        wrap.classList.add('has-value');
+        wrap.classList.toggle('is-pass', passed);
+        wrap.classList.toggle('is-fail', !passed);
+    }
+    if (badge) badge.textContent = passed ? 'Passed' : 'Failed';
 }
 
-// When the edit modal opens, recompute remarks from the prefilled grade
-// so a stale "Passed" never survives an edit that lowers the grade below 75.
+// Edit grade: prefill fields, select the matching term radio, recompute remarks.
 $('.edit-grd-btn').click(function () {
     var b = $(this);
     $('#eg_id').val(b.data('id'));
-    $('#eg_term').val(b.data('term'));
     $('#eg_code').val(b.data('code'));
     $('#eg_name').val(b.data('name'));
     $('#eg_grd').val(b.data('grd'));
     $('#eg_rem').val(b.data('rem'));
 
-    // Re-derive from the grade itself, ignoring the stored remark.
-    autoRemarks(document.getElementById('eg_grd'), 'eg_rem');
+    // Select the correct term in the segmented control.
+    var term = b.data('term');
+    $('#eg_terms input[type=radio]').each(function () {
+        $(this).prop('checked', $(this).val() === term);
+    });
+
+    // Re-derive from the grade itself — never trust the stored remark.
+    autoRemarks(document.getElementById('eg_grd'), 'eg_rem', 'eg_grp');
 });
 
-// Same for the Add Grade modal — when it opens, force remarks empty
-// (a previous session's value won't leak in).
+// Add grade: when the modal opens, sync the visual state to whatever
+// is currently in the grade field (also clears leftovers from prior opens
+// because the form is reset on close via the browser's normal form state).
 $('#addGradeModal').on('shown.bs.modal', function () {
     const g = document.getElementById('ag_grd');
-    if (g) autoRemarks(g, 'ag_rem');
+    if (g) autoRemarks(g, 'ag_rem', 'ag_grp');
 });
 
 $('.del-grd-btn').click(function () {
