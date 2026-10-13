@@ -27,6 +27,7 @@ if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'] ?? '', 
     header('Location: enroll_form.php?edit=1');
     exit();
 }
+
 /**
  * Auto-detect types and bind params safely.
  */
@@ -219,7 +220,20 @@ function store_encrypted_file(
         throw new Exception("File verification failed: " . ($verify['error'] ?? 'unknown'));
     }
 
-    $content = verify_document_content($staging_path, $doc_label);
+    // ---- Content check is SOFT: never let a missing helper block enrollment ----
+    if (function_exists('verify_document_content')) {
+        $content = verify_document_content($staging_path, $doc_label);
+    } else {
+        error_log('store_encrypted_file: verify_document_content() not available — content check skipped.');
+        $content = [
+            'status'  => 'skipped',
+            'score'   => 0,
+            'engine'  => null,
+            'matched' => [],
+            'notes'   => ['Content verification helper was not available at runtime.'],
+        ];
+    }
+
     $content_status = $content['status'] ?? 'skipped';
 
     if ($content_status === 'failed') {

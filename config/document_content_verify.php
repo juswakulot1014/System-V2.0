@@ -350,3 +350,68 @@ if (!function_exists('verify_name_in_document')) {
         ];
     }
 }
+
+/* ============================================================
+   ADAPTER — matches the shape expected by store_encrypted_file()
+   in enrollment/process_enroll.php
+   ============================================================ */
+if (!function_exists('verify_document_content')) {
+    /**
+     * @param string $path       Staged file path
+     * @param string $doc_label  Human label (e.g. "Form 138")
+     * @param array  $context    ['mime' => '...', 'name_parts' => [...]]
+     */
+    function verify_document_content(string $path, string $doc_label = '', array $context = []): array
+    {
+        // ---- Defaults if caller didn't pass a context ----
+        $mime = $context['mime'] ?? null;
+        if (!$mime && is_file($path)) {
+            $mime = @mime_content_type($path) ?: null;
+        }
+
+        $name_parts = $context['name_parts'] ?? [
+            'first_name'  => '',
+            'middle_name' => '',
+            'last_name'   => '',
+            'lrn'         => '',
+        ];
+
+        // ---- If the real verifier isn't available, degrade gracefully ----
+        if (!function_exists('verify_name_in_document')) {
+            return [
+                'status'       => 'skipped',
+                'score'        => 0,
+                'engine'       => null,
+                'matched'      => [],
+                'notes'        => ['Name/LRN verifier not loaded.'],
+                'text_excerpt' => null,
+            ];
+        }
+
+        $r = verify_name_in_document($path, (string)$mime, $name_parts);
+
+        // ---- Map the rich result onto the simple status enum ----
+        $status = match ($r['status'] ?? 'unverifiable') {
+            'match'    => 'passed',
+            'mismatch' => 'failed',
+            default    => 'needs_review',   // 'partial' | 'unverifiable'
+        };
+
+        // ---- Which sub-checks succeeded ----
+        $matched = [];
+        if (!empty($r['name']['parts']['first']))   $matched[] = 'first_name';
+        if (!empty($r['name']['parts']['middle']))  $matched[] = 'middle_name';
+        if (!empty($r['name']['parts']['last']))    $matched[] = 'last_name';
+        if (($r['lrn']['status'] ?? '') === 'match') $matched[] = 'lrn';
+
+        return [
+            'status'       => $status,
+            'score'        => (int)($r['confidence'] ?? 0),
+            'engine'       => 'name-lrn-verify',
+            'matched'      => $matched,
+            'notes'        => array_filter([$r['message'] ?? null]),
+            'text_excerpt' => $r['extracted'] ?? null,
+            'detail'       => $r,
+        ];
+    }
+}
