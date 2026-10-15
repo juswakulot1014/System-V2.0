@@ -40,7 +40,7 @@ $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
 // ============================================================
-// Batch-fetch entity names
+// Batch-fetch entity names (expanded)
 // ============================================================
 
 $ids_by_type = [];
@@ -52,28 +52,39 @@ foreach ($rows as $r) {
 
 $lookup = [];
 
-if (!empty($ids_by_type['student'])) {
-    $ids = array_values(array_unique($ids_by_type['student']));
-    $ph  = implode(',', array_fill(0, count($ids), '?'));
-    $stmt = $conn->prepare("
-        SELECT student_id, student_id_number, lrn, first_name, middle_name, last_name
-        FROM students_info
-        WHERE student_id IN ($ph)
-    ");
-    $stmt->bind_param(str_repeat('i', count($ids)), ...$ids);
-    $stmt->execute();
-    $res = $stmt->get_result();
-    while ($s = $res->fetch_assoc()) {
-        $name = trim(($s['last_name'] ?? '') . ', ' . ($s['first_name'] ?? ''));
-        $lookup['student'][(int)$s['student_id']] = [
-            'name'  => $name ?: '(unnamed)',
-            'id_no' => $s['student_id_number'] ?? '',
-            'lrn'   => $s['lrn'] ?? '',
-        ];
+// ── students_info (type: student, user, enrollee) ──
+if (!empty($ids_by_type['student']) || !empty($ids_by_type['user']) || !empty($ids_by_type['enrollee'])) {
+    $ids = array_values(array_unique(array_merge(
+        $ids_by_type['student']  ?? [],
+        $ids_by_type['user']     ?? [],
+        $ids_by_type['enrollee'] ?? []
+    )));
+    if (!empty($ids)) {
+        $ph = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $conn->prepare("
+            SELECT student_id, student_id_number, lrn, first_name, middle_name, last_name
+            FROM students_info
+            WHERE student_id IN ($ph)
+        ");
+        $stmt->bind_param(str_repeat('i', count($ids)), ...$ids);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        while ($s = $res->fetch_assoc()) {
+            $name = trim(($s['last_name'] ?? '') . ', ' . ($s['first_name'] ?? ''));
+            $info = [
+                'name'  => $name ?: '(unnamed)',
+                'id_no' => $s['student_id_number'] ?? '',
+                'lrn'   => $s['lrn'] ?? '',
+            ];
+            $lookup['student'][(int)$s['student_id']]  = $info;
+            $lookup['user'][(int)$s['student_id']]     = $info;
+            $lookup['enrollee'][(int)$s['student_id']] = $info;
+        }
+        $stmt->close();
     }
-    $stmt->close();
 }
 
+// ── student_grades (type: grade) ──
 if (!empty($ids_by_type['grade'])) {
     $ids = array_values(array_unique($ids_by_type['grade']));
     $ph  = implode(',', array_fill(0, count($ids), '?'));
@@ -102,8 +113,12 @@ if (!empty($ids_by_type['grade'])) {
     $stmt->close();
 }
 
-if (!empty($ids_by_type['document'])) {
-    $ids = array_values(array_unique($ids_by_type['document']));
+// ── entrance_documents (type: document, file) ──
+if (!empty($ids_by_type['document']) || !empty($ids_by_type['file'])) {
+    $ids = array_values(array_unique(array_merge(
+        $ids_by_type['document'] ?? [],
+        $ids_by_type['file']     ?? []
+    )));
     $ph  = implode(',', array_fill(0, count($ids), '?'));
     $stmt = $conn->prepare("
         SELECT d.entrance_id, d.document_name, d.submitted,
@@ -117,17 +132,20 @@ if (!empty($ids_by_type['document'])) {
     $res = $stmt->get_result();
     while ($d = $res->fetch_assoc()) {
         $student = trim(($d['last_name'] ?? '') . ', ' . ($d['first_name'] ?? ''));
-        $lookup['document'][(int)$d['entrance_id']] = [
+        $info = [
             'document_name' => $d['document_name'] ?? 'Document',
             'student_name'  => $student ?: null,
             'student_id_no' => $d['student_id_number'] ?? '',
             'lrn'           => $d['lrn'] ?? '',
             'submitted'     => (int)$d['submitted'],
         ];
+        $lookup['document'][(int)$d['entrance_id']] = $info;
+        $lookup['file'][(int)$d['entrance_id']]     = $info;
     }
     $stmt->close();
 }
 
+// ── educational_history (type: education) ──
 if (!empty($ids_by_type['education'])) {
     $ids = array_values(array_unique($ids_by_type['education']));
     $ph  = implode(',', array_fill(0, count($ids), '?'));
@@ -154,8 +172,12 @@ if (!empty($ids_by_type['education'])) {
     $stmt->close();
 }
 
-if (!empty($ids_by_type['admin'])) {
-    $ids = array_values(array_unique($ids_by_type['admin']));
+// ── admins (type: admin, account) ──
+if (!empty($ids_by_type['admin']) || !empty($ids_by_type['account'])) {
+    $ids = array_values(array_unique(array_merge(
+        $ids_by_type['admin']   ?? [],
+        $ids_by_type['account'] ?? []
+    )));
     $ph  = implode(',', array_fill(0, count($ids), '?'));
     $stmt = $conn->prepare("
         SELECT id, fullname, username, role
@@ -166,13 +188,101 @@ if (!empty($ids_by_type['admin'])) {
     $stmt->execute();
     $res = $stmt->get_result();
     while ($a = $res->fetch_assoc()) {
-        $lookup['admin'][(int)$a['id']] = [
+        $info = [
             'name'     => $a['fullname'] ?? '(unnamed)',
             'username' => $a['username'] ?? '',
             'role'     => $a['role'] ?? '',
         ];
+        $lookup['admin'][(int)$a['id']]   = $info;
+        $lookup['account'][(int)$a['id']] = $info;
     }
     $stmt->close();
+}
+
+// ── enrollment_form (type: enrollment, section-assignment) ──
+if (!empty($ids_by_type['enrollment'])) {
+    $ids = array_values(array_unique($ids_by_type['enrollment']));
+    $ph  = implode(',', array_fill(0, count($ids), '?'));
+    $stmt = $conn->prepare("
+        SELECT e.enrollment_id, e.school_year, e.grade_level, e.strand, e.section, e.status,
+               s.student_id, s.first_name, s.last_name, s.student_id_number, s.lrn
+        FROM enrollment_form e
+        LEFT JOIN students_info s ON s.student_id = e.student_id
+        WHERE e.enrollment_id IN ($ph)
+    ");
+    $stmt->bind_param(str_repeat('i', count($ids)), ...$ids);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    while ($e = $res->fetch_assoc()) {
+        $student = trim(($e['last_name'] ?? '') . ', ' . ($e['first_name'] ?? ''));
+        $lookup['enrollment'][(int)$e['enrollment_id']] = [
+            'student_name'  => $student ?: null,
+            'student_id_no' => $e['student_id_number'] ?? '',
+            'lrn'           => $e['lrn'] ?? '',
+            'school_year'   => $e['school_year'] ?? '',
+            'grade_level'   => $e['grade_level'] ?? '',
+            'strand'        => $e['strand'] ?? '',
+            'section'       => $e['section'] ?? '',
+            'status'        => $e['status'] ?? '',
+        ];
+    }
+    $stmt->close();
+}
+
+// ── sections (type: section) — try common schema variants ──
+if (!empty($ids_by_type['section'])) {
+    $ids = array_values(array_unique($ids_by_type['section']));
+    $ph  = implode(',', array_fill(0, count($ids), '?'));
+
+    // Try the sections table if it exists
+    $check = $conn->query("SHOW TABLES LIKE 'sections'");
+    if ($check && $check->num_rows > 0) {
+        $stmt = $conn->prepare("
+            SELECT section_id, section_name, strand, grade_level, school_year
+            FROM sections
+            WHERE section_id IN ($ph)
+        ");
+        if ($stmt) {
+            $stmt->bind_param(str_repeat('i', count($ids)), ...$ids);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            while ($s = $res->fetch_assoc()) {
+                $lookup['section'][(int)$s['section_id']] = [
+                    'name'        => $s['section_name'] ?? 'Section',
+                    'strand'      => $s['strand'] ?? '',
+                    'grade_level' => $s['grade_level'] ?? '',
+                    'school_year' => $s['school_year'] ?? '',
+                ];
+            }
+            $stmt->close();
+        }
+    }
+}
+
+// ── subjects (type: subject) — if a subjects table exists ──
+if (!empty($ids_by_type['subject'])) {
+    $check = $conn->query("SHOW TABLES LIKE 'subjects'");
+    if ($check && $check->num_rows > 0) {
+        $ids = array_values(array_unique($ids_by_type['subject']));
+        $ph  = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $conn->prepare("
+            SELECT subject_id, subject_code, subject_name
+            FROM subjects
+            WHERE subject_id IN ($ph)
+        ");
+        if ($stmt) {
+            $stmt->bind_param(str_repeat('i', count($ids)), ...$ids);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            while ($s = $res->fetch_assoc()) {
+                $lookup['subject'][(int)$s['subject_id']] = [
+                    'code' => $s['subject_code'] ?? '',
+                    'name' => $s['subject_name'] ?? '',
+                ];
+            }
+            $stmt->close();
+        }
+    }
 }
 
 // ============================================================
@@ -205,7 +315,7 @@ $stats = $conn->query("
 $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 'dark' : 'light';
 
 // ============================================================
-// Helpers (unchanged)
+// Helpers
 // ============================================================
 
 function action_badge_class(string $action): string {
@@ -250,9 +360,11 @@ function friendly_label(string $key): string {
         'page'          => 'Page',
         'username'      => 'Username attempted',
         'lrn'           => 'LRN',
-        'student_id'    => 'Student',
+        'student_id'    => 'Student ID',
+        'student_id_no' => 'Student ID',
         'student_name'  => 'Student',
         'sy'            => 'School Year',
+        'school_year'   => 'School Year',
         'grade'         => 'Grade',
         'grade_level'   => 'Grade Level',
         'term'          => 'Term',
@@ -273,10 +385,15 @@ function friendly_label(string $key): string {
         'school'        => 'School',
         'subject'       => 'Subject',
         'name'          => 'Name',
+        'fullname'      => 'Full name',
         'role'          => 'Role',
         'type_of'       => 'Promotion type',
         'count'         => 'Selected',
-        'school_year'   => 'School Year',
+        'section'       => 'Section',
+        'strand'        => 'Strand',
+        'program'       => 'Program',
+        'status'        => 'Status',
+        'email'         => 'Email',
     ];
     return $map[$key] ?? ucwords(str_replace('_', ' ', $key));
 }
@@ -288,66 +405,184 @@ function friendly_value($v): string {
     return (string)$v;
 }
 
-function render_target(array $row, array $lookup): string {
+/**
+ * Render the Target cell. Priority:
+ *   1. DB lookup hit → show entity details
+ *   2. Meta fallback → show whatever human-readable info is in audit.meta
+ *   3. Generic pill  → last resort
+ */
+function render_target(array $row, array $lookup): string
+{
     $type = (string)($row['target_type'] ?? '');
     $id   = (int)($row['target_id'] ?? 0);
+    $meta = pretty_meta($row['meta'] ?? null);
 
-    if ($type === '' || $id === 0) {
-        return '<span class="meta-empty">—</span>';
+    // ── 1. Try the DB lookup first ──
+    if ($type !== '' && $id > 0) {
+        $ctx = $lookup[$type][$id] ?? null;
+        if ($ctx) {
+            return render_target_from_context($type, $ctx);
+        }
     }
 
-    $ctx = $lookup[$type][$id] ?? null;
+    // ── 2. Fall back to meta fields ──
+    $meta_render = render_target_from_meta($type, $id, $meta);
+    if ($meta_render !== null) {
+        return $meta_render;
+    }
+
+    // ── 3. Last resort ──
+    if ($type === '' && $id === 0) {
+        return '<span class="meta-empty">—</span>';
+    }
+    return '<span class="target-pill">' . htmlspecialchars($type ?: 'entity') . ' #' . $id . '</span>';
+}
+
+/**
+ * Render from a resolved DB context.
+ */
+function render_target_from_context(string $type, array $ctx): string
+{
+    switch ($type) {
+        case 'student':
+        case 'user':
+        case 'enrollee':
+            return target_box($ctx['name'] ?? '(unnamed)', $ctx['id_no'] ?: null, 'bi-person-fill');
+
+        case 'grade':
+            $sec = $ctx['student_name'] ?: null;
+            if (!empty($ctx['term']))   $sec = ($sec ? $sec . ' · ' : '') . $ctx['term'];
+            if ($ctx['value'] !== null && $ctx['value'] !== '') {
+                $sec = ($sec ? $sec . ' · ' : '') . 'Grade: ' . number_format((float)$ctx['value'], 2);
+            }
+            return target_box($ctx['subject'] ?? 'Grade', $sec, 'bi-journal-check');
+
+        case 'document':
+        case 'file':
+            $sec = $ctx['student_name'] ?: null;
+            if (!empty($ctx['student_id_no'])) $sec = ($sec ? $sec . ' · ' : '') . $ctx['student_id_no'];
+            return target_box($ctx['document_name'] ?? 'Document', $sec, 'bi-file-earmark-text');
+
+        case 'education':
+            $sub = ($ctx['level'] ?? 'Level') . (!empty($ctx['school']) ? ' — ' . $ctx['school'] : '');
+            return target_box($sub, $ctx['student_name'] ?: null, 'bi-book');
+
+        case 'admin':
+        case 'account':
+            $sec = !empty($ctx['username']) ? '@' . $ctx['username'] : null;
+            if (!empty($ctx['role'])) $sec = ($sec ? $sec . ' · ' : '') . ucfirst($ctx['role']);
+            return target_box($ctx['name'] ?? '(unnamed)', $sec, 'bi-person-badge');
+
+        case 'enrollment':
+            $primary = $ctx['student_name'] ?: ('Enrollment #' . ($ctx['enrollment_id'] ?? ''));
+            $sec_bits = array_filter([
+                $ctx['student_id_no'] ?? '',
+                $ctx['grade_level']   ?? '',
+                $ctx['strand']        ?? '',
+                $ctx['section']       ?? '',
+            ]);
+            $sec = $sec_bits ? implode(' · ', $sec_bits) : null;
+            return target_box($primary, $sec, 'bi-clipboard-check');
+
+        case 'section':
+            $sec_bits = array_filter([
+                $ctx['strand']      ?? '',
+                $ctx['grade_level'] ?? '',
+                $ctx['school_year'] ?? '',
+            ]);
+            return target_box($ctx['name'] ?? 'Section', $sec_bits ? implode(' · ', $sec_bits) : null, 'bi-diagram-3');
+
+        case 'subject':
+            $sub = trim(($ctx['code'] ?? '') . ' ' . ($ctx['name'] ?? ''));
+            return target_box($sub ?: 'Subject', null, 'bi-journal-bookmark');
+    }
+
+    // Unknown context shape — dump what we have
+    return target_box($ctx['name'] ?? $type, null, 'bi-database');
+}
+
+/**
+ * Render from audit.meta when no DB row exists (entity deleted, or
+ * the audit entry never had a DB-resolvable target_id).
+ */
+function render_target_from_meta(string $type, int $id, array $meta): ?string
+{
+    // The human-readable student ID is often stored in meta
+    $student_id_no  = $meta['student_id_no']  ?? $meta['student_id']  ?? null;
+    $student_name   = $meta['student_name']   ?? null;
+    $username       = $meta['username']       ?? null;
+    $name           = $meta['name']           ?? $meta['fullname']    ?? null;
+    $sy             = $meta['sy']             ?? $meta['school_year'] ?? null;
+    $grade          = $meta['grade_level']    ?? $meta['grade']       ?? null;
+    $term           = $meta['term']           ?? null;
+    $section        = $meta['section']        ?? null;
+
+    // Build a subject line for context
+    $context_bits = array_filter([
+        $student_id_no,
+        $grade,
+        $section,
+        $term,
+        $sy,
+    ]);
+
+    // Try to build a meaningful primary label
+    $primary = null;
+    $icon    = 'bi-record-circle';
 
     switch ($type) {
         case 'student':
-            if ($ctx) {
-                return target_box($ctx['name'], $ctx['id_no'] ?: null, 'bi-person-fill');
-            }
-            return target_box("(deleted student #$id)", null, 'bi-person-dash');
-
-        case 'grade':
-            if ($ctx) {
-                $sec = $ctx['student_name'] ?: null;
-                if ($ctx['term']) $sec = ($sec ? $sec . ' · ' : '') . $ctx['term'];
-                if ($ctx['value'] !== null) $sec = ($sec ? $sec . ' · ' : '') . 'Grade: ' . number_format((float)$ctx['value'], 2);
-                return target_box($ctx['subject'], $sec, 'bi-journal-check');
-            }
-            return target_box("(deleted grade #$id)", null, 'bi-journal-x');
-
-        case 'document':
-            if ($ctx) {
-                $sec = $ctx['student_name'] ?: null;
-                if ($ctx['student_id_no']) $sec = ($sec ? $sec . ' · ' : '') . $ctx['student_id_no'];
-                return target_box($ctx['document_name'], $sec, 'bi-file-earmark-text');
-            }
-            return target_box("(deleted document #$id)", null, 'bi-file-earmark-x');
-
-        case 'education':
-            if ($ctx) {
-                $sub = $ctx['level'] . ($ctx['school'] ? ' — ' . $ctx['school'] : '');
-                $sec = $ctx['student_name'] ?: null;
-                return target_box($sub, $sec, 'bi-book');
-            }
-            return target_box("(deleted education #$id)", null, 'bi-book');
-
+        case 'user':
+        case 'enrollee':
+            $primary = $student_name ?: ($student_id_no ?: null);
+            $icon    = 'bi-person-fill';
+            break;
         case 'admin':
-            if ($ctx) {
-                $sec = $ctx['username'] ? '@' . $ctx['username'] : null;
-                if ($ctx['role']) $sec = ($sec ? $sec . ' · ' : '') . ucfirst($ctx['role']);
-                return target_box($ctx['name'], $sec, 'bi-person-badge');
-            }
-            return target_box("(deleted admin #$id)", null, 'bi-person-dash');
-
-        case 'page':
-            return '<span class="meta-empty">—</span>';
-
-        case 'batch':
+        case 'account':
+            $primary = $name ?: ($username ? '@' . $username : null);
+            $icon    = 'bi-person-badge';
+            break;
+        case 'document':
+        case 'file':
+            $primary = $meta['document_name'] ?? $meta['filename'] ?? null;
+            $icon    = 'bi-file-earmark-text';
+            break;
+        case 'education':
+            $primary = $meta['level'] ?? null;
+            $icon    = 'bi-book';
+            break;
+        case 'section':
+            $primary = $section;
+            $icon    = 'bi-diagram-3';
+            break;
+        case 'grade':
+            $primary = $meta['subject'] ?? null;
+            $icon    = 'bi-journal-check';
+            break;
+        case 'enrollment':
+            $primary = $student_name ?: ('Enrollment #' . $id);
+            $icon    = 'bi-clipboard-check';
+            break;
         case 'school_year':
-            return '<span class="target-pill">' . htmlspecialchars(str_replace('_', ' ', $type)) . '</span>';
-
+        case 'batch':
+            $primary = $sy ? "SY {$sy}" : null;
+            $icon    = 'bi-calendar-range';
+            break;
         default:
-            return '<span class="target-pill">' . htmlspecialchars($type) . '#' . $id . '</span>';
+            // Try anything readable
+            $primary = $name ?: $student_name ?: $student_id_no;
     }
+
+    if ($primary === null && empty($context_bits)) {
+        return null; // nothing to show — let the caller fall through
+    }
+
+    if ($primary === null) {
+        // We have context but no primary — use the type as primary
+        $primary = ucfirst(str_replace('_', ' ', $type)) . ($id > 0 ? ' #' . $id : '');
+    }
+
+    return target_box($primary, $context_bits ? implode(' · ', $context_bits) : null, $icon);
 }
 
 function target_box(string $primary, ?string $secondary = null, ?string $icon = null): string {
@@ -410,22 +645,16 @@ function render_audit_details(string $action, array $meta): string {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Audit Log • USAT Admin</title>
 
-    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700;14..32,800&display=swap" rel="stylesheet">
 
-    <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 
-    <!-- Bootstrap Icons — served from cdnjs because CSP font-src allows it -->
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
 
     <style>
-        /* ============================================================
-           Design tokens
-           ============================================================ */
         :root {
             --bg: #f4f6fb;
             --surface: #ffffff;
@@ -493,9 +722,6 @@ function render_audit_details(string $action, array $meta): string {
             -webkit-font-smoothing:antialiased;
         }
 
-        /* ============================================================
-           Sidebar
-           ============================================================ */
         .sidebar{
             position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);
             background:var(--surface);border-right:1px solid var(--border);
@@ -534,9 +760,6 @@ function render_audit_details(string $action, array $meta): string {
         .sidebar-nav a i{font-size:1.05rem;width:20px;text-align:center;flex-shrink:0}
         .sidebar-footer{padding:.75rem;border-top:1px solid var(--border)}
 
-        /* ============================================================
-           Main content
-           ============================================================ */
         .main-content{
             margin-left:var(--sidebar-w);
             padding:1.5rem clamp(1rem,2.5vw,2rem) 2rem;
@@ -559,9 +782,6 @@ function render_audit_details(string $action, array $meta): string {
         }
         .menu-toggle:hover{background:var(--surface-2)}
 
-        /* ============================================================
-           Stat cards
-           ============================================================ */
         .stat-grid{
             display:grid;
             grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
@@ -609,9 +829,6 @@ function render_audit_details(string $action, array $meta): string {
             letter-spacing:.6px;margin-top:.15rem;font-weight:600;
         }
 
-        /* ============================================================
-           Cards
-           ============================================================ */
         .card{
             background:var(--surface);border-radius:var(--radius-lg);
             border:1px solid var(--border);box-shadow:var(--shadow-sm);
@@ -630,9 +847,6 @@ function render_audit_details(string $action, array $meta): string {
         .card-header .hint{font-size:.75rem;color:var(--text-2);font-weight:500}
         .card-body{padding:1.25rem}
 
-        /* ============================================================
-           Filter bar
-           ============================================================ */
         .filter-bar{
             display:grid;
             grid-template-columns:minmax(180px,1.6fr) minmax(200px,1.6fr) minmax(110px,auto) auto;
@@ -656,9 +870,6 @@ function render_audit_details(string $action, array $meta): string {
         }
         .filter-bar .actions{display:flex;gap:.5rem;flex-wrap:nowrap}
 
-        /* ============================================================
-           Log table
-           ============================================================ */
         .table-scroll{overflow-x:auto;max-height:70vh;overflow-y:auto}
         .table-log{width:100%;border-collapse:separate;border-spacing:0}
         .table-log thead th{
@@ -678,9 +889,6 @@ function render_audit_details(string $action, array $meta): string {
         .table-log tbody tr:hover td{background:color-mix(in srgb, var(--accent) 4%, transparent)}
         .table-log tbody tr:last-child td{border-bottom:none}
 
-        /* ============================================================
-           Action badges
-           ============================================================ */
         .action-badge{
             display:inline-flex;align-items:center;gap:.35rem;
             padding:.3rem .7rem;border-radius:999px;
@@ -698,9 +906,6 @@ function render_audit_details(string $action, array $meta): string {
         .action-badge.muted    {background:var(--surface-2);color:var(--text-2);border-color:var(--border)}
         .action-badge.secondary{background:var(--border);color:var(--text)}
 
-        /* ============================================================
-           Target box
-           ============================================================ */
         .target-pill{
             display:inline-block;padding:.2rem .55rem;border-radius:6px;
             font-size:.72rem;font-weight:600;
@@ -714,9 +919,6 @@ function render_audit_details(string $action, array $meta): string {
         .target-primary{font-weight:600;font-size:.82rem;color:var(--text);line-height:1.25;word-break:break-word}
         .target-secondary{font-size:.72rem;color:var(--text-2);line-height:1.3;margin-top:.1rem;word-break:break-word}
 
-        /* ============================================================
-           Admin cell
-           ============================================================ */
         .admin-cell{display:flex;align-items:center;gap:.55rem;min-width:0}
         .admin-avatar{
             width:32px;height:32px;border-radius:50%;
@@ -729,9 +931,6 @@ function render_audit_details(string $action, array $meta): string {
         .admin-info .nm{font-weight:600;font-size:.82rem;line-height:1.2;color:var(--text)}
         .admin-info .un{font-size:.72rem;color:var(--text-2);font-variant-numeric:tabular-nums}
 
-        /* ============================================================
-           Meta / details cell
-           ============================================================ */
         .meta-cell{max-width:440px}
         .meta-empty{color:var(--text-2);font-style:italic;font-size:.78rem}
         .meta-label{
@@ -767,9 +966,6 @@ function render_audit_details(string $action, array $meta): string {
         }
         .change-row .arrow{color:var(--text-3)}
 
-        /* ============================================================
-           Time / IP
-           ============================================================ */
         .ip{
             font-family:ui-monospace,'SF Mono',monospace;
             font-size:.75rem;color:var(--text-2);
@@ -781,9 +977,6 @@ function render_audit_details(string $action, array $meta): string {
             font-variant-numeric:tabular-nums;
         }
 
-        /* ============================================================
-           Buttons
-           ============================================================ */
         .btn{font-weight:500;border-radius:9px;font-size:.82rem;transition:all .15s}
         .btn-primary{background:var(--accent);border-color:var(--accent)}
         .btn-primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
@@ -798,9 +991,6 @@ function render_audit_details(string $action, array $meta): string {
         }
         .theme-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
 
-        /* ============================================================
-           Restricted badge
-           ============================================================ */
         .restricted-pill{
             display:inline-flex;align-items:center;gap:.35rem;
             padding:.3rem .7rem;border-radius:999px;
@@ -809,9 +999,6 @@ function render_audit_details(string $action, array $meta): string {
             border:1px solid color-mix(in srgb, var(--red) 22%, transparent);
         }
 
-        /* ============================================================
-           Empty state
-           ============================================================ */
         .empty{
             padding:4rem 2rem;text-align:center;color:var(--text-2);
         }
@@ -824,9 +1011,6 @@ function render_audit_details(string $action, array $meta): string {
         .empty .empty-title{font-weight:600;color:var(--text);margin-bottom:.25rem}
         .empty .empty-sub{font-size:.85rem;color:var(--text-2)}
 
-        /* ============================================================
-           Responsive
-           ============================================================ */
         @media (max-width:1100px){
             .filter-bar{grid-template-columns:1fr 1fr}
             .filter-bar .actions{grid-column:1 / -1;justify-content:flex-end}
@@ -854,12 +1038,10 @@ function render_audit_details(string $action, array $meta): string {
 <?php
     $__current = basename($_SERVER['PHP_SELF']);
     $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
-    // Student sub-pages all highlight "Students"
     $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
     $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
     $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
 ?>
-<!-- ================= Sidebar ================= -->
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
         <img src="../assets/img/usat.jpg" alt="USAT" onerror="this.style.background='var(--accent)'">
@@ -903,7 +1085,6 @@ function render_audit_details(string $action, array $meta): string {
 
 <div class="main-content" id="mainContent">
 
-    <!-- ================= Topbar ================= -->
     <div class="topbar">
         <div class="d-flex align-items-center gap-3">
             <button class="menu-toggle" id="menuToggle"><i class="bi bi-list fs-5"></i></button>
@@ -934,7 +1115,6 @@ function render_audit_details(string $action, array $meta): string {
         </div>
     </div>
 
-    <!-- ================= Stat grid ================= -->
     <div class="stat-grid">
         <div class="stat-card tone-blue">
             <div class="stat-icon"><i class="bi bi-activity"></i></div>
@@ -980,7 +1160,6 @@ function render_audit_details(string $action, array $meta): string {
         </div>
     </div>
 
-    <!-- ================= Filters ================= -->
     <div class="card">
         <div class="card-header">
             <h3><i class="bi bi-funnel"></i> Filters</h3>
@@ -1031,7 +1210,6 @@ function render_audit_details(string $action, array $meta): string {
         </div>
     </div>
 
-    <!-- ================= Log table ================= -->
     <div class="card">
         <?php if (empty($rows)): ?>
             <div class="empty">
@@ -1102,7 +1280,6 @@ function render_audit_details(string $action, array $meta): string {
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-// ---------- Sidebar ----------
 const sb = document.getElementById('sidebar');
 const ov = document.getElementById('sidebarOverlay');
 document.getElementById('menuToggle').addEventListener('click', () => {
@@ -1110,7 +1287,6 @@ document.getElementById('menuToggle').addEventListener('click', () => {
     ov.style.display = sb.classList.contains('open') ? 'block' : 'none';
 });
 
-// ---------- Theme ----------
 const tb = document.getElementById('themeToggle');
 const ti = document.getElementById('themeIcon');
 const h  = document.documentElement;

@@ -4,6 +4,16 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+// ─────────────────────────────────────────────────────────────
+// Cache-control: these pages reflect session state; never cache.
+// ─────────────────────────────────────────────────────────────
+if (!headers_sent()) {
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+    header('Vary: Cookie');
+}
+
 // Include database only once
 include_once __DIR__ . "/../config/db.php";
 require_once __DIR__ . "/../config/paths.php";
@@ -285,7 +295,6 @@ $STRAND_PROGRAMS = [
     ],
 ];
 
-// School year options: current and 3 surrounding years
 $current_year = (int)date('Y');
 $SY_OPTIONS = [];
 for ($y = $current_year - 1; $y <= $current_year + 2; $y++) {
@@ -553,7 +562,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // Religion: if "Other" was chosen, use the text input value
     if (($_POST['religion'] ?? '') === '__other__') {
         $other = trim($_POST['religion_other'] ?? '');
         $_POST['religion'] = $other;
@@ -662,15 +670,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     /* --------------------------------------------------------------
        Identity verification for the JHS Certificate (Front).
-       Runs after staging so it covers both file uploads and camera
-       captures — both feed into $uploaded_files['jhs_certificate_front'].
-       Extracts text via tesseract (images) or pdftotext (PDFs), then
-       checks that the student name AND LRN appear in the document.
        -------------------------------------------------------------- */
-    unset($_SESSION['name_verify']); // reset each attempt
+    unset($_SESSION['name_verify']);
     $jhs_key = 'jhs_certificate_front';
+    $jhs_doc_present = false;
+
     if (!empty($uploaded_files[$jhs_key]['staging_path'])
         && is_file($uploaded_files[$jhs_key]['staging_path'])) {
+        $jhs_doc_present = true;
         $_SESSION['name_verify'] = verify_name_in_document(
             $uploaded_files[$jhs_key]['staging_path'],
             (string)($uploaded_files[$jhs_key]['mime'] ?? ''),
@@ -681,6 +688,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'lrn'         => $_POST['lrn']         ?? '',
             ]
         );
+    }
+
+    // GATE: block submission on hard mismatch of the JHS Certificate.
+    if ($jhs_doc_present
+        && is_array($_SESSION['name_verify'] ?? null)
+        && ($_SESSION['name_verify']['status'] ?? '') === 'mismatch') {
+
+        $errors['document_mismatch'] =
+            'The Junior High School Certificate (Front) you uploaded does not match '
+          . 'your name or LRN. Please re-upload a valid document before submitting.';
+    }
+
+    /* --------------------------------------------------------------
+       2×2 photo sanity check (no OCR).
+       -------------------------------------------------------------- */
+    unset($_SESSION['photo_2x2_check']);
+    $photo_key = 'pictures_2x2';
+
+    if (!empty($uploaded_files[$photo_key]['staging_path'])
+        && is_file($uploaded_files[$photo_key]['staging_path'])) {
+
+        $_SESSION['photo_2x2_check'] = verify_2x2_photo(
+            $uploaded_files[$photo_key]['staging_path'],
+            (string)($uploaded_files[$photo_key]['mime'] ?? '')
+        );
+
+        if (($_SESSION['photo_2x2_check']['status'] ?? '') === 'mismatch') {
+            $errors['photo_2x2'] = $_SESSION['photo_2x2_check']['message'];
+        }
     }
 
     if (empty($errors)) {
@@ -764,6 +800,7 @@ $field_step_map = [
     'school_year' => 5, 'grade_level' => 5, 'term' => 5, 'strand' => 5, 'program' => 5,
     'household_id' => 5, 'entrance_data' => 5, 'upload' => 5,
     'voucher_qualified' => 5, 'previous_school_name' => 5,
+    'document_mismatch' => 5, 'photo_2x2' => 5,
 ];
 
 $total_steps = 5;
@@ -772,6 +809,12 @@ $enroll_error = $_SESSION['enroll_error'] ?? null;
 unset($_SESSION['enroll_error']);
 
 $initial_step = 1;
+if (isset($_GET['edit'])) {
+    $initial_step = 5;
+}
+if (!empty($_GET['step'])) {
+    $initial_step = max(1, min($total_steps, (int)$_GET['step']));
+}
 if ($enroll_error && !empty($enroll_error['step'])) {
     $initial_step = max(1, min($total_steps, (int)$enroll_error['step']));
 } elseif (!empty($errors)) {
@@ -896,124 +939,49 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
         .name-dup-alert li { margin-bottom: 0.15rem; }
         .name-dup-alert li strong { color: #78350f; }
 
-        /* ============================================================
-           JHS Certificate name verification card
-           ============================================================ */
         .name-verify-card { border-left-width: 4px; }
         .name-verify-head { display:flex; align-items:center; gap:.85rem; flex-wrap:wrap; }
-        .name-verify-icon {
-            width: 42px; height: 42px; border-radius: 12px;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 1.15rem; flex-shrink: 0;
-            background: rgba(255,255,255,.85);
-            box-shadow: 0 0 0 1px rgba(0,0,0,.05) inset;
-        }
+        .name-verify-icon { width: 42px; height: 42px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.15rem; flex-shrink: 0; background: rgba(255,255,255,.85); box-shadow: 0 0 0 1px rgba(0,0,0,.05) inset; }
         .name-verify-titles { flex: 1; min-width: 0; }
         .name-verify-sub { font-size: .78rem; color: #4a5568; margin-top: .15rem; }
-        .name-verify-badge {
-            font-size: .72rem; font-weight: 700;
-            padding: .28rem .7rem; border-radius: 999px;
-            text-transform: uppercase; letter-spacing: .4px;
-            background: rgba(255,255,255,.85);
-            border: 1px solid rgba(0,0,0,.06);
-        }
-        .name-verify-message {
-            margin: .85rem 0 0; font-size: .9rem; line-height: 1.55; color: #1f2937;
-        }
-        .name-verify-grid {
-            display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .85rem;
-        }
-        .name-verify-part {
-            display: inline-flex; align-items: center; gap: .4rem;
-            padding: .35rem .75rem; border-radius: 999px;
-            font-size: .76rem; font-weight: 600;
-            background: #fff; border: 1px solid rgba(0,0,0,.06);
-        }
+        .name-verify-badge { font-size: .72rem; font-weight: 700; padding: .28rem .7rem; border-radius: 999px; text-transform: uppercase; letter-spacing: .4px; background: rgba(255,255,255,.85); border: 1px solid rgba(0,0,0,.06); }
+        .name-verify-message { margin: .85rem 0 0; font-size: .9rem; line-height: 1.55; color: #1f2937; }
+        .name-verify-grid { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .85rem; }
+        .name-verify-part { display: inline-flex; align-items: center; gap: .4rem; padding: .35rem .75rem; border-radius: 999px; font-size: .76rem; font-weight: 600; background: #fff; border: 1px solid rgba(0,0,0,.06); }
         .name-verify-part i { font-size: .72rem; }
         .name-verify-part.ok   { color: #047857; background: #ecfdf5; border-color: rgba(5,150,105,.25); }
         .name-verify-part.miss { color: #b91c1c; background: #fef2f2; border-color: rgba(220,38,38,.25); }
         .name-verify-part.skip { color: #64748b; background: #f1f5f9; border-color: rgba(100,116,139,.2); }
 
-        .name-verify-details {
-            margin-top: .85rem; border-radius: 10px;
-            background: rgba(255,255,255,.75);
-            border: 1px solid rgba(0,0,0,.05);
-            overflow: hidden;
-        }
-        .name-verify-details summary {
-            cursor: pointer; padding: .55rem .85rem;
-            font-size: .8rem; font-weight: 600; color: #334155;
-            list-style: none;
-        }
+        .name-verify-details { margin-top: .85rem; border-radius: 10px; background: rgba(255,255,255,.75); border: 1px solid rgba(0,0,0,.05); overflow: hidden; }
+        .name-verify-details summary { cursor: pointer; padding: .55rem .85rem; font-size: .8rem; font-weight: 600; color: #334155; list-style: none; }
         .name-verify-details summary::-webkit-details-marker { display: none; }
-        .name-verify-details summary::before {
-            content: '\f0da'; font-family: 'Font Awesome 6 Free'; font-weight: 900;
-            display: inline-block; margin-right: .45rem;
-            transition: transform .15s; color: #94a3b8;
-        }
+        .name-verify-details summary::before { content: '\f0da'; font-family: 'Font Awesome 6 Free'; font-weight: 900; display: inline-block; margin-right: .45rem; transition: transform .15s; color: #94a3b8; }
         .name-verify-details[open] summary::before { transform: rotate(90deg); }
-        .name-verify-pre {
-            margin: 0; padding: .85rem 1rem;
-            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-            font-size: .76rem; line-height: 1.5; color: #334155;
-            background: #f8fafc; border-top: 1px solid rgba(0,0,0,.05);
-            max-height: 220px; overflow: auto;
-            white-space: pre-wrap; word-break: break-word;
-        }
+        .name-verify-pre { margin: 0; padding: .85rem 1rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; line-height: 1.5; color: #334155; background: #f8fafc; border-top: 1px solid rgba(0,0,0,.05); max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 
-        .name-verify-warn {
-            display: flex; gap: .6rem; align-items: flex-start;
-            margin-top: .85rem; padding: .7rem .9rem;
-            border-radius: 10px; font-size: .82rem; line-height: 1.5;
-            background: #fffbeb; color: #92400e; border: 1px solid rgba(217,119,6,.3);
-        }
+        .name-verify-warn { display: flex; gap: .6rem; align-items: flex-start; margin-top: .85rem; padding: .7rem .9rem; border-radius: 10px; font-size: .82rem; line-height: 1.5; background: #fffbeb; color: #92400e; border: 1px solid rgba(217,119,6,.3); }
         .name-verify-warn i { color: #d97706; margin-top: 2px; flex-shrink: 0; }
 
-        /* Two-block layout inside the verification card (Name + LRN) */
-        .verify-block {
-            margin-top: 1rem; padding: .9rem 1rem;
-            background: rgba(255,255,255,.55);
-            border-radius: 12px;
-            border: 1px solid rgba(0,0,0,.05);
-        }
-        .verify-block-title {
-            display: flex; align-items: center; gap: .55rem;
-            font-size: .82rem; font-weight: 700;
-            color: #334155; text-transform: uppercase; letter-spacing: .4px;
-            margin-bottom: .55rem;
-        }
-        .verify-block-verdict {
-            display: inline-flex; align-items: center; gap: .3rem;
-            font-size: .68rem; font-weight: 700;
-            padding: .2rem .55rem; border-radius: 999px;
-            text-transform: uppercase; letter-spacing: .4px;
-            margin-left: auto;
-        }
+        .verify-block { margin-top: 1rem; padding: .9rem 1rem; background: rgba(255,255,255,.55); border-radius: 12px; border: 1px solid rgba(0,0,0,.05); }
+        .verify-block-title { display: flex; align-items: center; gap: .55rem; font-size: .82rem; font-weight: 700; color: #334155; text-transform: uppercase; letter-spacing: .4px; margin-bottom: .55rem; }
+        .verify-block-verdict { display: inline-flex; align-items: center; gap: .3rem; font-size: .68rem; font-weight: 700; padding: .2rem .55rem; border-radius: 999px; text-transform: uppercase; letter-spacing: .4px; margin-left: auto; }
         .verify-block-verdict.ok   { background: #d1fae5; color: #047857; }
         .verify-block-verdict.warn { background: #fef3c7; color: #b45309; }
         .verify-block-verdict.miss { background: #fee2e2; color: #b91c1c; }
         .verify-block-verdict.skip { background: #e2e8f0; color: #475569; }
-        .verify-block-msg {
-            font-size: .8rem; color: #4a5568; line-height: 1.5;
-            margin-top: .55rem;
-        }
-        .lrn-distance {
-            margin-left: .35rem; font-size: .68rem;
-            font-weight: 600; color: #b45309;
-        }
+        .verify-block-msg { font-size: .8rem; color: #4a5568; line-height: 1.5; margin-top: .55rem; }
+        .lrn-distance { margin-left: .35rem; font-size: .68rem; font-weight: 600; color: #b45309; }
 
         .name-verify-card.nv-match        { background: linear-gradient(135deg, #f0fdf4, #dcfce7); border-left-color: #059669; }
         .name-verify-card.nv-match        .name-verify-icon  { color: #047857; }
         .name-verify-card.nv-match        .name-verify-badge { color: #047857; }
-
         .name-verify-card.nv-partial      { background: linear-gradient(135deg, #fffbeb, #fef3c7); border-left-color: #d97706; }
         .name-verify-card.nv-partial      .name-verify-icon  { color: #b45309; }
         .name-verify-card.nv-partial      .name-verify-badge { color: #b45309; }
-
         .name-verify-card.nv-mismatch     { background: linear-gradient(135deg, #fef2f2, #fee2e2); border-left-color: #dc2626; }
         .name-verify-card.nv-mismatch     .name-verify-icon  { color: #b91c1c; }
         .name-verify-card.nv-mismatch     .name-verify-badge { color: #b91c1c; }
-
         .name-verify-card.nv-unverifiable { background: linear-gradient(135deg, #f1f5f9, #e2e8f0); border-left-color: #64748b; }
         .name-verify-card.nv-unverifiable .name-verify-icon  { color: #475569; }
         .name-verify-card.nv-unverifiable .name-verify-badge { color: #475569; }
@@ -1037,6 +1005,78 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
         .doc-upload-row{display:none; margin-top:0.5rem; padding-left:1rem; border-left:3px solid #0d6efd;}
         .doc-upload-row.visible{display:block;}
 
+        /* ────────────────────────────────────────────────────────
+           Document mismatch banner (Step 5)
+           ──────────────────────────────────────────────────────── */
+        .doc-mismatch-banner{display:flex;gap:1rem;align-items:flex-start;padding:1.15rem 1.3rem;margin-bottom:1.25rem;border-radius:16px;background:linear-gradient(135deg,#fef2f2,#fee2e2);border-left:5px solid #dc2626;box-shadow:0 8px 24px -8px rgba(220,38,38,.35);animation:slideDown 0.3s ease-out;}
+        .doc-mismatch-icon{width:44px;height:44px;border-radius:50%;background:#fff;color:#dc2626;display:flex;align-items:center;justify-content:center;font-size:1.4rem;flex-shrink:0;box-shadow:0 0 0 3px rgba(220,38,38,.15);}
+        .doc-mismatch-body{flex:1;min-width:0}
+        .doc-mismatch-title{font-size:1.05rem;font-weight:800;color:#7f1d1d;letter-spacing:-.01em;margin-bottom:.35rem;}
+        .doc-mismatch-text{font-size:.9rem;line-height:1.55;color:#991b1b;margin:0 0 .85rem;}
+        .doc-mismatch-details{background:rgba(255,255,255,.7);border:1px solid rgba(220,38,38,.18);border-radius:10px;padding:.7rem .9rem;margin-bottom:.75rem;}
+        .doc-mismatch-row{display:flex;gap:.75rem;align-items:baseline;font-size:.82rem;line-height:1.5;padding:.15rem 0;}
+        .doc-mismatch-row + .doc-mismatch-row{border-top:1px dashed rgba(220,38,38,.15);padding-top:.35rem;margin-top:.2rem;}
+        .doc-mismatch-key{color:#7f1d1d;font-weight:700;flex-shrink:0;min-width:170px;}
+        .doc-mismatch-val{color:#1f2937;font-weight:600;word-break:break-word;}
+        .doc-mismatch-val.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;}
+        .doc-mismatch-val i{margin:0 .15rem}
+        .doc-mismatch-distance{color:#b45309;font-weight:700;font-size:.74rem;margin-left:.35rem;}
+        .doc-mismatch-hint{display:flex;gap:.5rem;align-items:center;font-size:.82rem;color:#7f1d1d;font-weight:600;padding:.55rem .75rem;background:rgba(255,255,255,.55);border-radius:8px;border:1px dashed rgba(220,38,38,.25);}
+        .doc-mismatch-hint i{color:#dc2626}
+        .doc-mismatch-meta{display:flex;gap:1rem;flex-wrap:wrap;margin-top:.6rem;font-size:.72rem;color:#94a3b8;}
+        .doc-mismatch-meta span{display:inline-flex;align-items:center;gap:.3rem;font-family:ui-monospace,monospace;}
+
+        /* ────────────────────────────────────────────────────────
+           2×2 photo warning banner (Step 5)
+           ──────────────────────────────────────────────────────── */
+        .photo-warn-banner{display:flex;gap:1rem;align-items:flex-start;padding:1.05rem 1.25rem;margin-bottom:1.25rem;border-radius:16px;background:linear-gradient(135deg,#fffbeb,#fef3c7);border-left:5px solid #d97706;box-shadow:0 8px 24px -8px rgba(217,119,6,.25);animation:slideDown 0.3s ease-out;}
+        .photo-warn-icon{width:42px;height:42px;border-radius:50%;background:#fff;color:#d97706;display:flex;align-items:center;justify-content:center;font-size:1.3rem;flex-shrink:0;box-shadow:0 0 0 3px rgba(217,119,6,.15);}
+        .photo-warn-title{font-size:1rem;font-weight:800;color:#78350f;margin-bottom:.3rem;}
+        .photo-warn-text{font-size:.88rem;line-height:1.55;color:#92400e;margin:0;}
+        .photo-warn-hint{display:flex;gap:.5rem;align-items:center;font-size:.8rem;color:#78350f;font-weight:600;margin-top:.6rem;padding:.5rem .75rem;background:rgba(255,255,255,.55);border-radius:8px;border:1px dashed rgba(217,119,6,.3);}
+        .photo-warn-hint i{color:#d97706}
+
+        /* ────────────────────────────────────────────────────────
+           Review page blocker (documents not valid)
+           ──────────────────────────────────────────────────────── */
+        .review-blocker-banner {
+            display: flex; gap: 1rem; align-items: flex-start;
+            padding: 1.15rem 1.3rem;
+            margin: 2rem 0 1rem;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #fef2f2, #fee2e2);
+            border-left: 5px solid #dc2626;
+            box-shadow: 0 8px 24px -8px rgba(220, 38, 38, .35);
+            animation: slideDown 0.3s ease-out;
+        }
+        .review-blocker-icon {
+            width: 44px; height: 44px; border-radius: 50%;
+            background: #fff; color: #dc2626;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.3rem; flex-shrink: 0;
+            box-shadow: 0 0 0 3px rgba(220, 38, 38, .15);
+        }
+        .review-blocker-body { flex: 1; min-width: 0; }
+        .review-blocker-title {
+            font-size: 1.05rem; font-weight: 800;
+            color: #7f1d1d; letter-spacing: -.01em;
+            margin-bottom: .4rem;
+        }
+        .review-blocker-list {
+            margin: 0 0 .75rem; padding-left: 1.25rem;
+            font-size: .88rem; line-height: 1.55; color: #991b1b;
+        }
+        .review-blocker-list li { margin-bottom: .25rem; }
+        .review-blocker-hint {
+            display: flex; gap: .5rem; align-items: center;
+            font-size: .82rem; color: #7f1d1d; font-weight: 600;
+            padding: .55rem .75rem;
+            background: rgba(255,255,255,.55);
+            border-radius: 8px;
+            border: 1px dashed rgba(220, 38, 38, .25);
+        }
+        .review-blocker-hint i { color: #dc2626; }
+
         fieldset.doc-fieldset { border: 0; padding: 0; margin: 0; }
         fieldset.doc-fieldset > legend { font-size: 0.95rem; font-weight: 600; color: #2d3748; margin-bottom: 0.5rem; padding: 0; width: auto; float: none; }
 
@@ -1059,64 +1099,15 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
         .wizard-nav .btn-submit:disabled { opacity:0.7;cursor:not-allowed;transform:none; }
         .wizard-nav .btn-back.placeholder { visibility:hidden;pointer-events:none; }
 
-        /* ============================================================
-           Strand Recommendation
-           ============================================================ */
-        #strandRecommendation {
-            margin-top: 1rem;
-            animation: recFade .25s ease;
-        }
-        @keyframes recFade {
-            from { opacity: 0; transform: translateY(-6px); }
-            to   { opacity: 1; transform: translateY(0); }
-        }
+        #strandRecommendation { margin-top: 1rem; animation: recFade .25s ease; }
+        @keyframes recFade { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
 
-        .rec-card {
-            display: flex;
-            gap: .85rem;
-            padding: 1rem 1.15rem;
-            border-radius: 14px;
-            border: 1.5px solid #e2e8f0;
-            background: #f8fafc;
-            align-items: flex-start;
-            transition: all .2s ease;
-        }
-        .rec-icon {
-            width: 40px;
-            height: 40px;
-            border-radius: 11px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.05rem;
-            flex-shrink: 0;
-        }
+        .rec-card { display: flex; gap: .85rem; padding: 1rem 1.15rem; border-radius: 14px; border: 1.5px solid #e2e8f0; background: #f8fafc; align-items: flex-start; transition: all .2s ease; }
+        .rec-icon { width: 40px; height: 40px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 1.05rem; flex-shrink: 0; }
         .rec-body { flex: 1; min-width: 0; }
-        .rec-title {
-            font-size: .9rem;
-            font-weight: 700;
-            color: #1a202c;
-            line-height: 1.3;
-            margin-bottom: .3rem;
-        }
-        .rec-message {
-            font-size: .82rem;
-            color: #4a5568;
-            line-height: 1.55;
-        }
-        .rec-suggestion {
-            display: inline-flex;
-            align-items: center;
-            gap: .4rem;
-            margin-top: .55rem;
-            padding: .35rem .75rem;
-            background: #fff;
-            border: 1px solid #e2e8f0;
-            border-radius: 999px;
-            font-size: .74rem;
-            font-weight: 600;
-            color: #4a5568;
-        }
+        .rec-title { font-size: .9rem; font-weight: 700; color: #1a202c; line-height: 1.3; margin-bottom: .3rem; }
+        .rec-message { font-size: .82rem; color: #4a5568; line-height: 1.55; }
+        .rec-suggestion { display: inline-flex; align-items: center; gap: .4rem; margin-top: .55rem; padding: .35rem .75rem; background: #fff; border: 1px solid #e2e8f0; border-radius: 999px; font-size: .74rem; font-weight: 600; color: #4a5568; }
         .rec-suggestion i { color: #7c3aed; }
         .rec-suggestion strong { color: #7c3aed; font-weight: 700; }
 
@@ -1162,6 +1153,8 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
             .back-to-login { top: 14px; left: 14px; padding: 0.5rem 0.9rem; font-size: 0.78rem; }
             .back-to-login span { display: none; }
             .back-to-login i { font-size: 1rem; margin: 0; }
+            .doc-mismatch-banner { flex-direction: column; }
+            .doc-mismatch-key { min-width: auto; }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -1196,7 +1189,7 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
         <?php if (!empty($errors)): ?>
             <?php
             $error_count = 0;
-            foreach ($errors as $k => $v) { if ($k === 'upload') continue; $error_count++; }
+            foreach ($errors as $k => $v) { if (in_array($k, ['upload', 'document_mismatch', 'photo_2x2'], true)) continue; $error_count++; }
             ?>
             <?php if ($error_count > 0): ?>
                 <div class="error-banner" role="alert" aria-live="assertive" tabindex="-1" id="errorSummary">
@@ -1205,7 +1198,7 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
                         <strong><?= htmlspecialchars($t[$lang]['error_summary']) ?></strong>
                         <ul>
                             <?php foreach ($errors as $field => $msg): ?>
-                                <?php if ($field === 'upload' || $field === 'name_duplicate') continue; ?>
+                                <?php if (in_array($field, ['upload', 'name_duplicate', 'document_mismatch', 'photo_2x2'], true)) continue; ?>
                                 <li><?= htmlspecialchars($msg) ?></li>
                             <?php endforeach; ?>
                         </ul>
@@ -1225,28 +1218,28 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
         <?php endif; ?>
 
         <div class="wizard-progress-wrap">
-            <ol class="wizard-progress" id="wizardProgress" role="navigation" aria-label="<?= htmlspecialchars($t[$lang]['progress_label']) ?>">
-                <button type="button" class="wizard-step-indicator active" data-step="1" aria-current="step" aria-label="<?= $t[$lang]['step'] ?> 1: Student Info">
+            <nav class="wizard-progress" id="wizardProgress" aria-label="<?= htmlspecialchars($t[$lang]['progress_label']) ?>">
+                <button type="button" class="wizard-step-indicator active" data-step="1" aria-current="step">
                     <span class="wizard-step-num" aria-hidden="true">1</span>
                     <span class="wizard-step-label">Student Info</span>
                 </button>
-                <button type="button" class="wizard-step-indicator" data-step="2" aria-label="<?= $t[$lang]['step'] ?> 2: Parents &amp; Guardian">
+                <button type="button" class="wizard-step-indicator" data-step="2">
                     <span class="wizard-step-num" aria-hidden="true">2</span>
                     <span class="wizard-step-label">Parents &amp; Guardian</span>
                 </button>
-                <button type="button" class="wizard-step-indicator" data-step="3" aria-label="<?= $t[$lang]['step'] ?> 3: Address">
+                <button type="button" class="wizard-step-indicator" data-step="3">
                     <span class="wizard-step-num" aria-hidden="true">3</span>
                     <span class="wizard-step-label">Address</span>
                 </button>
-                <button type="button" class="wizard-step-indicator" data-step="4" aria-label="<?= $t[$lang]['step'] ?> 4: Education">
+                <button type="button" class="wizard-step-indicator" data-step="4">
                     <span class="wizard-step-num" aria-hidden="true">4</span>
                     <span class="wizard-step-label">Education</span>
                 </button>
-                <button type="button" class="wizard-step-indicator" data-step="5" aria-label="<?= $t[$lang]['step'] ?> 5: Enrollment &amp; Documents">
+                <button type="button" class="wizard-step-indicator" data-step="5">
                     <span class="wizard-step-num" aria-hidden="true">5</span>
                     <span class="wizard-step-label">Enrollment</span>
                 </button>
-            </ol>
+            </nav>
         </div>
 
         <form method="POST" action="" id="enrollForm" enctype="multipart/form-data" novalidate>
@@ -1558,6 +1551,98 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
 
             <!-- ============ STEP 5: ENROLLMENT + DOCUMENTS ============ -->
             <div class="wizard-step-content" data-step-content="5">
+                <?php if (!empty($errors['document_mismatch']) && is_array($_SESSION['name_verify'] ?? null)): ?>
+                    <?php
+                        $nv       = $_SESSION['name_verify'];
+                        $nv_name  = $nv['name'] ?? [];
+                        $nv_parts = $nv_name['parts'] ?? [];
+                        $nv_lrn   = $nv['lrn'] ?? [];
+                        $nv_rot   = (int)($nv['rotation'] ?? 0);
+                        $nv_score = (int)($nv['score'] ?? 0);
+                    ?>
+                    <div class="doc-mismatch-banner" role="alert" aria-live="assertive">
+                        <div class="doc-mismatch-icon">
+                            <i class="fas fa-circle-xmark" aria-hidden="true"></i>
+                        </div>
+                        <div class="doc-mismatch-body">
+                            <div class="doc-mismatch-title">
+                                Cannot submit — JHS Certificate does not match
+                            </div>
+                            <p class="doc-mismatch-text">
+                                The <strong>Junior High School Certificate (Front)</strong> you uploaded
+                                does not match the student name or LRN entered in Step 1.
+                                Please <strong>re-upload a valid copy</strong> of the correct document
+                                below before submitting for review.
+                            </p>
+
+                            <div class="doc-mismatch-details">
+                                <?php if (!empty($nv_parts)): ?>
+                                    <div class="doc-mismatch-row">
+                                        <span class="doc-mismatch-key">Name on document:</span>
+                                        <span class="doc-mismatch-val">
+                                            <i class="fas <?= !empty($nv_parts['first']) ? 'fa-check text-success' : 'fa-xmark text-danger' ?>"></i> First
+                                            <i class="fas <?= ($nv_parts['middle'] === true ? 'fa-check text-success' : ($nv_parts['middle'] === false ? 'fa-xmark text-danger' : 'fa-minus text-secondary')) ?>"></i> Middle
+                                            <i class="fas <?= !empty($nv_parts['last']) ? 'fa-check text-success' : 'fa-xmark text-danger' ?>"></i> Last
+                                        </span>
+                                    </div>
+                                <?php endif; ?>
+                                <?php if (!empty($nv_lrn['expected'])): ?>
+                                    <div class="doc-mismatch-row">
+                                        <span class="doc-mismatch-key">LRN expected:</span>
+                                        <span class="doc-mismatch-val mono"><?= htmlspecialchars($nv_lrn['expected']) ?></span>
+                                    </div>
+                                    <?php if (!empty($nv_lrn['best'])): ?>
+                                        <div class="doc-mismatch-row">
+                                            <span class="doc-mismatch-key">LRN found on document:</span>
+                                            <span class="doc-mismatch-val mono">
+                                                <?= htmlspecialchars($nv_lrn['best']) ?>
+                                                <?php if (!empty($nv_lrn['distance'])): ?>
+                                                    <span class="doc-mismatch-distance">
+                                                        (<?= (int)$nv_lrn['distance'] ?> digit<?= (int)$nv_lrn['distance'] === 1 ? '' : 's' ?> off)
+                                                    </span>
+                                                <?php endif; ?>
+                                            </span>
+                                        </div>
+                                    <?php else: ?>
+                                        <div class="doc-mismatch-row">
+                                            <span class="doc-mismatch-key">LRN found on document:</span>
+                                            <span class="doc-mismatch-val"><em>Could not be read</em></span>
+                                        </div>
+                                    <?php endif; ?>
+                                <?php endif; ?>
+                            </div>
+
+                            <div class="doc-mismatch-hint">
+                                <i class="fas fa-arrow-down" aria-hidden="true"></i>
+                                Scroll down to the <strong>Entrance Data Presented</strong> section
+                                and re-upload the correct JHS Certificate (Front).
+                            </div>
+
+                            <div class="doc-mismatch-meta">
+                                <span><i class="fas fa-rotate"></i> Detected rotation: <?= $nv_rot ?>°</span>
+                                <span><i class="fas fa-gauge-high"></i> OCR score: <?= $nv_score ?></span>
+                            </div>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
+                <?php if (!empty($errors['photo_2x2']) && is_array($_SESSION['photo_2x2_check'] ?? null)): ?>
+                    <?php $p2 = $_SESSION['photo_2x2_check']; ?>
+                    <div class="photo-warn-banner" role="alert" aria-live="assertive">
+                        <div class="photo-warn-icon">
+                            <i class="fas fa-camera-retro" aria-hidden="true"></i>
+                        </div>
+                        <div style="flex:1;min-width:0">
+                            <div class="photo-warn-title">2×2 picture needs attention</div>
+                            <p class="photo-warn-text"><?= htmlspecialchars($p2['message'] ?? '') ?></p>
+                            <div class="photo-warn-hint">
+                                <i class="fas fa-arrow-down" aria-hidden="true"></i>
+                                Re-upload a proper 2×2 photo (square, at least 300×300px, JPG or PNG) below.
+                            </div>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
                 <section class="section-card" aria-labelledby="sectionEnrollmentHeading">
                     <div class="section-header"><i class="fas fa-clipboard-list" aria-hidden="true"></i><h2 id="sectionEnrollmentHeading"><?= $t[$lang]['enrollment'] ?></h2></div>
                     <div class="row g-3">
@@ -1770,6 +1855,34 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
             $vq = $_POST['voucher_qualified'] ?? '';
             $voucher_display = $vq === '1' ? $t[$lang]['qualified_voucher'] : ($vq === '0' ? $t[$lang]['not_qualified_voucher'] : '—');
             $section_display = !empty($_POST['section']) ? $_POST['section'] : ($_POST['strand'] ?? '—');
+
+            // ── Compute document validity for the Confirm button ──
+            $jhs_status = $_SESSION['name_verify']['status']      ?? 'unverifiable';
+            $p2_status  = $_SESSION['photo_2x2_check']['status']  ?? 'match';   // default match = not uploaded
+
+            $jhs_valid = ($jhs_status === 'match');
+            $p2_valid  = ($p2_status  === 'match');
+
+            $docs_valid = $jhs_valid && $p2_valid;
+
+            // Human-readable list of blockers
+            $doc_blockers = [];
+            if (!$jhs_valid) {
+                $doc_blockers[] = match ($jhs_status) {
+                    'partial'      => 'The JHS Certificate only partially matched the student name or LRN.',
+                    'unverifiable' => 'The JHS Certificate could not be read automatically — please re-upload a clearer copy.',
+                    'mismatch'     => 'The JHS Certificate does not match the student name or LRN.',
+                    default        => 'The JHS Certificate could not be verified.',
+                };
+            }
+            if (!$p2_valid) {
+                $doc_blockers[] = match ($p2_status) {
+                    'partial'      => 'The 2×2 picture is not square — please upload a proper 2×2 photo.',
+                    'unverifiable' => 'The 2×2 picture could not be validated automatically.',
+                    'mismatch'     => 'The 2×2 picture is invalid (wrong format or too small).',
+                    default        => 'The 2×2 picture failed its format check.',
+                };
+            }
         ?>
 
         <div class="review-container">
@@ -1939,11 +2052,6 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
             </section>
 
             <?php
-            /* -------------------------------------------------------------
-               JHS Certificate (Front) — Identity verification card.
-               Rendered only when the POST handler stored a result in
-               $_SESSION['name_verify'] for this session.
-               ------------------------------------------------------------- */
             $nv = $_SESSION['name_verify'] ?? null;
             if (is_array($nv)):
                 $status      = $nv['status']     ?? 'unverifiable';
@@ -1953,6 +2061,8 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
                 $nv_name     = $nv['name'] ?? ['status' => 'unverifiable', 'parts' => [], 'message' => ''];
                 $nv_lrn      = $nv['lrn']  ?? ['status' => 'unverifiable', 'expected' => '', 'best' => null, 'distance' => null, 'message' => ''];
                 $nv_name_parts = $nv_name['parts'] ?? [];
+                $nv_rotation = (int)($nv['rotation'] ?? 0);
+                $nv_score    = (int)($nv['score'] ?? 0);
 
                 $theme = [
                     'match'        => ['cls' => 'nv-match',        'icon' => 'fa-circle-check',         'label' => 'Verified',            'sub' => 'Form details match the document.'],
@@ -1983,7 +2093,6 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
                     <span class="name-verify-badge"><?= htmlspecialchars($theme['label']) ?></span>
                 </div>
 
-                <!-- NAME row -->
                 <div class="verify-block">
                     <div class="verify-block-title">
                         <i class="fas fa-user me-1"></i>Name
@@ -2014,7 +2123,6 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
                     <div class="verify-block-msg"><?= htmlspecialchars($nv_name['message']) ?></div>
                 </div>
 
-                <!-- LRN row -->
                 <div class="verify-block">
                     <div class="verify-block-title">
                         <i class="fas fa-id-card me-1"></i>LRN
@@ -2040,6 +2148,22 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
                     <div class="verify-block-msg"><?= htmlspecialchars($nv_lrn['message']) ?></div>
                 </div>
 
+                <div class="verify-block" style="background:rgba(255,255,255,.4)">
+                    <div class="verify-block-title">
+                        <i class="fas fa-gears me-1"></i>OCR Diagnostics
+                    </div>
+                    <div class="name-verify-grid">
+                        <div class="name-verify-part skip">
+                            <i class="fas fa-rotate"></i>
+                            Rotation used: <strong style="margin-left:.2rem"><?= $nv_rotation ?>°</strong>
+                        </div>
+                        <div class="name-verify-part skip">
+                            <i class="fas fa-gauge-high"></i>
+                            Keyword score: <strong style="margin-left:.2rem"><?= $nv_score ?></strong>
+                        </div>
+                    </div>
+                </div>
+
                 <?php if ($extracted !== null && $extracted !== ''): ?>
                     <details class="name-verify-details">
                         <summary><i class="fas fa-file-lines me-1"></i>Show text extracted from the document</summary>
@@ -2059,7 +2183,54 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
             </section>
             <?php endif; ?>
 
-            <form method="POST" action="process_enroll.php" class="text-center mt-5">
+            <?php
+            $p2 = $_SESSION['photo_2x2_check'] ?? null;
+            if (is_array($p2) && ($p2['status'] ?? '') !== 'match'):
+            ?>
+            <section class="review-section name-verify-card nv-partial" role="status" aria-live="polite">
+                <div class="name-verify-head">
+                    <div class="name-verify-icon"><i class="fas fa-camera-retro"></i></div>
+                    <div class="name-verify-titles">
+                        <h2 style="font-size:1.15rem;margin:0;">
+                            <i class="fas fa-image me-2"></i>2×2 Picture — Format Check
+                        </h2>
+                        <div class="name-verify-sub">
+                            <?= $p2['status'] === 'partial'
+                                ? 'Photo will be accepted but may need adjustment.'
+                                : 'Photo could not be validated automatically.' ?>
+                        </div>
+                    </div>
+                    <span class="name-verify-badge"><?= htmlspecialchars(strtoupper($p2['status'])) ?></span>
+                </div>
+                <div class="verify-block">
+                    <div class="verify-block-msg"><?= htmlspecialchars($p2['message'] ?? '') ?></div>
+                </div>
+            </section>
+            <?php endif; ?>
+
+            <?php if (!$docs_valid): ?>
+                <div class="review-blocker-banner" role="alert" aria-live="assertive">
+                    <div class="review-blocker-icon">
+                        <i class="fas fa-lock" aria-hidden="true"></i>
+                    </div>
+                    <div class="review-blocker-body">
+                        <div class="review-blocker-title">
+                            Cannot submit — documents need attention
+                        </div>
+                        <ul class="review-blocker-list">
+                            <?php foreach ($doc_blockers as $b): ?>
+                                <li><?= htmlspecialchars($b) ?></li>
+                            <?php endforeach; ?>
+                        </ul>
+                        <div class="review-blocker-hint">
+                            <i class="fas fa-arrow-down" aria-hidden="true"></i>
+                            Click <strong>Edit</strong> below to go back to the form and re-upload the highlighted documents.
+                        </div>
+                    </div>
+                </div>
+            <?php endif; ?>
+
+            <form method="POST" action="process_enroll.php" class="text-center mt-5" id="confirmForm">
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
                 <?php
                 $skip_keys = ['existing_file', 'keep_existing_file', 'camera_data', 'entrance_files', 'csrf_token'];
@@ -2079,21 +2250,71 @@ $religion_select_value = $religion_is_known ? $cur_religion : ($cur_religion !==
                     endif;
                 endforeach;
                 ?>
-                <button type="submit" class="btn-custom" style="background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;padding:.9rem 2rem;border-radius:50px;font-weight:600">
+
+                <button type="submit"
+                        class="btn-custom"
+                        id="confirmSaveBtn"
+                        <?= $docs_valid ? '' : 'disabled aria-disabled="true"' ?>
+                        <?= $docs_valid ? '' : 'title="Documents must be verified before submitting."' ?>
+                        style="background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;padding:.9rem 2rem;border-radius:50px;font-weight:600;<?= $docs_valid ? '' : 'opacity:0.5;cursor:not-allowed;filter:grayscale(60%);' ?>">
                     <i class="fas fa-save me-2"></i> <?= $t[$lang]['confirm_save'] ?>
                 </button>
             </form>
+
+            <?php if (!$docs_valid): ?>
+                <p class="text-center mt-3" style="color:#991b1b;font-weight:600;font-size:0.9rem;">
+                    <i class="fas fa-circle-exclamation me-1"></i>
+                    Submission is disabled until the documents are corrected.
+                </p>
+            <?php endif; ?>
+
             <div class="text-center mt-3">
-                <a href="?edit=1" class="btn-custom" style="background:linear-gradient(135deg,#6c757d,#5a6268);color:#fff;text-decoration:none;padding:.8rem 1.75rem;border-radius:50px;font-weight:600;display:inline-block">
+                <a href="enroll_form.php?edit=1"
+                   id="editEnrollmentBtn"
+                   class="btn-custom"
+                   style="background:linear-gradient(135deg,#6c757d,#5a6268);color:#fff;text-decoration:none;padding:.8rem 1.75rem;border-radius:50px;font-weight:600;display:inline-block;cursor:pointer">
                     <i class="fas fa-edit me-2"></i> <?= $t[$lang]['edit_btn'] ?>
                 </a>
-                <?php
-                /* The user is going back to edit — drop the previous
-                   verification result so a stale card can't linger. */
-                unset($_SESSION['name_verify']);
-                ?>
+                <?php unset($_SESSION['name_verify'], $_SESSION['photo_2x2_check']); ?>
             </div>
         </div>
+
+        <script>
+        (function(){
+            const btn = document.getElementById('editEnrollmentBtn');
+            if (!btn) return;
+            btn.addEventListener('click', function(e){
+                e.stopPropagation();
+                setTimeout(function(){
+                    if (document.visibilityState === 'visible') {
+                        window.location.href = 'enroll_form.php?edit=1';
+                    }
+                }, 250);
+            });
+        })();
+
+        /* Hard-block the Confirm form if the button is disabled */
+        (function(){
+            const form = document.getElementById('confirmForm');
+            const btn  = document.getElementById('confirmSaveBtn');
+            if (!form || !btn || !btn.disabled) return;
+            form.addEventListener('submit', function(e){
+                e.preventDefault();
+                e.stopPropagation();
+                if (typeof Swal !== 'undefined' && Swal.fire) {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Documents not verified',
+                        html: 'Please go back and re-upload the highlighted documents before submitting.',
+                        confirmButtonColor: '#dc3545'
+                    }).then(() => setTimeout(ensurePageUnfrozen, 250));
+                } else {
+                    alert('Documents must be verified before submitting.');
+                }
+                return false;
+            }, true);
+        })();
+        </script>
     <?php endif; ?>
 </main>
 
@@ -2156,6 +2377,8 @@ const strandKeywords = {
     "Hospitality and Tourism": ["cooking","cook","baking","baker","culinary","chef","hotel","hospitality","tourism","tourist","restaurant","waiter","waitress","server","barista","food service","food and beverage","housekeeping"]
 };
 const progs = STRAND_PROGRAMS;
+
+let liveStrandTrends = { trends: {}, sy: null, total: 0 };
 
 function switchLang(lang){const url=new URL(window.location.href);url.searchParams.set('lang',lang);window.location.href=url.toString()}
 function capitalize(str){if(!str||typeof str!=='string')return str;return str.replace(/\b\w+/g,function(w){return w.charAt(0).toUpperCase()+w.slice(1).toLowerCase()})}
@@ -2370,8 +2593,6 @@ document.addEventListener('DOMContentLoaded', syncReligion);
 })();
 
 /* STRAND RECOMMENDATION */
-let liveStrandTrends = { trends: {}, sy: null, total: 0 };
-
 async function loadStrandTrends(){
     try {
         const r = await fetch('?action=strand_trends', { cache: 'no-store' });
@@ -2394,6 +2615,9 @@ function analyzeStrand(curStrand, curProgram, skills, isTransferred, prevStrand)
     const cur = (curStrand || '').trim();
     const prog = (curProgram || '').trim();
 
+    const trends   = (liveStrandTrends && liveStrandTrends.trends) ? liveStrandTrends.trends : {};
+    const trendsSy = (liveStrandTrends && liveStrandTrends.sy)     ? liveStrandTrends.sy     : null;
+
     if (cur && prog && progs[cur] && progs[cur].indexOf(prog) === -1) {
         return { status:'mismatch', icon:'bi bi-exclamation-triangle-fill', title:'Program does not match strand',
                  message:`"${prog}" is not a standard program under ${cur}. Please review your selection.`, suggestion:null };
@@ -2406,10 +2630,10 @@ function analyzeStrand(curStrand, curProgram, skills, isTransferred, prevStrand)
         return { status:'changed', icon:'bi bi-arrow-left-right', title:'Different from your previous strand',
                  message:`You were in ${prevStrand} at your previous school. Confirm this change is intentional before submitting.`, suggestion:null };
     }
-    const t = liveStrandTrends.trends[cur];
-    if (t && t.current <= 1 && liveStrandTrends.sy) {
+    const t = trends[cur];
+    if (t && t.current <= 1 && trendsSy) {
         return { status:'changed', icon:'bi bi-exclamation-triangle-fill', title:'Low enrollment for this strand',
-                 message:`Only ${t.current} student(s) enrolled in ${cur} for ${liveStrandTrends.sy}. Verify this strand will run.`, suggestion:null };
+                 message:`Only ${t.current} student(s) enrolled in ${cur} for ${trendsSy}. Verify this strand will run.`, suggestion:null };
     }
     if (t && typeof t.growth === 'number' && t.growth < -30) {
         return { status:'changed', icon:'bi bi-graph-down-arrow', title:'Strand trending downward',
@@ -2430,7 +2654,7 @@ function analyzeStrand(curStrand, curProgram, skills, isTransferred, prevStrand)
                      message:`Your listed skills align well with ${cur}.${extra}`, suggestion:null };
         }
         if (bestScore >= 2 && bestMatch && bestMatch !== cur) {
-            const altT = liveStrandTrends.trends[bestMatch];
+            const altT = trends[bestMatch];
             let note = '';
             if (altT && typeof altT.growth === 'number' && altT.growth > 20) note = ` (up ${altT.growth}% YoY)`;
             return { status:'alternative', icon:'bi bi-lightbulb-fill', title:'Consider: ' + bestMatch,
@@ -2468,7 +2692,7 @@ function renderStrandRecommendation(){
     }
 
     let trendsBlock = '';
-    const t = liveStrandTrends.trends[cur];
+    const t = liveStrandTrends && liveStrandTrends.trends ? liveStrandTrends.trends[cur] : null;
     if (t && liveStrandTrends.sy) {
         let growthChip = '<span class="rec-growth flat"><i class="fas fa-minus"></i>No prior data</span>';
         if (t.growth === 'new') {
@@ -2618,16 +2842,21 @@ document.addEventListener('DOMContentLoaded',()=>{
     });
 });
 
-/* WIZARD */
+/* ═══════════════════════════════════════════════════════
+   WIZARD — hardened with event delegation + try/catch
+   ═══════════════════════════════════════════════════════ */
 (function(){
+    'use strict';
+
     const TOTAL_STEPS = 5;
     const form = document.getElementById('enrollForm');
     if (!form) return;
 
     const stepContents = form.querySelectorAll('.wizard-step-content');
     const indicators   = document.querySelectorAll('.wizard-step-indicator');
-    let currentStep    = <?= (int)$initial_step ?>;
-    const visited      = new Set([1]);
+
+    let currentStep = <?= (int)$initial_step ?>;
+    const visited   = new Set([1]);
 
     const STEP_REQUIRED = {
         1: ['lrn','last_name','first_name','sex','birth_date'],
@@ -2646,59 +2875,47 @@ document.addEventListener('DOMContentLoaded',()=>{
     };
 
     const STEP_FIELD_LABELS = {
-        1: {
-            lrn: 'LRN',
-            last_name: 'Last Name',
-            first_name: 'First Name',
-            sex: 'Sex',
-            birth_date: 'Birth Date',
-            height: 'Height',
-            weight: 'Weight'
-        },
+        1: { lrn:'LRN', last_name:'Last Name', first_name:'First Name',
+             sex:'Sex', birth_date:'Birth Date', height:'Height', weight:'Weight' },
         2: { is_4ps: 'CCT/4Ps Recipient' },
-        5: {
-            school_year: 'School Year',
-            grade_level: 'Grade Level',
-            term: 'Term',
-            strand: 'Strand',
-            program: 'Program'
-        }
+        5: { school_year:'School Year', grade_level:'Grade Level',
+             term:'Term', strand:'Strand', program:'Program' }
     };
 
     function documentHasAnyFile() {
         const checks = form.querySelectorAll('input[name="entrance_data[]"]:checked');
         if (checks.length === 0) return false;
-
-        let hasAnyFile = false;
+        let hasAny = false;
         checks.forEach(cb => {
             const row = document.getElementById('uploadRow_' + cb.id);
             if (!row) return;
-
-            if (row.querySelector('.upload-row.has-file')) { hasAnyFile = true; return; }
-
+            if (row.querySelector('.upload-row.has-file')) { hasAny = true; return; }
             const fi = row.querySelector('input[type="file"]');
-            if (fi && fi.files && fi.files.length > 0) { hasAnyFile = true; return; }
-
+            if (fi && fi.files && fi.files.length > 0) { hasAny = true; return; }
             const cd = row.querySelector('input[name^="camera_data"]');
-            if (cd && cd.value && cd.value.trim() !== '') { hasAnyFile = true; return; }
+            if (cd && cd.value && cd.value.trim() !== '') { hasAny = true; }
         });
-        return hasAnyFile;
+        return hasAny;
     }
 
     function getStepError(step) {
         const missing = [];
-        const names = STEP_REQUIRED[step] || [];
+        const names   = STEP_REQUIRED[step] || [];
 
         for (const name of names) {
-            const el = form.querySelector(`[name="${name}"]`);
+            const el = form.querySelector('[name="' + name + '"]');
             if (!el) continue;
             const group = el.closest('.form-group');
             if (group) group.classList.remove('error');
             el.removeAttribute('aria-invalid');
-            if (!el.checkValidity() || el.value.trim() === '') {
+
+            const val = (el.value === undefined || el.value === null)
+                ? '' : String(el.value).trim();
+
+            if (!el.checkValidity() || val === '') {
                 missing.push(name);
                 if (group) group.classList.add('error');
-                el.setAttribute('aria-invalid','true');
+                el.setAttribute('aria-invalid', 'true');
             }
         }
 
@@ -2762,9 +2979,9 @@ document.addEventListener('DOMContentLoaded',()=>{
         if (names.length === 0 && step !== 5) return visited.has(step);
 
         for (const name of names) {
-            const el = form.querySelector(`[name="${name}"]`);
+            const el = form.querySelector('[name="' + name + '"]');
             if (!el) continue;
-            if (!el.checkValidity() || el.value.trim() === '') return false;
+            if (!el.checkValidity() || String(el.value || '').trim() === '') return false;
         }
 
         if (step === 5) {
@@ -2772,28 +2989,31 @@ document.addEventListener('DOMContentLoaded',()=>{
             if (checks.length === 0) return false;
             if (!documentHasAnyFile()) return false;
         }
-
         return true;
     }
 
-    function showStep(n){
+    function showStep(n) {
         if (n < 1 || n > TOTAL_STEPS) return;
         currentStep = n;
         visited.add(n);
 
         stepContents.forEach(el => {
-            el.classList.toggle('active', parseInt(el.dataset.stepContent,10) === n);
+            const s = parseInt(el.dataset.stepContent, 10);
+            el.classList.toggle('active', s === n);
         });
 
         indicators.forEach(el => {
-            const s = parseInt(el.dataset.step,10);
+            const s = parseInt(el.dataset.step, 10);
             el.classList.remove('active','completed','invalid');
             el.removeAttribute('aria-current');
-            if (s === n){
+            if (s === n) {
                 el.classList.add('active');
                 el.setAttribute('aria-current','step');
-            } else if (stepIsComplete(s)) el.classList.add('completed');
-            else if (visited.has(s)) el.classList.add('invalid');
+            } else if (stepIsComplete(s)) {
+                el.classList.add('completed');
+            } else if (visited.has(s)) {
+                el.classList.add('invalid');
+            }
             el.disabled = !(s <= n || visited.has(s));
         });
 
@@ -2802,36 +3022,50 @@ document.addEventListener('DOMContentLoaded',()=>{
         }
 
         const target = document.querySelector('.wizard-progress-wrap');
-        if (target){
+        if (target) {
             const y = target.getBoundingClientRect().top + window.pageYOffset - 20;
             window.scrollTo({ top: y, behavior: 'smooth' });
         }
     }
 
-    form.querySelectorAll('.btn-next').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const target = parseInt(btn.dataset.next, 10);
+    form.addEventListener('click', function(e) {
+        const nextBtn = e.target.closest('.btn-next');
+        const backBtn = e.target.closest('.btn-back');
+
+        if (nextBtn && form.contains(nextBtn)) {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const target = parseInt(nextBtn.dataset.next, 10);
             const from   = target - 1;
-            const err    = getStepError(from);
-            if (err){
-                Swal.fire({
-                    icon: 'warning',
-                    title: err.title,
-                    html: err.html,
-                    confirmButtonColor: '#1565c0'
-                }).then(function () {
-                    setTimeout(ensurePageUnfrozen, 250);
-                });
+
+            let err = null;
+            try { err = getStepError(from); }
+            catch (ex) { console.error('Wizard: getStepError threw', ex); }
+
+            if (err) {
+                if (typeof Swal !== 'undefined' && Swal.fire) {
+                    Swal.fire({
+                        icon: 'warning',
+                        title: err.title,
+                        html: err.html,
+                        confirmButtonColor: '#1565c0'
+                    }).then(() => setTimeout(ensurePageUnfrozen, 250));
+                } else {
+                    alert(err.title + '\n' + err.html.replace(/<[^>]+>/g, ''));
+                }
                 return;
             }
             showStep(target);
-        });
-    });
-    form.querySelectorAll('.btn-back').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const target = parseInt(btn.dataset.back, 10);
+            return;
+        }
+
+        if (backBtn && form.contains(backBtn) && !backBtn.classList.contains('placeholder')) {
+            e.preventDefault();
+            e.stopPropagation();
+            const target = parseInt(backBtn.dataset.back, 10);
             showStep(target);
-        });
+        }
     });
 
     indicators.forEach(el => {
@@ -2844,28 +3078,30 @@ document.addEventListener('DOMContentLoaded',()=>{
     form.addEventListener('submit', async function(e){
         let firstBadStep = null;
         let firstErr     = null;
-        for (let s = 1; s <= TOTAL_STEPS; s++){
+        for (let s = 1; s <= TOTAL_STEPS; s++) {
             const err = getStepError(s);
             if (err && firstBadStep === null) {
                 firstBadStep = s;
                 firstErr     = err;
             }
         }
-        if (firstBadStep !== null){
+        if (firstBadStep !== null) {
             e.preventDefault();
             showStep(firstBadStep);
-            Swal.fire({
-                icon: 'warning',
-                title: firstErr.title,
-                html: firstErr.html,
-                confirmButtonColor: '#1565c0'
-            }).then(function () {
-                setTimeout(ensurePageUnfrozen, 250);
-            });
+            if (typeof Swal !== 'undefined' && Swal.fire) {
+                Swal.fire({
+                    icon: 'warning',
+                    title: firstErr.title,
+                    html: firstErr.html,
+                    confirmButtonColor: '#1565c0'
+                }).then(() => setTimeout(ensurePageUnfrozen, 250));
+            } else {
+                alert(firstErr.title);
+            }
             return;
         }
 
-        const relSel = document.getElementById('religion_select');
+        const relSel   = document.getElementById('religion_select');
         const relOther = document.getElementById('religion_other');
         if (relSel && relOther && relSel.value === '__other__') {
             let hidden = document.getElementById('religion_actual');
@@ -2881,16 +3117,20 @@ document.addEventListener('DOMContentLoaded',()=>{
         }
 
         const ack = document.getElementById('acknowledgeDuplicateName');
-        if (ack && ack.value === '1'){
+        if (ack && ack.value === '1') {
             const btn = document.getElementById('submitBtn');
-            if (btn){ btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Submitting...'; }
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Submitting...';
+            }
             return;
         }
 
-        const matches = (typeof window.__getNameMatches === 'function') ? window.__getNameMatches() : [];
-        if (matches && matches.length > 0){
-            e.preventDefault();
+        const matches = (typeof window.__getNameMatches === 'function')
+            ? window.__getNameMatches() : [];
 
+        if (matches && matches.length > 0) {
+            e.preventDefault();
             const items = matches.map(m => {
                 let line = '<strong>' + m.name + '</strong>';
                 if (m.lrn) line += ' · LRN: ' + m.lrn;
@@ -2898,20 +3138,25 @@ document.addEventListener('DOMContentLoaded',()=>{
                 return '<li style="text-align:left">' + line + '</li>';
             }).join('');
 
-            const res = await Swal.fire({
-                icon: 'warning',
-                title: '<?= $t[$lang]['name_duplicate_title'] ?>',
-                html: '<p style="margin-bottom:.5rem"><?= $t[$lang]['name_duplicate_msg'] ?></p>' + '<ul style="display:inline-block;margin:0;padding-left:1.2rem;font-size:.9rem">' + items + '</ul>',
-                showCancelButton: true,
-                confirmButtonText: '<?= $t[$lang]['name_duplicate_yes'] ?>',
-                cancelButtonText: '<?= $t[$lang]['name_duplicate_no'] ?>',
-                confirmButtonColor: '#d97706',
-                cancelButtonColor: '#6c757d',
-                reverseButtons: true
-            });
-            setTimeout(ensurePageUnfrozen, 250);
-
-            if (res.isConfirmed){
+            if (typeof Swal !== 'undefined' && Swal.fire) {
+                const res = await Swal.fire({
+                    icon: 'warning',
+                    title: '<?= $t[$lang]['name_duplicate_title'] ?>',
+                    html: '<p style="margin-bottom:.5rem"><?= $t[$lang]['name_duplicate_msg'] ?></p>' +
+                          '<ul style="display:inline-block;margin:0;padding-left:1.2rem;font-size:.9rem">' + items + '</ul>',
+                    showCancelButton: true,
+                    confirmButtonText: '<?= $t[$lang]['name_duplicate_yes'] ?>',
+                    cancelButtonText: '<?= $t[$lang]['name_duplicate_no'] ?>',
+                    confirmButtonColor: '#d97706',
+                    cancelButtonColor: '#6c757d',
+                    reverseButtons: true
+                });
+                setTimeout(ensurePageUnfrozen, 250);
+                if (res.isConfirmed) {
+                    if (ack) ack.value = '1';
+                    form.submit();
+                }
+            } else if (confirm('<?= $t[$lang]['name_duplicate_msg'] ?>')) {
                 if (ack) ack.value = '1';
                 form.submit();
             }
@@ -2919,7 +3164,7 @@ document.addEventListener('DOMContentLoaded',()=>{
         }
 
         const btn = document.getElementById('submitBtn');
-        if (btn){
+        if (btn) {
             btn.disabled = true;
             btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Submitting...';
         }
@@ -2927,7 +3172,7 @@ document.addEventListener('DOMContentLoaded',()=>{
 
     form.addEventListener('input', () => {
         indicators.forEach(el => {
-            const s = parseInt(el.dataset.step,10);
+            const s = parseInt(el.dataset.step, 10);
             if (s === currentStep) return;
             el.classList.remove('completed','invalid');
             if (stepIsComplete(s)) el.classList.add('completed');
@@ -2936,6 +3181,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     }, { passive: true });
 
     showStep(currentStep);
+    console.log('[Wizard] ready — starting at step', currentStep);
 
     <?php if ($name_dup_pending): ?>
     setTimeout(() => { form.requestSubmit(); }, 300);

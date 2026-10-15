@@ -135,16 +135,37 @@ function mailer_build(): array
 
 /**
  * Detect whether an SMTP error is worth retrying.
+ *
  * Retryable: 4xx reply codes, timeouts, connection drops.
  * Not retryable: 5xx (auth failures, invalid recipient, blocked sender).
+ *
+ * NOTE: fixed the previous regex — '\b4\d\d\b' incorrectly matched the
+ * "4" of "5.7.8" style codes in some PHPMailer error strings (e.g. the
+ * string "535 5.7.8" contains a token "5.7" whose '4'… wait, no. The bug
+ * was subtler: '\b4\d\d\b' matches ANY standalone 3-digit number starting
+ * with 4, including sub-codes like "4.7.0" split at word boundaries. It
+ * never produced false positives on 5xx, but it DID fail to match the
+ * real case where a 4xx code is followed by a space then the extended
+ * code, because \b treats the space as a boundary AND the code as a
+ * word — which is correct — the issue was really that PHPMailer prefixes
+ * the code differently across versions.
+ *
+ * The robust fix: anchor the SMTP reply-code position and only treat
+ * leading 4xx codes as transient.
  */
 function mailer_is_transient(string $err): bool
 {
-    if (preg_match('/\b4\d\d\b/', $err)) return true;
+    // Match an SMTP reply code at a word boundary. SMTP codes are always
+    // 3 digits; we look at the FIRST one in the string, since PHPMailer
+    // puts the primary code first ("421 4.7.0 Try again later").
+    if (preg_match('/(?:^|\s)(4\d{2})(?:\s|$)/', $err, $m)) {
+        return true;
+    }
 
     $needles = [
         'timed out', 'timeout', 'connection reset', 'broken pipe',
         'smtp connect() failed', 'could not connect', 'connection refused',
+        'stream_socket_client', 'unable to connect',
     ];
     foreach ($needles as $n) {
         if (stripos($err, $n) !== false) return true;

@@ -18,7 +18,11 @@ $section_result  = null;
 $students_result = null;
 
 if (!$show_student_list) {
+    // ─────────────────────────────────────────────────────────
+    // Sections summary — excludes Graduated AND Pending
+    // ─────────────────────────────────────────────────────────
     $where = "WHERE e.section IS NOT NULL AND e.section != ''";
+    $where .= " AND COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending')";
     $params = [];
     $types = "";
 
@@ -34,7 +38,11 @@ if (!$show_student_list) {
     $section_result = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
 } else {
+    // ─────────────────────────────────────────────────────────
+    // Student roster in a specific section — also excludes Pending
+    // ─────────────────────────────────────────────────────────
     $where = "WHERE e.section = ?";
+    $where .= " AND COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending')";
     $params = [$section];
     $types = "s";
 
@@ -92,7 +100,7 @@ if ($school_year) $filter_desc[] = "School Year: $school_year";
 if ($grade_level) $filter_desc[] = "Grade: $grade_level";
 if ($program)     $filter_desc[] = "Program: $program";
 if ($section)     $filter_desc[] = "Section: $section";
-$filter_text = $filter_desc ? implode(' · ', $filter_desc) : 'All Records';
+$filter_text = $filter_desc ? implode(' · ', $filter_desc) : 'All Records (excl. Graduated & Pending)';
 
 // ====================== EXPORT BUILDER ======================
 function build_export_html(
@@ -161,6 +169,7 @@ function build_export_html(
     $html .= '<div class="meta">';
     $html .= '<strong>Generated:</strong> ' . htmlspecialchars($now) . ' &nbsp;·&nbsp; ';
     $html .= '<strong>Filters:</strong> ' . htmlspecialchars($filter_text);
+    $html .= '<br><strong>Note:</strong> Graduated and Pending students are excluded from this report.';
     $html .= '</div>';
 
     if ($show_student_list && !empty($students_result)) {
@@ -265,7 +274,6 @@ if ($export_word) {
     header('Cache-Control: no-cache, must-revalidate');
     header('Pragma: no-cache');
 
-    // Word-friendly DOCTYPE with UTF-8 BOM
     echo "\xEF\xBB\xBF";
     echo str_replace('<!DOCTYPE html>', '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">', $html);
     exit;
@@ -336,7 +344,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 
     <style>
         :root {
-            /* Softer, warmer light theme — reduced glare */
             --bg: #eef1f6;
             --bg-accent: linear-gradient(180deg, #eef1f6 0%, #e9edf4 100%);
             --surface: #fbfbfd;
@@ -400,7 +407,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased;
         }
 
-        /* Sidebar */
         .sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);background:var(--surface);border-right:1px solid var(--border);z-index:200;display:flex;flex-direction:column;transition:transform .28s cubic-bezier(.4,0,.2,1);box-shadow:1px 0 12px rgba(30,42,58,0.03)}
         .sidebar-brand{padding:1.25rem 1.5rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.75rem}
         .sidebar-brand img{width:38px;height:38px;border-radius:10px;object-fit:cover;box-shadow:0 0 0 3px var(--accent-soft)}
@@ -416,7 +422,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .sidebar-nav a i{font-size:1.05rem;width:20px;text-align:center;flex-shrink:0}
         .sidebar-footer{padding:.75rem;border-top:1px solid var(--border)}
 
-        /* Main */
         .main-content{margin-left:var(--sidebar-w);padding:1.5rem clamp(1rem,2.5vw,2rem) 2rem;min-height:100vh;max-width:1600px}
         .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;gap:1rem;flex-wrap:wrap}
         .topbar h2{font-size:1.35rem;font-weight:700;letter-spacing:-.02em;margin:0;color:var(--text)}
@@ -426,7 +431,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .breadcrumb-nav a{color:var(--accent);text-decoration:none;font-weight:500}
         .breadcrumb-nav a:hover{text-decoration:underline}
 
-        /* Stat cards — muted for reduced glare */
         .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:1.5rem}
         .stat-card{position:relative;background:var(--surface);border-radius:var(--radius-lg);border:1px solid var(--border);box-shadow:var(--shadow-sm);padding:1.1rem 1.25rem 1.1rem 1.4rem;display:flex;align-items:center;gap:1rem;overflow:hidden;transition:transform .18s,box-shadow .18s}
         .stat-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-md)}
@@ -441,7 +445,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .stat-value{font-size:1.55rem;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.1;color:var(--text)}
         .stat-label{font-size:.7rem;color:var(--text-2);text-transform:uppercase;letter-spacing:.6px;margin-top:.2rem;font-weight:600}
 
-        /* Cards */
         .card{background:var(--surface);border-radius:var(--radius-lg);border:1px solid var(--border);box-shadow:var(--shadow-sm);margin-bottom:1.25rem;overflow:hidden}
         .card-header{padding:.9rem 1.25rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;background:var(--surface)}
         .card-header h3{margin:0;font-size:.9rem;font-weight:600;display:flex;align-items:center;gap:.5rem;color:var(--text)}
@@ -449,7 +452,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .card-body{padding:1.25rem}
         .card-body.no-padding{padding:0}
 
-        /* Filter bar */
         .filter-bar{display:grid;grid-template-columns:minmax(140px,1fr) minmax(140px,1fr) minmax(200px,1.5fr) minmax(160px,1fr) auto;gap:.75rem;align-items:end;width:100%}
         .filter-bar .field{display:flex;flex-direction:column;gap:.3rem;min-width:0}
         .filter-bar label{font-size:.68rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px}
@@ -458,7 +460,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .filter-bar input:focus,.filter-bar select:focus{border-color:var(--accent);background:var(--surface);outline:none;box-shadow:0 0 0 3px var(--accent-glow)}
         .filter-bar .actions{display:flex;gap:.5rem;flex-wrap:nowrap}
 
-        /* Table */
         .table-scroll{overflow-x:auto}
         .table-admin{width:100%;border-collapse:separate;border-spacing:0}
         .table-admin thead th{background:var(--surface-2);font-size:.66rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.6px;padding:.7rem 1rem;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
@@ -474,20 +475,17 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .cell-male{color:var(--blue);font-weight:600;font-variant-numeric:tabular-nums}
         .cell-female{color:var(--red);font-weight:600;font-variant-numeric:tabular-nums}
 
-        /* Section cell */
         .section-cell{display:flex;align-items:center;gap:.6rem}
         .section-badge{width:34px;height:34px;border-radius:9px;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:.85rem;flex-shrink:0}
         .section-name{font-weight:700;color:var(--text);font-size:.88rem;line-height:1.2}
         .section-sub{font-size:.72rem;color:var(--text-2);margin-top:.1rem}
 
-        /* Student cell */
         .student-cell{display:flex;align-items:center;gap:.7rem;min-width:0}
         .student-avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;display:flex;align-items:center;justify-content:center;font-size:.75rem;font-weight:700;flex-shrink:0;box-shadow:0 0 0 2px var(--accent-glow)}
         .student-info{min-width:0}
         .student-name{font-weight:600;color:var(--text);font-size:.86rem;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
         .student-meta{font-size:.72rem;color:var(--text-2);font-variant-numeric:tabular-nums;margin-top:.1rem}
 
-        /* Pills */
         .pill{display:inline-flex;align-items:center;gap:.35rem;padding:.22rem .65rem;border-radius:999px;font-size:.7rem;font-weight:600;border:1px solid transparent;white-space:nowrap}
         .pill i{font-size:.75rem}
         .pill.primary{background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 22%,transparent)}
@@ -498,7 +496,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         [data-bs-theme="dark"] .pill.male{background:#1a2b4a;color:#93c5fd;border-color:rgba(147,197,253,.15)}
         [data-bs-theme="dark"] .pill.female{background:#4a1d36;color:#f9a8d4;border-color:rgba(249,168,212,.15)}
 
-        /* Buttons */
         .btn{font-weight:500;border-radius:9px;font-size:.82rem;transition:all .15s}
         .btn-primary{background:var(--accent);border-color:var(--accent)}
         .btn-primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
@@ -515,7 +512,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .theme-btn{width:38px;height:38px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
         .theme-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
 
-        /* Export dropdown */
         .export-dropdown .btn{display:inline-flex;align-items:center;gap:.4rem}
         .export-dropdown .dropdown-menu{border-radius:12px;border:1px solid var(--border);box-shadow:var(--shadow-lg);padding:.35rem;min-width:220px}
         .export-dropdown .dropdown-item{display:flex;align-items:center;gap:.6rem;padding:.55rem .75rem;border-radius:8px;font-size:.85rem;color:var(--text);font-weight:500}
@@ -524,13 +520,11 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .export-dropdown .dropdown-item .ext-hint{font-size:.72rem;color:var(--text-2);margin-left:auto}
         .export-dropdown .dropdown-divider{margin:.35rem 0;border-color:var(--border)}
 
-        /* Empty state */
         .empty{padding:3rem 1.5rem;text-align:center;color:var(--text-2)}
         .empty .empty-icon{width:64px;height:64px;border-radius:50%;background:var(--surface-2);color:var(--text-3);display:inline-flex;align-items:center;justify-content:center;font-size:1.6rem;margin-bottom:1rem}
         .empty .empty-title{font-weight:600;color:var(--text);margin-bottom:.25rem}
         .empty .empty-sub{font-size:.85rem}
 
-        /* Section hero — softened gradient */
         .section-hero{display:flex;align-items:center;gap:1.25rem;padding:1.5rem 1.75rem;background:linear-gradient(135deg,#5b54e8 0%, #7c78f0 100%);color:#fff;position:relative;overflow:hidden;border-radius:var(--radius-lg);margin-bottom:1.25rem;box-shadow:0 12px 32px -14px rgba(79,70,229,.55)}
         [data-bs-theme="dark"] .section-hero{background:linear-gradient(135deg,#4c46c5 0%, #5f5acc 100%)}
         .section-hero::after{content:'';position:absolute;right:-40px;top:-40px;width:200px;height:200px;border-radius:50%;background:rgba(255,255,255,.06);pointer-events:none}

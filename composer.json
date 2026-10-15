@@ -1,6 +1,11 @@
 {
     "require": {
-        "phpmailer/phpmailer": "^7.1",
+        "php": ">=8.1",
+        "phpmailer/phpmailer": "^6.9",
         "dompdf/dompdf": "^3.1"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
     }
 }

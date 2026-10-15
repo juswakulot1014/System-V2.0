@@ -4,38 +4,40 @@ require_once __DIR__ . '/../config/auth.php';
 $current_page = basename($_SERVER['PHP_SELF']);
 
 // ====================== FETCH DASHBOARD DATA ======================
-// NOTE: Graduated students are excluded from every dashboard query.
-// They only appear in reports.php.
+// NOTE: Graduated and Pending enrollments are excluded from every dashboard query.
+// Graduated students only appear in reports.php; Pending enrollments are reviewed
+// in pending_enrollments.php.
 
-// Total students — exclude anyone whose enrollment is Graduated
+// Total students — exclude anyone with a Graduated or Pending enrollment
 $total_students = $conn->query("
     SELECT COUNT(*) as cnt FROM students_info s
     WHERE NOT EXISTS (
         SELECT 1 FROM enrollment_form e
-        WHERE e.student_id = s.student_id AND e.status = 'Graduated'
+        WHERE e.student_id = s.student_id
+          AND e.status IN ('Graduated', 'Pending')
     )
 ")->fetch_assoc()['cnt'] ?? 0;
 
-// Total enrollments (distinct students who are not graduated)
+// Total enrollments (distinct students who are not graduated or pending)
 $total_enrolled = $conn->query("
     SELECT COUNT(DISTINCT student_id) as cnt FROM enrollment_form
-    WHERE status IS NULL OR status != 'Graduated'
+    WHERE status IS NULL OR status NOT IN ('Graduated', 'Pending')
 ")->fetch_assoc()['cnt'] ?? 0;
 
-// Active enrollment — unchanged (already filters to Active or NULL)
+// Active enrollment (already filters to Active or NULL, so Pending is never included)
 $active_enrollment = $conn->query("
     SELECT COUNT(*) as cnt FROM enrollment_form
     WHERE status='Active' OR status IS NULL
 ")->fetch_assoc()['cnt'] ?? 0;
 
-// Sections — exclude graduated
+// Sections — exclude graduated and pending
 $total_sections = $conn->query("
     SELECT COUNT(DISTINCT section) as cnt FROM enrollment_form
     WHERE section IS NOT NULL AND section != ''
-      AND (status IS NULL OR status != 'Graduated')
+      AND (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
 ")->fetch_assoc()['cnt'] ?? 0;
 
-// Gender stats — exclude graduated
+// Gender stats — exclude graduated and pending
 $gender = $conn->query("
     SELECT
         SUM(CASE WHEN s.sex='Male' THEN 1 ELSE 0 END) as boys,
@@ -43,27 +45,28 @@ $gender = $conn->query("
     FROM students_info s
     WHERE NOT EXISTS (
         SELECT 1 FROM enrollment_form e
-        WHERE e.student_id = s.student_id AND e.status = 'Graduated'
+        WHERE e.student_id = s.student_id
+          AND e.status IN ('Graduated', 'Pending')
     )
 ")->fetch_assoc();
 $boys  = (int)($gender['boys']  ?? 0);
 $girls = (int)($gender['girls'] ?? 0);
 
-// Recent enrollments — exclude graduated
+// Recent enrollments — exclude graduated and pending
 $recent = $conn->query("
     SELECT s.student_id, s.first_name, s.last_name, s.lrn, s.student_id_number,
            e.grade_level, e.strand, e.section, e.enrolled_at
     FROM students_info s
     JOIN enrollment_form e ON s.student_id = e.student_id
-    WHERE (e.status IS NULL OR e.status != 'Graduated')
+    WHERE (e.status IS NULL OR e.status NOT IN ('Graduated', 'Pending'))
     ORDER BY e.enrolled_at DESC
     LIMIT 8
 ");
 
-// Grade level distribution — exclude graduated
+// Grade level distribution — exclude graduated and pending
 $grade_dist = $conn->query("
     SELECT grade_level, COUNT(*) as cnt FROM enrollment_form
-    WHERE (status IS NULL OR status != 'Graduated')
+    WHERE (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
     GROUP BY grade_level
     ORDER BY grade_level
 ");
@@ -73,11 +76,11 @@ while($g = $grade_dist->fetch_assoc()) {
     $grade_data[]   = (int)$g['cnt'];
 }
 
-// Strand distribution — exclude graduated
+// Strand distribution — exclude graduated and pending
 $strand_dist = $conn->query("
     SELECT COALESCE(strand,'Unassigned') as strand, COUNT(*) as cnt
     FROM enrollment_form
-    WHERE (status IS NULL OR status != 'Graduated')
+    WHERE (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
     GROUP BY strand
     ORDER BY cnt DESC
 ");
@@ -91,21 +94,22 @@ while($s = $strand_dist->fetch_assoc()) {
     $ci++;
 }
 
-// Unassigned students — exclude graduated
+// Unassigned students — exclude graduated and pending
 $unassigned = $conn->query("
     SELECT COUNT(*) as cnt FROM enrollment_form
     WHERE (section IS NULL OR section = '')
-      AND (status IS NULL OR status != 'Graduated')
+      AND (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
 ")->fetch_assoc()['cnt'] ?? 0;
 
-// Recently added (this week) — exclude graduated
+// Recently added (this week) — exclude graduated and pending
 $week_start = date('Y-m-d', strtotime('monday this week'));
 $new_this_week = $conn->query("
     SELECT COUNT(*) as cnt FROM students_info s
     WHERE s.created_at >= '$week_start'
       AND NOT EXISTS (
           SELECT 1 FROM enrollment_form e
-          WHERE e.student_id = s.student_id AND e.status = 'Graduated'
+          WHERE e.student_id = s.student_id
+            AND e.status IN ('Graduated', 'Pending')
       )
 ")->fetch_assoc()['cnt'] ?? 0;
 
@@ -118,8 +122,8 @@ $where  = [];
 $params = [];
 $types  = "";
 
-// Always exclude graduated students from the directory
-$where[] = "(e.status IS NULL OR e.status != 'Graduated')";
+// Always exclude graduated and pending enrollments from the directory
+$where[] = "(e.status IS NULL OR e.status NOT IN ('Graduated', 'Pending'))";
 
 if ($search !== '') {
     $where[] = "(s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)";
@@ -141,17 +145,17 @@ $students = $stmt->get_result();
 $filtered_count = $students->num_rows;
 $stmt->close();
 
-// Dropdowns — exclude graduated options
+// Dropdowns — exclude graduated and pending options
 $grade_levels = $conn->query("
     SELECT DISTINCT grade_level FROM enrollment_form
     WHERE grade_level IS NOT NULL
-      AND (status IS NULL OR status != 'Graduated')
+      AND (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
     ORDER BY grade_level ASC
 ");
 $school_years = $conn->query("
     SELECT DISTINCT school_year FROM enrollment_form
     WHERE school_year IS NOT NULL
-      AND (status IS NULL OR status != 'Graduated')
+      AND (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
     ORDER BY school_year DESC
 ");
 
@@ -573,6 +577,7 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
         <?php
+    // Pending badge intentionally counts Pending records (this is the review queue)
     $__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
 ?>
 <a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>

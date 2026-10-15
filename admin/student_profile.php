@@ -148,7 +148,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['promote_selected'])) 
 }
 
 /* ═══════════════════════════════════════════════════════════
-   POST: PROMOTE ALL (bulk by grade level) — CSRF protected
+   POST: PROMOTE ALL (bulk by grade level)
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['promote_students'])) {
     verify_csrf();
@@ -261,6 +261,61 @@ $school_year  = trim($_GET['school_year']  ?? $_POST['school_year']  ?? '');
 $status       = trim($_GET['status']       ?? $_POST['status']       ?? '');
 
 /* ═══════════════════════════════════════════════════════════
+   VIEW MODE — GRADUATED STUDENTS
+   ═══════════════════════════════════════════════════════════ */
+$view_graduated = isset($_GET['view']) && $_GET['view'] === 'graduated';
+$grad_sy        = trim($_GET['grad_sy'] ?? '');
+
+$grad_sy_list      = [];
+$grad_students     = [];
+$grad_boys         = 0;
+$grad_girls        = 0;
+$grad_total        = 0;
+
+if ($view_graduated) {
+    $grad_sy_list = $conn->query("
+        SELECT e.school_year, COUNT(DISTINCT e.student_id) AS cnt
+        FROM enrollment_form e
+        WHERE e.status = 'Graduated'
+          AND e.school_year IS NOT NULL AND e.school_year != ''
+        GROUP BY e.school_year
+        ORDER BY e.school_year DESC
+    ")->fetch_all(MYSQLI_ASSOC) ?: [];
+
+    if ($grad_sy === '' && !empty($grad_sy_list)) {
+        $grad_sy = $grad_sy_list[0]['school_year'];
+    }
+
+    $gsql = "
+        SELECT s.student_id, s.student_id_number, s.lrn,
+               s.first_name, s.middle_name, s.last_name, s.ext_name,
+               s.sex, s.age,
+               e.grade_level, e.strand, e.program, e.section, e.school_year, e.term
+        FROM students_info s
+        INNER JOIN enrollment_form e ON s.student_id = e.student_id
+        WHERE e.status = 'Graduated'
+    ";
+    $gparams = []; $gtypes = "";
+    if ($grad_sy !== '') {
+        $gsql .= " AND e.school_year = ?";
+        $gparams[] = $grad_sy; $gtypes .= "s";
+    }
+    $gsql .= " ORDER BY s.last_name ASC, s.first_name ASC";
+
+    $gstmt = $conn->prepare($gsql);
+    if (!empty($gparams)) $gstmt->bind_param($gtypes, ...$gparams);
+    $gstmt->execute();
+    $grad_students = $gstmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $gstmt->close();
+
+    foreach ($grad_students as $gs_stu) {
+        if (strcasecmp($gs_stu['sex'] ?? '', 'Male')   === 0) $grad_boys++;
+        if (strcasecmp($gs_stu['sex'] ?? '', 'Female') === 0) $grad_girls++;
+    }
+    $grad_total = count($grad_students);
+}
+
+/* ═══════════════════════════════════════════════════════════
    PAGINATION
    ═══════════════════════════════════════════════════════════ */
 $page     = max(1, (int)($_GET['page'] ?? 1));
@@ -268,7 +323,7 @@ $per_page = 50;
 $offset   = ($page - 1) * $per_page;
 
 /* ═══════════════════════════════════════════════════════════
-   POST: AUTO SECTION ASSIGNMENT — CSRF protected
+   POST: AUTO SECTION ASSIGNMENT
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auto_assign'])) {
     verify_csrf();
@@ -417,56 +472,120 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auto_assign'])) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   MAIN STUDENTS QUERY
+   MAIN STUDENTS QUERY  (skipped when in graduated view)
    ═══════════════════════════════════════════════════════════ */
-$sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.ext_name, s.sex, s.age, e.grade_level, e.school_year, e.section, e.strand, e.track, e.program, e.term, COALESCE(e.status, 'Active') AS status, COUNT(*) OVER() as total_count FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE 1=1";
+$all_students        = [];
+$total_students      = 0;
+$total_pages         = 0;
+$total_all_students  = 0;
+$boys                = 0;
+$girls               = 0;
+$sec_count           = 0;
 
-$params = []; $types = "";
-if ($search !== '')      { $sql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)"; $like = "%$search%"; $params = [$like,$like,$like,$like]; $types = "ssss"; }
-if ($grade_level !== '') { $sql .= " AND e.grade_level = ?"; $params[] = $grade_level; $types .= "s"; }
-if ($school_year !== '') { $sql .= " AND e.school_year = ?"; $params[] = $school_year; $types .= "s"; }
-if ($status !== '' && $status !== 'All') { $sql .= " AND COALESCE(e.status, 'Active') = ?"; $params[] = $status; $types .= "s"; }
-$sql .= " ORDER BY s.last_name ASC, s.first_name ASC LIMIT ? OFFSET ?";
-$params[] = $per_page; $types .= "i";
-$params[] = $offset;   $types .= "i";
+if (!$view_graduated) {
+    $sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.ext_name, s.sex, s.age, e.grade_level, e.school_year, e.section, e.strand, e.track, e.program, e.term, COALESCE(e.status, 'Active') AS status, COUNT(*) OVER() as total_count FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE 1=1";
 
-$stmt = $conn->prepare($sql);
-if (!empty($params)) $stmt->bind_param($types, ...$params);
-$stmt->execute();
-$all_students = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-$total_students = !empty($all_students) ? (int)$all_students[0]['total_count'] : 0;
-$total_pages = ceil($total_students / $per_page);
-$stmt->close();
+    $params = []; $types = "";
+    if ($search !== '')      { $sql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)"; $like = "%$search%"; $params = [$like,$like,$like,$like]; $types = "ssss"; }
+    if ($grade_level !== '') { $sql .= " AND e.grade_level = ?"; $params[] = $grade_level; $types .= "s"; }
+    if ($school_year !== '') { $sql .= " AND e.school_year = ?"; $params[] = $school_year; $types .= "s"; }
 
-// Gender Stats
-$gsql = "SELECT SUM(CASE WHEN UPPER(TRIM(s.sex)) IN ('MALE','M') THEN 1 ELSE 0 END) AS boys, SUM(CASE WHEN UPPER(TRIM(s.sex)) IN ('FEMALE','F') THEN 1 ELSE 0 END) AS girls FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE 1=1";
-$gp = []; $gt = "";
-if ($search !== '')      { $gsql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ?)"; $gp = [$like,$like,$like]; $gt = "sss"; }
-if ($grade_level !== '') { $gsql .= " AND e.grade_level = ?"; $gp[] = $grade_level; $gt .= "s"; }
-if ($school_year !== '') { $gsql .= " AND e.school_year = ?"; $gp[] = $school_year; $gt .= "s"; }
-if ($status !== '' && $status !== 'All') { $gsql .= " AND COALESCE(e.status, 'Active') = ?"; $gp[] = $status; $gt .= "s"; }
-$gs = $conn->prepare($gsql); if(!empty($gp)) $gs->bind_param($gt,...$gp); $gs->execute(); $st = $gs->get_result()->fetch_assoc(); $gs->close();
-$boys = (int)($st['boys']??0); $girls = (int)($st['girls']??0);
+    // ─────────────────────────────────────────────────────────
+    // Status filter
+    //   - empty / All  → exclude Graduated AND Pending
+    //   - Graduated    → show only Graduated
+    //   - anything else→ show only that status
+    // ─────────────────────────────────────────────────────────
+    if ($status === '' || $status === 'All') {
+        $sql .= " AND COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending')";
+    } else {
+        $sql .= " AND COALESCE(e.status, 'Active') = ?";
+        $params[] = $status; $types .= "s";
+    }
 
-// Section count — used only for the stat tile
-$sec_count_row = $conn->query("SELECT COUNT(DISTINCT section) AS c FROM enrollment_form WHERE section IS NOT NULL AND section != ''")->fetch_assoc();
-$sec_count = (int)($sec_count_row['c'] ?? 0);
+    $sql .= " ORDER BY s.last_name ASC, s.first_name ASC LIMIT ? OFFSET ?";
+    $params[] = $per_page; $types .= "i";
+    $params[] = $offset;   $types .= "i";
 
-// Promote preview counts
+    $stmt = $conn->prepare($sql);
+    if (!empty($params)) $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $all_students = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $total_students = !empty($all_students) ? (int)$all_students[0]['total_count'] : 0;
+    $total_pages = ceil($total_students / $per_page);
+    $stmt->close();
+
+    // ─────────────────────────────────────────────────────────
+    // TOTAL STUDENTS STAT — excludes Graduated AND Pending.
+    // Search / grade / school-year filters still apply.
+    // ─────────────────────────────────────────────────────────
+    $tsql = "SELECT COUNT(*) AS c
+             FROM students_info s
+             INNER JOIN enrollment_form e ON s.student_id = e.student_id
+             WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending')";
+    $tp = []; $tt = "";
+    if ($search !== '') {
+        $tlike = "%$search%";
+        $tsql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)";
+        array_push($tp, $tlike, $tlike, $tlike, $tlike);
+        $tt .= "ssss";
+    }
+    if ($grade_level !== '') { $tsql .= " AND e.grade_level = ?"; $tp[] = $grade_level; $tt .= "s"; }
+    if ($school_year !== '') { $tsql .= " AND e.school_year = ?"; $tp[] = $school_year; $tt .= "s"; }
+
+    $ts = $conn->prepare($tsql);
+    if (!empty($tp)) $ts->bind_param($tt, ...$tp);
+    $ts->execute();
+    $ts_row = $ts->get_result()->fetch_assoc();
+    $ts->close();
+    $total_all_students = (int)($ts_row['c'] ?? 0);
+
+    // ─────────────────────────────────────────────────────────
+    // Gender stats — also excludes Graduated AND Pending
+    // ─────────────────────────────────────────────────────────
+    $gsql = "SELECT
+                SUM(CASE WHEN UPPER(TRIM(s.sex)) IN ('MALE','M') THEN 1 ELSE 0 END) AS boys,
+                SUM(CASE WHEN UPPER(TRIM(s.sex)) IN ('FEMALE','F') THEN 1 ELSE 0 END) AS girls
+             FROM students_info s
+             INNER JOIN enrollment_form e ON s.student_id = e.student_id
+             WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending')";
+    $gp = []; $gt = "";
+    if ($search !== '')      { $gsql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ?)"; $gp = [$like,$like,$like]; $gt = "sss"; }
+    if ($grade_level !== '') { $gsql .= " AND e.grade_level = ?"; $gp[] = $grade_level; $gt .= "s"; }
+    if ($school_year !== '') { $gsql .= " AND e.school_year = ?"; $gp[] = $school_year; $gt .= "s"; }
+    $gs = $conn->prepare($gsql);
+    if (!empty($gp)) $gs->bind_param($gt, ...$gp);
+    $gs->execute();
+    $st = $gs->get_result()->fetch_assoc();
+    $gs->close();
+    $boys  = (int)($st['boys']  ?? 0);
+    $girls = (int)($st['girls'] ?? 0);
+
+    // Section count — excludes Graduated AND Pending
+    $sec_count_row = $conn->query("
+        SELECT COUNT(DISTINCT section) AS c
+        FROM enrollment_form
+        WHERE section IS NOT NULL AND section != ''
+          AND COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending')
+    ")->fetch_assoc();
+    $sec_count = (int)($sec_count_row['c'] ?? 0);
+}
+
+// Promote preview counts (unchanged — active students only)
 $promote_preview_11 = 0; $promote_preview_12 = 0;
-if ($school_year) {
+if (!$view_graduated && $school_year) {
     $ps = $conn->prepare("SELECT COUNT(*) as cnt FROM enrollment_form WHERE grade_level = 'Grade 11' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
     $ps->bind_param("s", $school_year); $ps->execute(); $pr = $ps->get_result()->fetch_assoc(); $promote_preview_11 = (int)($pr['cnt']??0); $ps->close();
     $ps = $conn->prepare("SELECT COUNT(*) as cnt FROM enrollment_form WHERE grade_level = 'Grade 12' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
     $ps->bind_param("s", $school_year); $ps->execute(); $pr = $ps->get_result()->fetch_assoc(); $promote_preview_12 = (int)($pr['cnt']??0); $ps->close();
 }
 
-$show_promote_mode = isset($_GET['show_promotable']) && $school_year;
+$show_promote_mode = !$view_graduated && isset($_GET['show_promotable']) && $school_year;
 
 // Dropdowns
 $grade_levels = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' ORDER BY grade_level ASC");
 $school_years = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC");
-$possible_statuses = ['Active', 'Transferred', 'Stopped', 'Dropped', 'Graduated'];
+$possible_statuses = ['Active', 'Pending', 'Transferred', 'Stopped', 'Dropped', 'Graduated'];
 $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 'dark' : 'light';
 
 $base_url = "?search=" . urlencode($search) . "&grade_level=" . urlencode($grade_level) . "&school_year=" . urlencode($school_year) . "&status=" . urlencode($status);
@@ -478,7 +597,6 @@ if (count($parts) === 2) {
     $next_sy = ((int)$parts[0] + 1) . '-' . ((int)$parts[1] + 1);
 }
 
-// Sections visible in current filtered set — used by promote-selection filter
 $selection_sections = [];
 if ($show_promote_mode) {
     foreach ($all_students as $s) {
@@ -491,14 +609,14 @@ if ($show_promote_mode) {
 }
 
 $csrf_token = csrf_token();
-$can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_preview_12 > 0));
+$can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 > 0 || $promote_preview_12 > 0));
 ?>
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="<?= $theme ?>">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Student Profiles • USAT Admin</title>
+    <title><?= $view_graduated ? 'Graduated Students' : 'Student Profiles' ?> • USAT Admin</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -568,10 +686,12 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         .stat-card.tone-green::before{background:var(--green)}
         .stat-card.tone-red::before{background:var(--red)}
         .stat-card.tone-purple::before{background:var(--purple)}
+        .stat-card.tone-amber::before{background:var(--amber)}
         .stat-icon{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex-shrink:0;background:var(--accent-soft);color:var(--accent)}
         .tone-green .stat-icon{background:var(--green-soft);color:var(--green)}
         .tone-red .stat-icon{background:var(--red-soft);color:var(--red)}
         .tone-purple .stat-icon{background:var(--purple-soft);color:var(--purple)}
+        .tone-amber .stat-icon{background:var(--amber-soft);color:var(--amber)}
         .stat-value{font-size:1.55rem;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.1}
         .stat-label{font-size:.7rem;color:var(--text-2);text-transform:uppercase;letter-spacing:.6px;margin-top:.2rem;font-weight:600}
 
@@ -624,6 +744,7 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         .student-card.selected{border-color:var(--amber);box-shadow:0 0 0 3px color-mix(in srgb,var(--amber) 22%,transparent);background:color-mix(in srgb,var(--amber) 5%,var(--surface))}
         .student-card .select-check{position:absolute;top:.85rem;right:.85rem;width:20px;height:20px;accent-color:var(--amber);cursor:pointer;z-index:2}
         .student-avatar{width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:1.05rem;flex-shrink:0;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent)}
+        .student-card.graduated .student-avatar{background:linear-gradient(135deg,#059669,#047857);box-shadow:0 0 0 3px rgba(5,150,105,.15)}
         .student-info{flex:1;min-width:0}
         .student-info h4{font-size:.92rem;font-weight:600;margin:0 0 .15rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:1.6rem;color:var(--text)}
         .student-info .meta{font-size:.74rem;color:var(--text-2);font-variant-numeric:tabular-nums}
@@ -633,6 +754,7 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         .tag.accent{background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 22%,transparent)}
         .tag.promotable{background:var(--amber-soft);color:var(--amber);border-color:color-mix(in srgb,var(--amber) 25%,transparent)}
         .tag.initials{background:var(--purple-soft);color:var(--purple);border-color:color-mix(in srgb,var(--purple) 22%,transparent);font-weight:700;letter-spacing:.4px}
+        .tag.grad-sy{background:var(--green-soft);color:var(--green);border-color:color-mix(in srgb,var(--green) 25%,transparent);font-weight:700}
 
         .pill{display:inline-flex;align-items:center;gap:.4rem;padding:.22rem .6rem;border-radius:999px;font-size:.7rem;font-weight:600;border:1px solid transparent}
         .pill::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.9}
@@ -675,6 +797,8 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         .btn-outline-primary:hover{background:var(--accent);border-color:var(--accent);color:#fff}
         .btn-outline-secondary{color:var(--text-2);border-color:var(--border)}
         .btn-outline-secondary:hover{background:var(--surface-2);color:var(--text);border-color:var(--border-strong)}
+        .btn-outline-success{color:var(--green);border-color:color-mix(in srgb,var(--green) 35%,transparent)}
+        .btn-outline-success:hover{background:var(--green);color:#fff;border-color:var(--green)}
         .btn-icon{width:32px;height:32px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:9px}
         .theme-btn{width:38px;height:38px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
         .theme-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
@@ -759,6 +883,31 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         .aa-check-body{flex:1}
         .aa-check-title{font-size:.85rem;font-weight:700;color:var(--text);margin-bottom:.15rem}
         .aa-check-desc{font-size:.75rem;color:var(--text-2);line-height:1.45}
+
+        .grad-hero{
+            background:linear-gradient(135deg,#059669,#047857);color:#fff;
+            border-radius:var(--radius-lg);padding:1.35rem 1.5rem;margin-bottom:1.25rem;
+            display:flex;align-items:center;gap:1rem;flex-wrap:wrap;
+            position:relative;overflow:hidden;
+            box-shadow:0 12px 32px -12px rgba(5,150,105,.55);
+        }
+        .grad-hero::after{content:'';position:absolute;right:-40px;top:-40px;width:180px;height:180px;border-radius:50%;background:rgba(255,255,255,.08)}
+        .grad-hero-icon{
+            width:56px;height:56px;border-radius:16px;
+            background:rgba(255,255,255,.18);
+            border:2px solid rgba(255,255,255,.3);
+            display:flex;align-items:center;justify-content:center;
+            font-size:1.5rem;flex-shrink:0;
+            backdrop-filter:blur(4px);z-index:1;
+        }
+        .grad-hero-body{flex:1;min-width:0;z-index:1}
+        .grad-hero-body h4{font-size:1.15rem;font-weight:700;margin:0 0 .25rem;letter-spacing:-.01em}
+        .grad-hero-body p{margin:0;font-size:.85rem;opacity:.92}
+        .grad-hero .btn-light{background:rgba(255,255,255,.95);color:var(--green);border:none;font-weight:600;box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:1}
+        .grad-hero .btn-light:hover{background:#fff;transform:translateY(-1px);color:var(--green)}
+
+        .grad-filter{display:grid;grid-template-columns:minmax(240px,1fr) auto auto;gap:.75rem;align-items:end}
+        @media (max-width:640px){ .grad-filter{grid-template-columns:1fr} }
 
         @media (max-width:1280px){
             .filter-bar{grid-template-columns:minmax(200px,1.6fr) 1fr 1fr auto}
@@ -858,6 +1007,181 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         </div>
         <?php unset($_SESSION['info']); endif; ?>
 
+<?php if ($view_graduated): ?>
+    <!-- ═══════════════════════════════════════════════════════
+         GRADUATED STUDENTS VIEW
+         ═══════════════════════════════════════════════════════ -->
+
+    <div class="topbar">
+        <div class="d-flex align-items-center gap-3">
+            <button class="menu-toggle" id="menuToggle"><i class="bi bi-list fs-5"></i></button>
+            <div>
+                <h2>Graduated Students</h2>
+                <p class="sub">Browse graduates by school year</p>
+            </div>
+        </div>
+        <div class="d-flex gap-2 align-items-center">
+            <a href="student_profile.php" class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-arrow-left me-1"></i> Back to Students
+            </a>
+            <button class="theme-btn" id="themeToggle" title="Toggle theme">
+                <i class="bi bi-moon-stars-fill" id="themeIcon"></i>
+            </button>
+        </div>
+    </div>
+
+    <div class="grad-hero">
+        <div class="grad-hero-icon"><i class="bi bi-mortarboard-fill"></i></div>
+        <div class="grad-hero-body">
+            <h4>Graduated Students</h4>
+            <p>
+                <?php if ($grad_sy !== ''): ?>
+                    Showing graduates from <strong>School Year <?= htmlspecialchars($grad_sy) ?></strong>
+                <?php else: ?>
+                    Showing all graduates across every school year
+                <?php endif; ?>
+            </p>
+        </div>
+        <a href="export_students.php?status_filter=Graduated<?= $grad_sy !== '' ? '&school_year=' . urlencode($grad_sy) : '' ?>"
+           class="btn btn-light btn-sm">
+            <i class="bi bi-download me-1"></i> Export
+        </a>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h3><i class="bi bi-funnel"></i> Filter by School Year</h3>
+            <span class="cell-muted" style="font-size:.75rem">
+                <i class="bi bi-mortarboard-fill me-1"></i> <?= number_format($grad_total) ?> graduate<?= $grad_total === 1 ? '' : 's' ?>
+            </span>
+        </div>
+        <div class="card-body">
+            <form method="GET" class="grad-filter">
+                <input type="hidden" name="view" value="graduated">
+                <div class="field" style="display:flex;flex-direction:column;gap:.3rem">
+                    <label style="font-size:.68rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px">School Year</label>
+                    <select name="grad_sy" onchange="this.form.submit()"
+                            style="background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:.5rem .8rem;font-size:.85rem;color:var(--text);font-family:inherit;width:100%">
+                        <?php if (empty($grad_sy_list)): ?>
+                            <option value="">No graduates recorded</option>
+                        <?php else: ?>
+                            <?php foreach ($grad_sy_list as $g): ?>
+                                <option value="<?= htmlspecialchars($g['school_year']) ?>" <?= $grad_sy === $g['school_year'] ? 'selected' : '' ?>>
+                                    SY <?= htmlspecialchars($g['school_year']) ?> — <?= (int)$g['cnt'] ?> graduate<?= (int)$g['cnt'] === 1 ? '' : 's' ?>
+                                </option>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary btn-sm">
+                    <i class="bi bi-check2 me-1"></i> Apply
+                </button>
+                <a href="?view=graduated" class="btn btn-outline-secondary btn-sm">
+                    <i class="bi bi-x-circle me-1"></i> Reset
+                </a>
+            </form>
+        </div>
+    </div>
+
+    <div class="stat-grid">
+        <div class="stat-card tone-green">
+            <div class="stat-icon"><i class="bi bi-mortarboard-fill"></i></div>
+            <div>
+                <div class="stat-value"><?= number_format($grad_total) ?></div>
+                <div class="stat-label">Total Graduates</div>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon"><i class="bi bi-gender-male"></i></div>
+            <div>
+                <div class="stat-value"><?= number_format($grad_boys) ?></div>
+                <div class="stat-label">Male</div>
+            </div>
+        </div>
+        <div class="stat-card tone-red">
+            <div class="stat-icon"><i class="bi bi-gender-female"></i></div>
+            <div>
+                <div class="stat-value"><?= number_format($grad_girls) ?></div>
+                <div class="stat-label">Female</div>
+            </div>
+        </div>
+        <div class="stat-card tone-purple">
+            <div class="stat-icon"><i class="bi bi-calendar-range"></i></div>
+            <div>
+                <div class="stat-value" style="font-size:1.15rem"><?= htmlspecialchars($grad_sy ?: 'All') ?></div>
+                <div class="stat-label">School Year</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h3>
+                <i class="bi bi-people"></i> Graduates
+                <?php if ($grad_sy !== ''): ?>
+                    <span class="cell-muted" style="font-weight:500;font-size:.85rem">— SY <?= htmlspecialchars($grad_sy) ?></span>
+                <?php endif; ?>
+                <span class="cell-muted" style="font-weight:500;font-size:.85rem">(<?= number_format($grad_total) ?>)</span>
+            </h3>
+        </div>
+        <div class="card-body">
+            <?php if (empty($grad_students)): ?>
+                <div class="empty">
+                    <div class="empty-icon"><i class="bi bi-mortarboard"></i></div>
+                    <div class="empty-title">No graduates found</div>
+                    <div class="empty-sub">Try selecting a different school year, or check that graduates have been marked.</div>
+                </div>
+            <?php else: ?>
+                <div class="student-grid">
+                    <?php foreach ($grad_students as $g):
+                        $name = htmlspecialchars(formatStudentName($g));
+                        $strand_txt = $g['strand'] ?? '';
+                        $strand_init = $strand_txt !== '' ? strandInitials($strand_txt) : '—';
+                    ?>
+                    <div class="student-card graduated">
+                        <div class="student-avatar">
+                            <i class="bi bi-mortarboard-fill"></i>
+                        </div>
+                        <div class="student-info">
+                            <h4 title="<?= $name ?>"><?= $name ?></h4>
+                            <div class="meta">
+                                LRN <?= htmlspecialchars($g['lrn'] ?? '—') ?>
+                                <span style="opacity:.5">·</span>
+                                ID <?= htmlspecialchars($g['student_id_number'] ?? '—') ?>
+                            </div>
+                            <div class="tags">
+                                <span class="tag grad-sy">
+                                    <i class="bi bi-calendar-check"></i>
+                                    SY <?= htmlspecialchars($g['school_year'] ?? '—') ?>
+                                </span>
+                                <span class="tag accent"><?= htmlspecialchars($g['grade_level'] ?? '—') ?></span>
+                                <span class="tag"><?= htmlspecialchars($g['section'] ?? 'No Section') ?></span>
+                                <?php if ($strand_txt !== ''): ?>
+                                    <span class="tag" title="<?= htmlspecialchars($strand_txt) ?>">
+                                        <?= htmlspecialchars(strlen($strand_txt) > 24 ? substr($strand_txt, 0, 22) . '…' : $strand_txt) ?>
+                                    </span>
+                                    <span class="tag initials" title="Strand initials"><?= htmlspecialchars($strand_init) ?></span>
+                                <?php endif; ?>
+                                <span class="pill success">Graduated</span>
+                            </div>
+                            <div class="mt-2">
+                                <a href="view_student.php?id=<?= (int)$g['student_id'] ?>" class="btn btn-outline-primary btn-sm">
+                                    <i class="bi bi-eye me-1"></i> View Profile
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+    </div>
+
+<?php else: ?>
+    <!-- ═══════════════════════════════════════════════════════
+         NORMAL STUDENTS VIEW
+         ═══════════════════════════════════════════════════════ -->
+
     <div class="topbar">
         <div class="d-flex align-items-center gap-3">
             <button class="menu-toggle" id="menuToggle"><i class="bi bi-list fs-5"></i></button>
@@ -867,6 +1191,9 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
             </div>
         </div>
         <div class="d-flex gap-2 align-items-center">
+            <a href="?view=graduated" class="btn btn-outline-success btn-sm">
+                <i class="bi bi-mortarboard-fill me-1"></i> View Graduated
+            </a>
             <a href="sections_list.php" class="btn btn-outline-primary btn-sm">
                 <i class="bi bi-diagram-3 me-1"></i> Sections List
             </a>
@@ -880,7 +1207,7 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-people-fill"></i></div>
             <div>
-                <div class="stat-value"><?= number_format($total_students) ?></div>
+                <div class="stat-value"><?= number_format($total_all_students) ?></div>
                 <div class="stat-label">Total Students</div>
             </div>
         </div>
@@ -907,7 +1234,6 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         </div>
     </div>
 
-    <!-- FILTERS -->
     <div class="card">
         <div class="card-header">
             <h3><i class="bi bi-funnel"></i> Filters</h3>
@@ -951,7 +1277,7 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
                 <div class="field">
                     <label for="f_status">Status</label>
                     <select id="f_status" name="status">
-                        <option value="">All Status</option>
+                        <option value="">All (excl. Graduated &amp; Pending)</option>
                         <?php foreach($possible_statuses as $st): ?>
                             <option value="<?= $st ?>" <?= $st===$status?'selected':'' ?>><?= $st ?></option>
                         <?php endforeach; ?>
@@ -970,7 +1296,6 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         </div>
     </div>
 
-    <!-- BULK ACTIONS -->
     <div class="bulk-actions">
         <div class="bulk-action">
             <div class="bulk-action-icon"><i class="bi bi-magic"></i></div>
@@ -1012,7 +1337,6 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         </div>
     </div>
 
-    <!-- STUDENTS -->
     <div class="card">
         <div class="card-header">
             <h3>
@@ -1129,7 +1453,7 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
                         $pillClass = $st === 'Active' ? 'success' : ($st === 'Graduated' ? 'danger' : ($st === 'Dropped' ? 'danger' : 'warning'));
                         $search_blob = trim(($s['last_name'] ?? '') . ' ' . ($s['first_name'] ?? '') . ' ' . ($s['middle_name'] ?? '') . ' ' . ($s['lrn'] ?? '') . ' ' . ($s['student_id_number'] ?? ''));
                     ?>
-                    <div class="student-card"
+                    <div class="student-card <?= $st === 'Graduated' ? 'graduated' : '' ?>"
                          data-student-id="<?= (int)$s['student_id'] ?>"
                          data-section="<?= htmlspecialchars($s['section'] ?? '') ?>"
                          data-grade="<?= htmlspecialchars($s['grade_level'] ?? '') ?>"
@@ -1194,11 +1518,12 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
             <?php endif; ?>
         </div>
     </div>
+
+<?php endif; ?>
+
 </div>
 
-<!-- ══════════════════════════════════════════════════
-     PROMOTE MODAL
-     ══════════════════════════════════════════════════ -->
+<?php if (!$view_graduated): ?>
 <div class="modal fade promote-modal" id="promoteModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -1298,9 +1623,6 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
     </div>
 </div>
 
-<!-- ══════════════════════════════════════════════════
-     AUTO-ASSIGN MODAL
-     ══════════════════════════════════════════════════ -->
 <div class="modal fade aa-modal" id="autoAssignModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -1342,13 +1664,13 @@ $can_bulk   = ($school_year !== '' && ($promote_preview_11 > 0 || $promote_previ
         </div>
     </div>
 </div>
+<?php endif; ?>
 
 <div id="sidebarOverlay" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.5);backdrop-filter:blur(2px);z-index:199"
      onclick="document.getElementById('sidebar').classList.remove('open');this.style.display='none'"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-// ---------- Sidebar ----------
 const sb = document.getElementById('sidebar');
 const ov = document.getElementById('sidebarOverlay');
 document.getElementById('menuToggle').addEventListener('click', () => {
@@ -1356,7 +1678,6 @@ document.getElementById('menuToggle').addEventListener('click', () => {
     ov.style.display = sb.classList.contains('open') ? 'block' : 'none';
 });
 
-// ---------- Theme ----------
 const tb = document.getElementById('themeToggle');
 const ti = document.getElementById('themeIcon');
 const h  = document.documentElement;
@@ -1371,9 +1692,7 @@ function st(t) {
 })();
 tb.addEventListener('click', () => st(h.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark'));
 
-// ═══════════════════════════════════════════════
-// PROMOTE MODAL
-// ═══════════════════════════════════════════════
+<?php if (!$view_graduated): ?>
 const promoteModalEl = document.getElementById('promoteModal');
 const promoteModal   = new bootstrap.Modal(promoteModalEl);
 
@@ -1464,9 +1783,6 @@ document.getElementById('promoteFormMain').addEventListener('submit', function(e
     btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Processing...';
 });
 
-// ═══════════════════════════════════════════════
-// AUTO-ASSIGN MODAL
-// ═══════════════════════════════════════════════
 const aaModalEl = document.getElementById('autoAssignModal');
 const aaModal   = new bootstrap.Modal(aaModalEl);
 
@@ -1492,9 +1808,6 @@ document.getElementById('openAutoAssignBtn').addEventListener('click', function(
     aaModal.show();
 });
 
-// ═══════════════════════════════════════════════
-// SELECTION (promote mode)
-// ═══════════════════════════════════════════════
 function updateSelection() {
     const c = document.querySelectorAll('.student-checkbox:checked');
     const n = c.length;
@@ -1614,6 +1927,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     updateSelection();
 });
+<?php endif; ?>
 </script>
 </body>
 </html>

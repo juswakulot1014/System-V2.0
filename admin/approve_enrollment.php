@@ -53,8 +53,11 @@ if ($enr['status'] !== 'Pending') {
 
 $admin_id     = (int)$_SESSION['admin_id'];
 $student_name = trim(($enr['first_name'] ?? '') . ' ' . ($enr['last_name'] ?? ''));
+$student_id   = (int)$enr['student_id'];
 
-// ─── REJECT ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// REJECT → send decline email → delete the entire student
+// ═══════════════════════════════════════════════════════════
 if ($action === 'reject') {
     if ($reason === '') {
         $_SESSION['error'] = 'A rejection reason is required.';
@@ -62,44 +65,156 @@ if ($action === 'reject') {
         exit;
     }
 
-    $upd = $conn->prepare("
-        UPDATE enrollment_form
-        SET status = 'Dropped', rejection_reason = ?, approved_by = ?, approved_at = NOW()
-        WHERE enrollment_id = ? AND status = 'Pending'
-    ");
-    $upd->bind_param('sii', $reason, $admin_id, $enrollment_id);
-    $upd->execute();
-    $upd->close();
-
-    audit_log($conn, 'enrollment.reject', [
-        'type'          => 'student',
-        'id'            => (int)$enr['student_id'],
-        'enrollment_id' => $enrollment_id,
-        'reason'        => $reason,
-    ]);
-
-    notify_registrar($conn, $student_name, $enr, 'rejected', $reason);
-
-    $email_note = '';
-    if (!empty($enr['email'])) {
-        $subject = 'Enrollment Application Update — USAT College';
-        $body    = rejection_email_html($student_name, $enr, $reason);
-        $r       = send_mail($enr['email'], $subject, $body);
-        log_email($conn, $enrollment_id, (int)$enr['student_id'], $enr['email'], $subject, $r, $admin_id);
-
-        $email_note = $r['ok']
-            ? " Notification email sent to {$enr['email']}."
-            : format_email_failure_note($enr['email'], $r);
-    } else {
-        $email_note = " (No email on file — student was not notified.)";
+    // ── 1. Capture file paths BEFORE any deletion ──
+    $doc_files = [];
+    $dq = $conn->prepare("SELECT file_path FROM entrance_documents WHERE student_id = ? AND file_path IS NOT NULL");
+    if ($dq) {
+        $dq->bind_param('i', $student_id);
+        $dq->execute();
+        $dres = $dq->get_result();
+        while ($d = $dres->fetch_assoc()) {
+            if (!empty($d['file_path'])) {
+                $doc_files[] = DOCUMENTS_DIR . basename($d['file_path']);
+            }
+        }
+        $dq->close();
     }
 
-    $_SESSION['success'] = "Enrollment rejected for {$student_name}.{$email_note}";
+    $photo_abs = null;
+    $pq = $conn->prepare("SELECT photo FROM students_info WHERE student_id = ?");
+    if ($pq) {
+        $pq->bind_param('i', $student_id);
+        $pq->execute();
+        $prow = $pq->get_result()->fetch_assoc();
+        $pq->close();
+        if (!empty($prow['photo'])) {
+            $photo_abs = student_photo_abs_path($prow['photo']);
+        }
+    }
+
+    // ── 2. Send the decline email (student row still exists here) ──
+    $email_note    = '';
+    $email_sent    = false;
+    $email_target  = $enr['email'] ?? '';
+
+    if (!empty($email_target)) {
+        $subject = 'Enrollment Application Declined — USAT College Sagay City Inc.';
+        $body    = rejection_email_html($student_name, $enr, $reason);
+        $result  = send_mail($email_target, $subject, $body);
+
+        log_email($conn, $enrollment_id, $student_id, $email_target, $subject, $result, $admin_id);
+
+        if ($result['ok']) {
+            $email_sent  = true;
+            $email_note  = " A decline notification was sent to {$email_target}.";
+        } else {
+            $email_note  = format_email_failure_note($email_target, $result);
+        }
+    } else {
+        $email_note = ' (No email on file — the student was not notified.)';
+    }
+
+    // ── 3. Notify the registrar (best-effort, never fatal) ──
+    notify_registrar($conn, $student_name, $enr, 'rejected', $reason);
+
+    // ── 4. Audit the decision BEFORE we lose the target row ──
+    audit_log($conn, 'enrollment.reject', [
+        'type'           => 'student',
+        'id'             => $student_id,
+        'enrollment_id'  => $enrollment_id,
+        'reason'         => $reason,
+        'email'          => $email_target ?: null,
+        'email_sent'     => $email_sent,
+        'student_name'   => $student_name,
+        'student_id_no'  => $enr['student_id_number'] ?? null,
+        'school_year'    => $enr['school_year']   ?? null,
+        'grade_level'    => $enr['grade_level']   ?? null,
+        'strand'         => $enr['strand']        ?? null,
+    ]);
+
+    // ── 5. Delete the entire student record inside one transaction ──
+    $conn->begin_transaction();
+    try {
+        // Child tables — order matters if FKs are enforced (safest first).
+        $child_tables = [
+            'student_grades',
+            'entrance_documents',
+            'educational_history',
+            'addresses',
+            'parents_info',
+            'enrollment_email_log',
+            'document_access_log',
+            'student_status_history',
+            'enrollment_form',
+        ];
+
+        foreach ($child_tables as $tbl) {
+            // Skip tables that don't exist in this schema — don't fail the whole reject.
+            $del = $conn->prepare("DELETE FROM `$tbl` WHERE student_id = ?");
+            if (!$del) {
+                // Table probably missing — log and continue
+                error_log("reject_enrollment: could not prepare DELETE on {$tbl}: " . $conn->error);
+                continue;
+            }
+            $del->bind_param('i', $student_id);
+            $del->execute();
+            $del->close();
+        }
+
+        // Finally the master row
+        $del = $conn->prepare("DELETE FROM students_info WHERE student_id = ?");
+        $del->bind_param('i', $student_id);
+        $del->execute();
+        $deleted_rows = $del->affected_rows;
+        $del->close();
+
+        if ($deleted_rows === 0) {
+            throw new Exception('Student row was not found when deleting.');
+        }
+
+        $conn->commit();
+
+        // ── 6. Only NOW unlink files from disk ──
+        $root = realpath(DOCUMENTS_DIR);
+        foreach ($doc_files as $abs) {
+            $real = realpath($abs);
+            if ($real && $root && str_starts_with($real, $root . DIRECTORY_SEPARATOR)) {
+                @unlink($real);
+            }
+        }
+        if ($photo_abs && is_file($photo_abs)) {
+            @unlink($photo_abs);
+        }
+
+        // ── 7. Log the deletion for posterity ──
+        audit_log($conn, 'enrollment.reject_delete', [
+            'type'          => 'student',
+            'id'            => $student_id,
+            'enrollment_id' => $enrollment_id,
+            'reason'        => $reason,
+            'files_deleted' => count($doc_files) + ($photo_abs ? 1 : 0),
+        ]);
+
+        $_SESSION['success'] =
+            "Enrollment declined for {$student_name}.{$email_note} "
+          . "The student record and all related data have been removed from the system.";
+
+    } catch (\Throwable $e) {
+        $conn->rollback();
+        error_log('reject_enrollment: deletion failed: ' . $e->getMessage());
+
+        $_SESSION['error'] =
+            "Decline email was processed, but the student record could NOT be fully deleted: "
+          . $e->getMessage();
+    }
+
     header('Location: pending_enrollments.php');
     exit;
 }
 
-// ─── APPROVE ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// APPROVE
+// ═══════════════════════════════════════════════════════════
 $conn->begin_transaction();
 try {
     $upd = $conn->prepare("
@@ -312,6 +427,11 @@ function rejection_email_html(string $name, array $e, string $reason): string
     $name   = htmlspecialchars($name);
     $reason = htmlspecialchars($reason);
     $year   = date('Y');
+    $idno   = htmlspecialchars($e['student_id_number'] ?? '—');
+    $lrn    = htmlspecialchars($e['lrn'] ?? '—');
+    $sy     = htmlspecialchars($e['school_year'] ?? '—');
+    $grade  = htmlspecialchars($e['grade_level'] ?? '—');
+    $strand = htmlspecialchars($e['strand'] ?: '—');
 
     return <<<HTML
 <!DOCTYPE html>
@@ -319,24 +439,35 @@ function rejection_email_html(string $name, array $e, string $reason): string
 <body style="margin:0;padding:0;background:#f4f6fb;font-family:Arial,sans-serif;color:#0f172a">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6fb;padding:32px 0">
   <tr><td align="center">
-    <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:16px;overflow:hidden">
+    <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 12px 32px rgba(15,23,42,.1)">
       <tr><td style="background:#dc2626;padding:24px 32px;text-align:center;color:#fff">
-        <h1 style="margin:0;font-size:18px">Enrollment Update</h1>
+        <h1 style="margin:0;font-size:18px">Enrollment Application Declined</h1>
       </td></tr>
       <tr><td style="padding:32px">
         <p style="margin:0 0 16px;font-size:16px">Dear <strong>{$name}</strong>,</p>
         <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155">
-          After reviewing your enrollment application, we are unable to approve it at this time.
+          After reviewing your enrollment application, we regret to inform you that it has been <strong style="color:#dc2626">declined</strong>.
         </p>
+
+        <table width="100%" cellpadding="10" cellspacing="0" style="background:#f8fafc;border-radius:12px;margin:18px 0">
+          <tr><td style="width:40%;color:#64748b;font-size:13px;font-weight:600">Student ID</td><td style="font-weight:600">{$idno}</td></tr>
+          <tr><td style="color:#64748b;font-size:13px;font-weight:600">LRN</td><td>{$lrn}</td></tr>
+          <tr><td style="color:#64748b;font-size:13px;font-weight:600">School Year</td><td>{$sy}</td></tr>
+          <tr><td style="color:#64748b;font-size:13px;font-weight:600">Grade Level</td><td>{$grade}</td></tr>
+          <tr><td style="color:#64748b;font-size:13px;font-weight:600">Strand</td><td>{$strand}</td></tr>
+        </table>
+
         <div style="background:#fef2f2;border-left:4px solid #dc2626;padding:14px 18px;border-radius:8px;margin:20px 0">
           <strong style="color:#991b1b;display:block;margin-bottom:6px;font-size:13px">Reason</strong>
-          <div style="color:#7f1d1d">{$reason}</div>
+          <div style="color:#7f1d1d;line-height:1.6">{$reason}</div>
         </div>
-        <p style="margin:0;font-size:14px;color:#334155">
-          Please contact the registrar's office if you have questions or wish to resubmit.
+
+        <p style="margin:0;font-size:14px;line-height:1.6;color:#334155">
+          Please contact the registrar's office if you have questions or wish to re-apply.
         </p>
       </td></tr>
-      <tr><td style="background:#f8fafc;padding:16px;text-align:center;font-size:12px;color:#64748b">
+      <tr><td style="background:#f8fafc;padding:16px;text-align:center;font-size:12px;color:#64748b;border-top:1px solid #e5e7eb">
+        This is an automated message. Please do not reply.<br>
         © {$year} USAT College Sagay City Inc.
       </td></tr>
     </table>
@@ -365,7 +496,7 @@ function registrar_notification_html(string $student_name, array $e, string $act
     $color   = $isApprove ? '#059669' : '#dc2626';
     $bgColor = $isApprove ? '#d1fae5' : '#fee2e2';
     $label   = $isApprove ? 'APPROVED' : 'REJECTED';
-    $verb    = $isApprove ? 'approved' : 'rejected';
+    $verb    = $isApprove ? 'approved' : 'declined and deleted';
 
     $reasonBlock = '';
     if (!$isApprove && $reason !== null && $reason !== '') {
@@ -380,7 +511,8 @@ function registrar_notification_html(string $student_name, array $e, string $act
 
     $studentNote = $isApprove
         ? "The student has been sent a confirmation email at <strong>{$email}</strong>."
-        : "The student has been sent a notification email at <strong>{$email}</strong>.";
+        : "The student has been sent a decline notification email at <strong>{$email}</strong>. "
+        . "The student record and all related data have been <strong>removed from the system</strong>.";
 
     return <<<HTML
 <!DOCTYPE html>

@@ -1,5 +1,4 @@
 <?php
-//rwequired
 require_once __DIR__ . '/../config/bootstrap.php';
 require_once __DIR__ . '/../config/audit.php';
 
@@ -9,13 +8,53 @@ $remember_cookie_name   = 'admin_remember_token';
 $remember_duration_days = 30;
 $remember_duration_secs = 86400 * $remember_duration_days;
 
+// ---------------------------------------------------------------------------
+// Rate limiting — DB-backed so it survives a session reset.
+// ---------------------------------------------------------------------------
+$MAX_LOGIN_ATTEMPTS = 3;
+$LOGIN_WINDOW       = 900;
+
 $rl_key = 'login_' . ($_SERVER['REMOTE_ADDR'] ?? 'unknown');
-$rl = rate_limit_check($rl_key, 3, 900);
+$rl = rate_limit_check($rl_key, $MAX_LOGIN_ATTEMPTS, $LOGIN_WINDOW, $conn);
 
 if ($rl['locked']) {
-    $mins = (int)ceil($rl['window_left'] / 60);
+    $mins  = max(1, (int)ceil($rl['window_left'] / 60));
     $error = "Too many login attempts. Please try again in {$mins} minute(s).";
 }
+
+/**
+ * Remember-me cookie options.
+ *
+ * NOTE: SameSite=Lax is REQUIRED for remember-me to work reliably.
+ * With Strict, the cookie is not sent when the browser is launched
+ * fresh, restored from a previous session, or opened via bookmark —
+ * which is exactly when remember-me is supposed to kick in.
+ */
+$remember_cookie_opts = function (int $expires) use ($remember_cookie_name) {
+    return [
+        'expires'  => $expires,
+        'path'     => '/',
+        'domain'   => '',
+        'secure'   => is_https(),
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ];
+};
+
+/** Clear the remember-me cookie + DB token for the current session. */
+$clearRememberCookie = function () use ($conn, $remember_cookie_name, $remember_cookie_opts) {
+    if (!empty($_COOKIE[$remember_cookie_name])) {
+        $t = $_COOKIE[$remember_cookie_name];
+        $cl = $conn->prepare("UPDATE admins SET remember_token = NULL, remember_expires = NULL WHERE remember_token = ?");
+        if ($cl) {
+            $cl->bind_param('s', $t);
+            $cl->execute();
+            $cl->close();
+        }
+    }
+    setcookie($remember_cookie_name, '', $remember_cookie_opts(time() - 3600));
+    unset($_COOKIE[$remember_cookie_name]);
+};
 
 /* ---------- 1. Auto-login from Remember Me cookie ---------- */
 if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && empty($error)) {
@@ -44,6 +83,7 @@ if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && e
             $_SESSION['user_agent'] = $_SERVER['HTTP_USER_AGENT'] ?? '';
             $_SESSION['ip_address'] = $_SERVER['REMOTE_ADDR'] ?? '';
 
+            // Rotate the token for extra safety
             $new_token   = bin2hex(random_bytes(32));
             $new_expires = date('Y-m-d H:i:s', time() + $remember_duration_secs);
 
@@ -54,35 +94,15 @@ if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && e
                 $upd->close();
             }
 
-            setcookie($remember_cookie_name, $new_token, [
-                'expires'  => time() + $remember_duration_secs,
-                'path'     => '/',
-                'domain'   => '',
-                'secure'   => is_https(),
-                'httponly' => true,
-                'samesite' => 'Strict',
-            ]);
+            setcookie($remember_cookie_name, $new_token, $remember_cookie_opts(time() + $remember_duration_secs));
 
             audit_log($conn, 'admin.login_auto', ['type' => 'admin', 'id' => $admin['id']]);
             header('Location: dashboard.php');
             exit;
         }
 
-        // Invalid/expired token — clear it
-        setcookie($remember_cookie_name, '', [
-            'expires'  => time() - 3600,
-            'path'     => '/',
-            'domain'   => '',
-            'secure'   => is_https(),
-            'httponly' => true,
-            'samesite' => 'Strict',
-        ]);
-        $clear = $conn->prepare("UPDATE admins SET remember_token = NULL, remember_expires = NULL WHERE remember_token = ?");
-        if ($clear) {
-            $clear->bind_param('s', $token);
-            $clear->execute();
-            $clear->close();
-        }
+        // Invalid or expired token — clear it
+        $clearRememberCookie();
         $stmt->close();
     }
 }
@@ -91,6 +111,8 @@ if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && e
 if (isset($_SESSION['admin_id'])) {
     if (isset($_SESSION['user_agent'])
         && !hash_equals($_SESSION['user_agent'], $_SERVER['HTTP_USER_AGENT'] ?? '')) {
+        // Clear remember cookie too — a UA change while logged in is suspicious.
+        $clearRememberCookie();
         session_unset();
         session_destroy();
         header('Location: admin_login.php');
@@ -129,7 +151,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                 $admin = $res->fetch_assoc();
 
                 if (password_verify($password, $admin['password'])) {
-                    rate_limit_reset($rl_key);
+                    rate_limit_reset($rl_key, $conn);
                     session_regenerate_id(true);
 
                     $_SESSION['admin_id']   = $admin['id'];
@@ -158,30 +180,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                             $upd->execute();
                             $upd->close();
                         }
-                        setcookie($remember_cookie_name, $tk, [
-                            'expires'  => time() + $remember_duration_secs,
-                            'path'     => '/',
-                            'domain'   => '',
-                            'secure'   => is_https(),
-                            'httponly' => true,
-                            'samesite' => 'Strict',
-                        ]);
+                        // SameSite=Lax is the key fix — lets the cookie survive
+                        // fresh browser launches, bookmark clicks, etc.
+                        setcookie($remember_cookie_name, $tk, $remember_cookie_opts(time() + $remember_duration_secs));
                     } elseif (isset($_COOKIE[$remember_cookie_name])) {
-                        $ct = $_COOKIE[$remember_cookie_name];
-                        $cl = $conn->prepare("UPDATE admins SET remember_token = NULL, remember_expires = NULL WHERE remember_token = ?");
-                        if ($cl) {
-                            $cl->bind_param('s', $ct);
-                            $cl->execute();
-                            $cl->close();
-                        }
-                        setcookie($remember_cookie_name, '', [
-                            'expires'  => time() - 3600,
-                            'path'     => '/',
-                            'domain'   => '',
-                            'secure'   => is_https(),
-                            'httponly' => true,
-                            'samesite' => 'Strict',
-                        ]);
+                        $clearRememberCookie();
                     }
 
                     audit_log($conn, 'admin.login', ['type' => 'admin', 'id' => $admin['id']]);
@@ -189,15 +192,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                     exit;
                 }
 
-                rate_limit_hit($rl_key);
-                $rl = rate_limit_check($rl_key, 5, 900);
+                rate_limit_hit($rl_key, $LOGIN_WINDOW, $conn);
+                $rl = rate_limit_check($rl_key, $MAX_LOGIN_ATTEMPTS, $LOGIN_WINDOW, $conn);
                 $error = $rl['remaining'] > 0
                     ? "Invalid password. {$rl['remaining']} attempt(s) remaining."
                     : 'Too many login attempts. Please try again in 15 minutes.';
                 audit_log($conn, 'admin.login_failed', ['username' => $username]);
             } else {
-                rate_limit_hit($rl_key);
-                $rl = rate_limit_check($rl_key, 5, 900);
+                rate_limit_hit($rl_key, $LOGIN_WINDOW, $conn);
+                $rl = rate_limit_check($rl_key, $MAX_LOGIN_ATTEMPTS, $LOGIN_WINDOW, $conn);
                 $error = $rl['remaining'] > 0
                     ? "No account found with that username. {$rl['remaining']} attempt(s) remaining."
                     : 'Too many login attempts. Please try again in 15 minutes.';
@@ -215,7 +218,6 @@ if (isset($_GET['timeout'])) {
     $error = 'Your session has expired. Please login again.';
 }
 ?>
-
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
@@ -223,7 +225,6 @@ if (isset($_GET['timeout'])) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Login • USAT College Sagay City</title>
 
-    <!-- Security Headers -->
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="robots" content="noindex, nofollow">
 
@@ -578,7 +579,7 @@ if (isset($_GET['timeout'])) {
 
         .options {
             display: flex;
-            justify-content: space-between;
+            justify-content: flex-start;
             align-items: center;
             margin: 1.5rem 0 2.5rem;
             font-size: 1rem;
@@ -603,18 +604,6 @@ if (isset($_GET['timeout'])) {
             cursor: pointer;
             color: var(--text-secondary);
             font-weight: 500;
-        }
-
-        .forgot-link {
-            color: var(--primary);
-            font-weight: 600;
-            text-decoration: none;
-            transition: var(--transition);
-        }
-
-        .forgot-link:hover {
-            color: var(--primary-light);
-            text-decoration: underline;
         }
 
         .btn-login {
@@ -736,39 +725,18 @@ if (isset($_GET['timeout'])) {
                 flex-direction: column;
                 min-height: auto;
             }
-            .left-side {
-                padding: 3rem 2rem 2rem;
-            }
-            .right-side {
-                padding: 2.5rem 2rem;
-            }
-            .logo {
-                width: 120px;
-                height: 120px;
-            }
-            .left-side h1 {
-                font-size: 2.2rem;
-            }
-            .form-header h2 {
-                font-size: 1.8rem;
-            }
+            .left-side { padding: 3rem 2rem 2rem; }
+            .right-side { padding: 2.5rem 2rem; }
+            .logo { width: 120px; height: 120px; }
+            .left-side h1 { font-size: 2.2rem; }
+            .form-header h2 { font-size: 1.8rem; }
         }
 
         @media (max-width: 480px) {
-            body {
-                padding: 1rem 0.5rem;
-            }
-            .left-side {
-                padding: 2rem 1.5rem 1.5rem;
-            }
-            .right-side {
-                padding: 2rem 1.5rem;
-            }
-            .options {
-                flex-direction: column;
-                gap: 1rem;
-                align-items: flex-start;
-            }
+            body { padding: 1rem 0.5rem; }
+            .left-side { padding: 2rem 1.5rem 1.5rem; }
+            .right-side { padding: 2rem 1.5rem; }
+            .options { flex-direction: column; gap: 1rem; align-items: flex-start; }
         }
     </style>
 </head>
@@ -844,7 +812,6 @@ if (isset($_GET['timeout'])) {
                         <input type="checkbox" id="remember" name="remember">
                         <span>Remember me</span>
                     </label>
-                    <a href="change_user_password.php" class="forgot-link">Forgot Password?</a>
                 </div>
 
                 <button type="submit" class="btn-login" id="submitBtn">

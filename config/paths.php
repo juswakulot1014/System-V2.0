@@ -8,10 +8,24 @@
 // The dependency is one-way: bootstrap.php → paths.php.
 // Adding a require here creates a circular include loop.
 
+declare(strict_types=1);
+
 // ────────────────────────────────────────────────
 // Load .env from project root (simple parser, no library)
 // Only sets a var if it isn't already set in the environment.
 // ────────────────────────────────────────────────
+
+// Strip inline `#` comments from unquoted values.
+//   DB_PASS=abc#123        → abc#123    (no space before #  → keep)
+//   DB_PASS=abc # comment  → abc        (space before #     → strip)
+$__strip_env_comment = function (string $v): string {
+    if ($v === '' || $v[0] === '"' || $v[0] === "'") return $v;
+    if (($pos = strpos($v, ' #')) !== false) {
+        $v = rtrim(substr($v, 0, $pos));
+    }
+    return $v;
+};
+
 $envFile = dirname(__DIR__) . '/.env';
 if (is_readable($envFile)) {
     foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
@@ -23,6 +37,8 @@ if (is_readable($envFile)) {
         $v = trim($v);
         if (strlen($v) >= 2 && ($v[0] === '"' || $v[0] === "'") && $v[0] === substr($v, -1)) {
             $v = substr($v, 1, -1);
+        } else {
+            $v = $__strip_env_comment($v);
         }
         if ($k !== '' && getenv($k) === false) {
             putenv("$k=$v");

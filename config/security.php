@@ -2,6 +2,8 @@
 // config/security.php — central security bootstrap.
 // Include FIRST in every entry-point, BEFORE session_start().
 
+declare(strict_types=1);
+
 if (defined('SECURITY_BOOTSTRAPPED')) return;
 define('SECURITY_BOOTSTRAPPED', true);
 
@@ -90,39 +92,183 @@ function verify_csrf(bool $rotate = false): void {
     }
 }
 
-// ---------- Rate limiting (session-based) ----------
-// Usage:
-//   $rl = rate_limit_check('login_1.2.3.4', 5, 900);
-//   if ($rl['locked']) { ... }
-//   rate_limit_hit('login_1.2.3.4');       // on failure
-//   rate_limit_reset('login_1.2.3.4');     // on success
-function rate_limit_check(string $key, int $max = 5, int $window = 900): array {
-    $k = 'rl_' . $key;
-    $now = time();
-    if (!isset($_SESSION[$k])) {
-        $_SESSION[$k] = ['count' => 0, 'start' => $now];
+// ---------- Rate limiting ----------
+//
+// DB-backed when a mysqli connection is supplied. Falls back to session
+// storage on ANY failure so a missing/broken table can never take down
+// the login page.
+//
+// Implementation notes:
+//   - We do NOT touch mysqli_report()/mysqli_driver(). db.php already
+//     enables MYSQLI_REPORT_STRICT, so every error throws — plain
+//     try/catch is sufficient and portable across PHP builds.
+//   - The rate_limits table is auto-created on first use. If the DB
+//     user lacks CREATE privilege, we log once and use session storage.
+
+if (!function_exists('rate_limit_ensure_table')) {
+    /**
+     * Ensure the rate_limits table exists. Returns true on success.
+     * Only attempts creation once per request (static cache).
+     */
+    function rate_limit_ensure_table(mysqli $conn): bool
+    {
+        static $ensured = null;
+        if ($ensured !== null) return $ensured;
+
+        // ---- 1. Does the table already exist? ----
+        try {
+            $res = $conn->query("SHOW TABLES LIKE 'rate_limits'");
+            if ($res instanceof mysqli_result && $res->num_rows > 0) {
+                $res->free();
+                return $ensured = true;
+            }
+            if ($res instanceof mysqli_result) $res->free();
+        } catch (\Throwable $e) {
+            error_log('rate_limit: SHOW TABLES failed: ' . $e->getMessage());
+            return $ensured = false;
+        }
+
+        // ---- 2. Try to create it ----
+        try {
+            $conn->query("
+                CREATE TABLE IF NOT EXISTS rate_limits (
+                    bucket_key VARCHAR(191) NOT NULL PRIMARY KEY,
+                    count      INT UNSIGNED NOT NULL DEFAULT 0,
+                    window_end DATETIME NOT NULL,
+                    INDEX idx_window_end (window_end)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            ");
+        } catch (\Throwable $e) {
+            error_log('rate_limit: CREATE TABLE failed (falling back to session storage): '
+                    . $e->getMessage());
+            return $ensured = false;
+        }
+
+        // ---- 3. Re-verify (CREATE IF NOT EXISTS can return true even
+        //           when the user lacks privileges on some MySQL setups) ----
+        try {
+            $res = $conn->query("SHOW TABLES LIKE 'rate_limits'");
+            $exists = $res instanceof mysqli_result && $res->num_rows > 0;
+            if ($res instanceof mysqli_result) $res->free();
+            return $ensured = $exists;
+        } catch (\Throwable $e) {
+            error_log('rate_limit: verify failed: ' . $e->getMessage());
+            return $ensured = false;
+        }
     }
-    if ($now - $_SESSION[$k]['start'] > $window) {
-        $_SESSION[$k] = ['count' => 0, 'start' => $now];
-    }
-    $b = $_SESSION[$k];
-    return [
-        'count'       => $b['count'],
-        'remaining'   => max(0, $max - $b['count']),
-        'window_left' => max(0, $window - ($now - $b['start'])),
-        'locked'      => $b['count'] >= $max,
-    ];
 }
-function rate_limit_hit(string $key): void {
-    $k = 'rl_' . $key;
-    $now = time();
-    if (!isset($_SESSION[$k])) {
-        $_SESSION[$k] = ['count' => 0, 'start' => $now];
+
+if (!function_exists('rate_limit_check')) {
+    function rate_limit_check(string $key, int $max = 5, int $window = 900, ?mysqli $conn = null): array
+    {
+        $now = time();
+
+        // ---------- DB-backed path ----------
+        if ($conn instanceof mysqli && rate_limit_ensure_table($conn)) {
+            try {
+                $bucket = 'rl:' . $key;
+
+                // Opportunistic cleanup — cheap, keeps the table small.
+                if (random_int(1, 50) === 1) {
+                    $conn->query("DELETE FROM rate_limits WHERE window_end < NOW() - INTERVAL 1 HOUR");
+                }
+
+                $stmt = $conn->prepare("SELECT count, window_end FROM rate_limits WHERE bucket_key = ? LIMIT 1");
+                if ($stmt) {
+                    $stmt->bind_param('s', $bucket);
+                    $stmt->execute();
+                    $row = $stmt->get_result()->fetch_assoc();
+                    $stmt->close();
+
+                    if ($row && strtotime($row['window_end']) > $now) {
+                        $count = (int)$row['count'];
+                        $left  = max(0, strtotime($row['window_end']) - $now);
+                        return [
+                            'count'       => $count,
+                            'remaining'   => max(0, $max - $count),
+                            'window_left' => $left,
+                            'locked'      => $count >= $max,
+                        ];
+                    }
+                }
+            } catch (\Throwable $e) {
+                error_log('rate_limit_check: DB path failed, using session: ' . $e->getMessage());
+            }
+        }
+
+        // ---------- Session fallback (always safe) ----------
+        $k = 'rl_' . $key;
+        if (!isset($_SESSION[$k])) {
+            $_SESSION[$k] = ['count' => 0, 'start' => $now];
+        }
+        if ($now - $_SESSION[$k]['start'] > $window) {
+            $_SESSION[$k] = ['count' => 0, 'start' => $now];
+        }
+        $b = $_SESSION[$k];
+        return [
+            'count'       => $b['count'],
+            'remaining'   => max(0, $max - $b['count']),
+            'window_left' => max(0, $window - ($now - $b['start'])),
+            'locked'      => $b['count'] >= $max,
+        ];
     }
-    $_SESSION[$k]['count']++;
 }
-function rate_limit_reset(string $key): void {
-    unset($_SESSION['rl_' . $key]);
+
+if (!function_exists('rate_limit_hit')) {
+    function rate_limit_hit(string $key, int $window = 900, ?mysqli $conn = null): void
+    {
+        if ($conn instanceof mysqli && rate_limit_ensure_table($conn)) {
+            try {
+                $bucket = 'rl:' . $key;
+                $end    = date('Y-m-d H:i:s', time() + $window);
+
+                $stmt = $conn->prepare("
+                    INSERT INTO rate_limits (bucket_key, count, window_end)
+                    VALUES (?, 1, ?)
+                    ON DUPLICATE KEY UPDATE
+                        count      = IF(window_end > NOW(), count + 1, 1),
+                        window_end = IF(window_end > NOW(), window_end, VALUES(window_end))
+                ");
+                if ($stmt) {
+                    $stmt->bind_param('ss', $bucket, $end);
+                    $stmt->execute();
+                    $stmt->close();
+                }
+                return;
+            } catch (\Throwable $e) {
+                error_log('rate_limit_hit: DB path failed, using session: ' . $e->getMessage());
+            }
+        }
+
+        // Session fallback
+        $k = 'rl_' . $key;
+        $now = time();
+        if (!isset($_SESSION[$k])) {
+            $_SESSION[$k] = ['count' => 0, 'start' => $now];
+        }
+        $_SESSION[$k]['count']++;
+    }
+}
+
+if (!function_exists('rate_limit_reset')) {
+    function rate_limit_reset(string $key, ?mysqli $conn = null): void
+    {
+        if ($conn instanceof mysqli && rate_limit_ensure_table($conn)) {
+            try {
+                $bucket = 'rl:' . $key;
+                $stmt = $conn->prepare("DELETE FROM rate_limits WHERE bucket_key = ?");
+                if ($stmt) {
+                    $stmt->bind_param('s', $bucket);
+                    $stmt->execute();
+                    $stmt->close();
+                }
+                return;
+            } catch (\Throwable $e) {
+                error_log('rate_limit_reset: DB path failed, using session: ' . $e->getMessage());
+            }
+        }
+        unset($_SESSION['rl_' . $key]);
+    }
 }
 
 // ---------- Auth guards ----------
@@ -146,10 +292,6 @@ function require_superadmin(): void {
         exit('Forbidden — Super Admin only.');
     }
 }
-/**
- * Unified guard. Pass a role to enforce it. Pass null to just require login.
- * Preserves intended destination for post-login redirect.
- */
 function require_role(?string $role = null): void {
     if (empty($_SESSION['admin_id'])) {
         $_SESSION['redirect_after_login'] = $_SERVER['REQUEST_URI'] ?? 'dashboard.php';

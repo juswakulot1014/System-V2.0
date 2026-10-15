@@ -51,9 +51,7 @@ function statSizeClass($val) {
 }
 
 /**
- * Derive remarks from a numeric grade. 75 is the passing threshold,
- * matching the `.grade-pass` / `.grade-fail` styling below.
- * Returns null when grade is null (blank).
+ * Derive remarks from a numeric grade. 75 is the passing threshold.
  */
 function derive_remarks($grade): ?string {
     if ($grade === null || $grade === '') return null;
@@ -63,7 +61,6 @@ function derive_remarks($grade): ?string {
 
 /**
  * Encrypt and store a document file.
- * Returns metadata array on success. Throws on failure.
  */
 function store_encrypted_document(string $tmp_path, int $student_id, int $entrance_id): array {
     if (!is_file($tmp_path)) {
@@ -318,7 +315,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_photo'])) {
             }
 
             $fn = "student_{$sid}_" . time() . ".{$ext}";
-                        if (move_uploaded_file($_FILES['student_photo']['tmp_name'], $dir . $fn)) {
+            if (move_uploaded_file($_FILES['student_photo']['tmp_name'], $dir . $fn)) {
                 @chmod($dir . $fn, 0640);
                 $s = $conn->prepare("UPDATE students_info SET photo = ? WHERE student_id = ?");
                 $s->bind_param("si", $fn, $sid);
@@ -355,7 +352,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_photo'])) {
         header("Location: student_profile.php"); exit();
     }
 
-    // Fetch the current photo filename (may be NULL).
     $q = $conn->prepare("SELECT photo FROM students_info WHERE student_id = ?");
     $q->bind_param("i", $sid);
     $q->execute();
@@ -369,16 +365,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_photo'])) {
 
     $old_photo = $row['photo'] ?? null;
 
-    // Clear the DB pointer first — if the UPDATE succeeds we can safely unlink.
-    // This guarantees we never leave a dangling reference to a deleted file.
     $u = $conn->prepare("UPDATE students_info SET photo = NULL WHERE student_id = ?");
     $u->bind_param("i", $sid);
     $u->execute();
     $u->close();
 
-    // Best-effort unlink, guarded so we never touch a path outside STUDENTS_PHOTO_DIR.
-    // realpath() resolves symlinks, so an attacker-controlled value in `photo`
-    // can't escape the directory even if it was injected some other way.
     if (!empty($old_photo)) {
         $abs  = student_photo_abs_path($old_photo);
         $root = realpath(STUDENTS_PHOTO_DIR);
@@ -471,7 +462,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_grade'])) {
     $rem  = trim($_POST['remarks'] ?? '');
 
     // Auto-derive remarks from the grade (75 = passing threshold).
-    // Ignore whatever the client sent so the DB is always consistent.
     if ($gr !== null) {
         $rem = derive_remarks($gr);
     }
@@ -495,7 +485,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_grade'])) {
     if ($term === '' || $sc === '' || $sn === '') {
         $_SESSION['error'] = 'Fill required fields.';
     } else {
-               $s = $conn->prepare("INSERT INTO student_grades
+        $s = $conn->prepare("INSERT INTO student_grades
             (student_id, enrollment_id, term, grade_level, school_year, subject_code, subject_name, grade, remarks)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
         $s->bind_param("iisssssds",
@@ -533,7 +523,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_grade'])) {
     $gr   = ($_POST['grade'] ?? '') !== '' ? (float)$_POST['grade'] : null;
     $rem  = trim($_POST['remarks'] ?? '');
 
-    // Auto-derive remarks from the grade (75 = passing threshold).
     if ($gr !== null) {
         $rem = derive_remarks($gr);
     }
@@ -543,7 +532,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_grade'])) {
         header("Location: view_student.php?id=$sid"); exit();
     }
 
-    // Fetch old values for the diff
     $old_stmt = $conn->prepare("SELECT term, subject_code, subject_name, grade, remarks
                                 FROM student_grades WHERE grade_id = ? AND student_id = ?");
     $old_stmt->bind_param("ii", $gid, $sid);
@@ -576,7 +564,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_grade'])) {
 
     $gid = (int)$_POST['grade_id'];
     $sid = (int)$_POST['student_id'];
-    // Capture the subject before deletion for the audit trail
+
     $lookup = $conn->prepare("SELECT subject_code, subject_name, grade FROM student_grades WHERE grade_id = ? AND student_id = ?");
     $lookup->bind_param("ii", $gid, $sid);
     $lookup->execute();
@@ -647,7 +635,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_education'])) {
     $scha = trim($_POST['school_address'] ?? '');
     $yr   = trim($_POST['year_completed'] ?? '');
 
-    // Fetch old values for the diff
     $old_stmt = $conn->prepare("SELECT level, school_name, school_address, year_completed
                                 FROM educational_history WHERE edu_id = ? AND student_id = ?");
     $old_stmt->bind_param("ii", $eid, $sid);
@@ -679,7 +666,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_education'])) 
 
     $eid = (int)$_POST['edu_id'];
     $sid = (int)$_POST['student_id'];
-    // Capture before deletion
+
     $lookup = $conn->prepare("SELECT level, school_name FROM educational_history WHERE edu_id = ? AND student_id = ?");
     $lookup->bind_param("ii", $eid, $sid);
     $lookup->execute();
@@ -712,10 +699,16 @@ if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
 }
 $student_id = (int)$_GET['id'];
 
+// ---------------------------------------------------------------------------
+// NOTE: `p.mother_name` was removed from this SELECT. It is never written by
+// edit_student.php or process_enroll.php — only `mother_maiden_name` is. If
+// your schema happens to define `mother_name`, no harm; if it doesn't, the
+// previous query threw a fatal error on this page.
+// ---------------------------------------------------------------------------
 $s = $conn->prepare("
     SELECT s.*,
            p.father_name, p.father_occupation, p.father_contact,
-           p.mother_name, p.mother_maiden_name, p.mother_occupation, p.mother_contact,
+           p.mother_maiden_name, p.mother_occupation, p.mother_contact,
            p.guardian_fullname, p.guardian_relation, p.guardian_contact,
            p.ave_family_income, p.is_4ps, p.household_id as parent_household_id,
            a.purok_street, a.barangay, a.town_city, a.province,
@@ -1640,7 +1633,6 @@ $csrf_token  = csrf_token();
         </a>
     </div>
 </aside>
->
 
 <div class="main-content" id="mainContent">
 
@@ -2673,7 +2665,6 @@ $('#btnUpDoc').click(function () {
 const PASSING_GRADE = 75;
 
 // Live-derive remarks AND drive the pass/fail visual state on the input wrapper.
-// wrapperId is optional — pass it to enable the border + inline badge feedback.
 function autoRemarks(gradeEl, remarksId, wrapperId) {
     const el = document.getElementById(remarksId);
     const wrap = wrapperId ? document.getElementById(wrapperId) : null;
@@ -2722,8 +2713,7 @@ $('.edit-grd-btn').click(function () {
 });
 
 // Add grade: when the modal opens, sync the visual state to whatever
-// is currently in the grade field (also clears leftovers from prior opens
-// because the form is reset on close via the browser's normal form state).
+// is currently in the grade field.
 $('#addGradeModal').on('shown.bs.modal', function () {
     const g = document.getElementById('ag_grd');
     if (g) autoRemarks(g, 'ag_rem', 'ag_grp');

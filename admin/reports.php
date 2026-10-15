@@ -80,6 +80,15 @@ $section_list = $stmt->get_result()->fetch_all(MYSQLI_ASSOC) ?: [];
 $stmt->close();
 
 // ====================== BUILD MAIN FILTER FRAGMENTS ======================
+// $sy_filter is shared by EVERY report query below.
+//
+// Graduated AND Pending students are EXCLUDED by default. As soon as the user
+// picks any specific status (including "Graduated" or "Pending" itself), that
+// override wins and the exclusion is dropped.
+//
+// The `graduated` report is unaffected — it builds its own query with
+// `WHERE e.status = 'Graduated'` and never uses $sy_filter.
+// =====================================================
 $sy_filter    = "";
 $params_main  = [];
 $types_main   = "";
@@ -89,6 +98,13 @@ if ($strand_filter !== '')   { $sy_filter .= " AND e.strand = ?";       $params_
 if ($grade_filter !== '')    { $sy_filter .= " AND e.grade_level = ?";  $params_main[] = $grade_filter;   $types_main .= "s"; }
 if ($section_filter !== '')  { $sy_filter .= " AND e.section = ?";      $params_main[] = $section_filter; $types_main .= "s"; }
 if ($status_filter !== '')   { $sy_filter .= " AND e.status = ?";       $params_main[] = $status_filter;  $types_main .= "s"; }
+
+// ── Exclude Graduated AND Pending when no explicit status is set ──
+if ($status_filter === '') {
+    $sy_filter .= " AND COALESCE(e.status,'Active') NOT IN ('Graduated', 'Pending')";
+}
+
+$graduated_excluded = ($status_filter === '');
 
 // ====================== KPI QUERIES ======================
 $ts_sql = "SELECT COUNT(DISTINCT e.student_id) as total FROM enrollment_form e WHERE 1=1 $sy_filter";
@@ -153,7 +169,9 @@ $stmt->execute();
 $year_report = $stmt->get_result()->fetch_all(MYSQLI_ASSOC) ?: [];
 $stmt->close();
 
-// Masterlist
+// ─────────────────────────────────────────────────────────────────
+// MASTERLIST — the exclusion is already inside $sy_filter
+// ─────────────────────────────────────────────────────────────────
 $master_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.ext_name,
                       s.sex, s.birth_date, s.age, s.email, s.phone,
                       e.grade_level, e.strand, e.program, e.section, e.school_year, e.term, e.track,
@@ -167,6 +185,49 @@ if (!empty($params_main)) $stmt->bind_param($types_main, ...$params_main);
 $stmt->execute();
 $masterlist = $stmt->get_result()->fetch_all(MYSQLI_ASSOC) ?: [];
 $stmt->close();
+
+// ─────────────────────────────────────────────────────────────────
+// MASTERLIST STATUS COUNTS
+// ─────────────────────────────────────────────────────────────────
+$masterlist_status_counts = [];
+foreach ($masterlist as $m) {
+    $st = $m['status'] ?? 'Active';
+    if ($st === '' || $st === null) $st = 'Active';
+    $masterlist_status_counts[$st] = ($masterlist_status_counts[$st] ?? 0) + 1;
+}
+
+$__status_order = ['Active', 'Pending', 'Transferred', 'Stopped', 'Dropped', 'Graduated'];
+uksort($masterlist_status_counts, function($a, $b) use ($__status_order) {
+    $ia = array_search($a, $__status_order, true);
+    $ib = array_search($b, $__status_order, true);
+    if ($ia === false) $ia = 999;
+    if ($ib === false) $ib = 999;
+    return $ia <=> $ib;
+});
+
+$statusPillClass = function (string $st): string {
+    return match ($st) {
+        'Active'      => 'success',
+        'Pending'     => 'warning',
+        'Transferred' => 'info',
+        'Stopped'     => 'muted',
+        'Dropped'     => 'danger',
+        'Graduated'   => 'purple',
+        default       => 'muted',
+    };
+};
+
+$statusIcon = function (string $st): string {
+    return match ($st) {
+        'Active'      => 'bi-check-circle-fill',
+        'Pending'     => 'bi-hourglass-split',
+        'Transferred' => 'bi-arrow-left-right',
+        'Stopped'     => 'bi-pause-circle-fill',
+        'Dropped'     => 'bi-x-circle-fill',
+        'Graduated'   => 'bi-mortarboard-fill',
+        default       => 'bi-circle',
+    };
+};
 
 $grouped_masterlist = [];
 foreach ($masterlist as $m) {
@@ -211,6 +272,7 @@ $stmt->execute();
 $doc_report = $stmt->get_result()->fetch_all(MYSQLI_ASSOC) ?: [];
 $stmt->close();
 
+// ── Graduated report: its own query, does NOT use $sy_filter ──
 $graduated_students = [];
 $total_graduated = 0;
 $grad_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.sex,
@@ -270,7 +332,7 @@ if ($grade_filter !== '')    $filter_desc[] = "Grade: $grade_filter";
 if ($strand_filter !== '')   $filter_desc[] = "Strand: $strand_filter";
 if ($section_filter !== '')  $filter_desc[] = "Section: $section_filter";
 if ($status_filter !== '')   $filter_desc[] = "Status: $status_filter";
-$filter_text = $filter_desc ? implode(' · ', $filter_desc) : 'All records';
+$filter_text = $filter_desc ? implode(' · ', $filter_desc) : 'All records (excl. Graduated & Pending)';
 
 // ====================== WORD + PDF EXPORT ======================
 if ($export_word || $export_pdf) {
@@ -299,6 +361,16 @@ if ($export_word || $export_pdf) {
         .section-page .section-page-title{font-size:14px;font-weight:bold;color:#1e3c72;margin:0 0 3px}
         .section-page .section-page-meta{font-size:10px;color:#475569;margin:0}
         .section-page .section-page-meta span{margin-right:10px}
+        .status-badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:9px;font-weight:700;letter-spacing:.3px;white-space:nowrap;border:1px solid}
+        .status-active      {background:#d1fae5;color:#047857;border-color:#10b981}
+        .status-pending     {background:#fef3c7;color:#b45309;border-color:#f59e0b}
+        .status-transferred {background:#dbeafe;color:#1e40af;border-color:#3b82f6}
+        .status-stopped     {background:#e2e8f0;color:#475569;border-color:#94a3b8}
+        .status-dropped     {background:#fee2e2;color:#b91c1c;border-color:#ef4444}
+        .status-graduated   {background:#ede9fe;color:#6d28d9;border-color:#8b5cf6}
+        .status-summary{margin:10px 0 14px;padding:8px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:10px}
+        .status-summary .lbl{font-weight:bold;color:#334155;margin-right:6px}
+        .status-summary .item{display:inline-block;margin-right:10px;font-weight:600}
     </style></head><body>';
 
     echo '<h1>USAT College Sagay City Inc.</h1>';
@@ -306,6 +378,9 @@ if ($export_word || $export_pdf) {
     echo '<div class="meta">';
     echo '<strong>Generated:</strong> ' . date('F d, Y h:i A') . '<br>';
     echo '<strong>Filters:</strong> ' . htmlspecialchars($filter_text);
+    if ($report_type !== 'graduated' && $graduated_excluded) {
+        echo '<br><strong>Note:</strong> Graduated and Pending students are excluded from this report.';
+    }
     echo '</div>';
 
     if ($report_type === 'summary') {
@@ -321,21 +396,27 @@ if ($export_word || $export_pdf) {
         echo '</table>';
     }
     elseif ($report_type === 'masterlist') {
-        // ── Masterlist: one section per page ──
         echo '<h2>Student Masterlist</h2>';
-        echo '<p style="font-size:10px;color:#64748b;margin:4px 0 14px;font-style:italic">'
+        echo '<p style="font-size:10px;color:#64748b;margin:4px 0 8px;font-style:italic">'
            . count($masterlist) . ' student(s) across '
            . count($grouped_masterlist) . ' grade level(s). Each section is printed on its own page.</p>';
 
+        if (!empty($masterlist_status_counts)) {
+            echo '<div class="status-summary">';
+            echo '<span class="lbl">Status breakdown:</span>';
+            $total_with_status = 0;
+            foreach ($masterlist_status_counts as $st => $cnt) {
+                $cls = 'status-' . strtolower($st);
+                echo '<span class="item"><span class="status-badge ' . $cls . '">' . htmlspecialchars($st) . '</span> ' . (int)$cnt . '</span>';
+                $total_with_status += (int)$cnt;
+            }
+            echo '<span class="item" style="float:right">Total: ' . (int)$total_with_status . '</span>';
+            echo '</div>';
+        }
+
         $first_page = true;
         foreach ($grouped_masterlist as $grade => $strands) {
-            $grade_total = 0;
-            foreach ($strands as $secs) foreach ($secs as $studs) $grade_total += count($studs);
-
             foreach ($strands as $strand => $sections) {
-                $strand_total = 0;
-                foreach ($sections as $studs) $strand_total += count($studs);
-
                 foreach ($sections as $section => $students) {
                     $m = 0; $f = 0;
                     foreach ($students as $s) {
@@ -347,8 +428,6 @@ if ($export_word || $export_pdf) {
                     $first_page = false;
 
                     echo '<div class="section-page"' . $break_style . '>';
-
-                    // Section header block — compact, shows grade + strand + section context
                     echo '<div class="section-page-head">';
                     echo   '<div class="section-page-title">' . htmlspecialchars($section) . '</div>';
                     echo   '<div class="section-page-meta">';
@@ -360,21 +439,23 @@ if ($export_word || $export_pdf) {
                     echo   '</div>';
                     echo '</div>';
 
-                    // Student roster table
                     echo '<table>';
                     echo '<thead><tr>';
                     echo   '<th class="num" style="width:30px">#</th>';
-                    echo   '<th style="width:130px">Student ID</th>';
-                    echo   '<th style="width:130px">LRN</th>';
+                    echo   '<th style="width:120px">Student ID</th>';
+                    echo   '<th style="width:120px">LRN</th>';
                     echo   '<th>Name</th>';
-                    echo   '<th style="width:60px">Sex</th>';
-                    echo   '<th class="num" style="width:50px">Age</th>';
-                    echo   '<th style="width:80px">Status</th>';
+                    echo   '<th style="width:50px">Sex</th>';
+                    echo   '<th class="num" style="width:40px">Age</th>';
+                    echo   '<th style="width:90px">Status</th>';
                     echo '</tr></thead><tbody>';
 
                     $i = 1;
                     foreach ($students as $s) {
                         $full_name = trim(($s['last_name'] ?? '') . ', ' . ($s['first_name'] ?? '') . ($s['middle_name'] ? ' ' . $s['middle_name'] : ''));
+                        $st = $s['status'] ?? 'Active';
+                        $cls = 'status-' . strtolower($st);
+
                         echo '<tr>';
                         echo   '<td class="num">' . $i++ . '</td>';
                         echo   '<td>' . htmlspecialchars($s['student_id_number'] ?? '—') . '</td>';
@@ -382,7 +463,7 @@ if ($export_word || $export_pdf) {
                         echo   '<td>' . htmlspecialchars($full_name) . '</td>';
                         echo   '<td>' . htmlspecialchars($s['sex'] ?? '—') . '</td>';
                         echo   '<td class="num">' . htmlspecialchars($s['age'] ?? '—') . '</td>';
-                        echo   '<td>' . htmlspecialchars($s['status'] ?? '—') . '</td>';
+                        echo   '<td><span class="status-badge ' . $cls . '">' . htmlspecialchars($st) . '</span></td>';
                         echo '</tr>';
                     }
 
@@ -436,7 +517,6 @@ if ($export_word || $export_pdf) {
 
     $export_html = ob_get_clean();
 
-    /* ---------- Word (.doc) ---------- */
     if ($export_word) {
         $filename = 'usat_' . $report_type . '_report_' . date('Y-m-d') . '.doc';
         header("Content-Type: application/msword");
@@ -445,7 +525,6 @@ if ($export_word || $export_pdf) {
         exit;
     }
 
-    /* ---------- PDF (Dompdf) ---------- */
     $autoload = __DIR__ . '/../vendor/autoload.php';
 
     if (!is_file($autoload)) {
@@ -462,7 +541,7 @@ if ($export_word || $export_pdf) {
     if (!class_exists('Dompdf\\Dompdf')) {
         header('Content-Type: text/html; charset=UTF-8');
         echo '<div style="font-family:Arial;padding:1rem;background:#fee2e2;color:#991b1b;border-left:4px solid #dc2626">';
-        echo '<strong>Dompdf class not found.</strong> The autoloader loaded but did not register the Dompdf class. Run <code>composer dump-autoload</code> in the project root, then reload this page.';
+        echo '<strong>Dompdf class not found.</strong> Run <code>composer dump-autoload</code>.';
         echo '</div>';
         echo $export_html;
         exit;
@@ -557,6 +636,19 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .report-tile .tile-desc{font-size:.72rem;color:var(--text-2);line-height:1.35}
         .report-tile.active .tile-title{color:var(--accent)}
 
+        .exclude-note{
+            display:flex;align-items:center;gap:.6rem;
+            padding:.7rem 1rem;border-radius:12px;
+            background:var(--green-soft);color:var(--green);
+            border:1px solid color-mix(in srgb,var(--green) 25%, transparent);
+            font-size:.83rem;font-weight:600;
+            margin-bottom:1.25rem;
+        }
+        .exclude-note i{font-size:.95rem}
+        .exclude-note .hint-inline{
+            font-weight:500;color:var(--text-2);margin-left:auto;font-size:.78rem;
+        }
+
         .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin-bottom:1.5rem}
         .stat-card{position:relative;background:var(--surface);border-radius:var(--radius-lg);border:1px solid var(--border);box-shadow:var(--shadow-sm);padding:1.1rem 1.25rem 1.1rem 1.4rem;display:flex;align-items:center;gap:1rem;overflow:hidden;transition:transform .2s, box-shadow .2s}
         .stat-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--accent)}
@@ -637,17 +729,58 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         [data-bs-theme="dark"] .section-block .mini-pill.female{background:#4a1d36;color:#f9a8d4}
         .section-block .section-body{padding:0 1.25rem 1rem}
 
+        .status-summary-bar{
+            display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;
+            padding:.85rem 1.25rem;
+            background:var(--surface-2);
+            border-bottom:1px solid var(--border);
+        }
+        .status-summary-bar .label{
+            font-size:.72rem;font-weight:700;color:var(--text-2);
+            text-transform:uppercase;letter-spacing:.6px;
+            margin-right:.35rem;
+        }
+        .status-chip{
+            display:inline-flex;align-items:center;gap:.4rem;
+            padding:.3rem .7rem;border-radius:999px;
+            font-size:.72rem;font-weight:700;
+            border:1px solid transparent;
+            font-variant-numeric:tabular-nums;
+        }
+        .status-chip i{font-size:.75rem}
+        .status-chip .count{
+            background:rgba(255,255,255,.55);
+            padding:.05rem .45rem;border-radius:999px;
+            font-size:.68rem;font-weight:800;
+        }
+        [data-bs-theme="dark"] .status-chip .count{background:rgba(0,0,0,.25)}
+
+        .status-chip.active      {background:var(--green-soft);color:var(--green);border-color:color-mix(in srgb,var(--green) 25%, transparent)}
+        .status-chip.pending     {background:var(--amber-soft);color:var(--amber);border-color:color-mix(in srgb,var(--amber) 25%, transparent)}
+        .status-chip.transferred {background:var(--blue-soft);color:var(--blue);border-color:color-mix(in srgb,var(--blue) 25%, transparent)}
+        .status-chip.stopped     {background:var(--surface);color:var(--text-2);border-color:var(--border)}
+        .status-chip.dropped     {background:var(--red-soft);color:var(--red);border-color:color-mix(in srgb,var(--red) 25%, transparent)}
+        .status-chip.graduated   {background:var(--purple-soft);color:var(--purple);border-color:color-mix(in srgb,var(--purple) 25%, transparent)}
+        .status-summary-bar .total-chip{
+            margin-left:auto;
+            font-size:.72rem;font-weight:700;color:var(--text-2);
+            padding:.3rem .8rem;border-radius:999px;
+            background:var(--surface);border:1px solid var(--border);
+        }
+
         .doc-bar{width:100%;height:6px;border-radius:999px;background:var(--surface-2);overflow:hidden;margin-top:.25rem}
         .doc-bar-fill{height:100%;border-radius:999px;transition:width .3s}
         .fill-full{background:var(--green)}
         .fill-partial{background:var(--accent)}
         .fill-empty{background:var(--amber)}
 
-        .pill{display:inline-flex;align-items:center;gap:.35rem;padding:.22rem .65rem;border-radius:999px;font-size:.7rem;font-weight:600;border:1px solid transparent;white-space:nowrap}
+        .pill{display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .65rem;border-radius:999px;font-size:.7rem;font-weight:600;border:1px solid transparent;white-space:nowrap}
+        .pill i{font-size:.72rem}
         .pill.success{background:var(--green-soft);color:var(--green);border-color:color-mix(in srgb,var(--green) 22%, transparent)}
         .pill.warning{background:var(--amber-soft);color:var(--amber);border-color:color-mix(in srgb,var(--amber) 22%, transparent)}
         .pill.danger {background:var(--red-soft);color:var(--red);border-color:color-mix(in srgb,var(--red) 22%, transparent)}
-        .pill.info   {background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 22%, transparent)}
+        .pill.info   {background:var(--blue-soft);color:var(--blue);border-color:color-mix(in srgb,var(--blue) 22%, transparent)}
+        .pill.purple {background:var(--purple-soft);color:var(--purple);border-color:color-mix(in srgb,var(--purple) 22%, transparent)}
         .pill.muted  {background:var(--surface-2);color:var(--text-2);border-color:var(--border)}
 
         .btn{font-weight:500;border-radius:9px;font-size:.82rem;transition:all .15s}
@@ -684,13 +817,18 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             .chart-wrap{height:220px}
             .report-selector{grid-template-columns:1fr}
             .grade-header{flex-direction:column;align-items:flex-start}
+            .status-summary-bar{padding:.7rem 1rem}
+            .status-summary-bar .total-chip{margin-left:0;width:100%;text-align:center}
+            .exclude-note{flex-wrap:wrap}
+            .exclude-note .hint-inline{margin-left:0;width:100%}
         }
 
         @media print {
             @page { size: A4; margin: 12mm; }
             html, body { background: #fff !important; color: #000 !important; padding: 0 !important; margin: 0 !important; min-height: auto !important; }
             .sidebar, #sidebar, #sidebarOverlay, .topbar, .menu-toggle, .report-selector, .theme-btn, .no-print,
-            .filter-card, .report-selector + .card, .btn:not(.keep-print), button.btn:not(.keep-print), a.btn:not(.keep-print) { display: none !important; }
+            .filter-card, .report-selector + .card, .exclude-note,
+            .btn:not(.keep-print), button.btn:not(.keep-print), a.btn:not(.keep-print) { display: none !important; }
             .main-content { margin: 0 !important; padding: 0 !important; max-width: 100% !important; width: 100% !important; }
             .main-content::before { content: "USAT College Sagay City Inc. — " attr(data-report-title); display: block; font-size: 14pt; font-weight: bold; color: #1e3c72; padding-bottom: 6px; border-bottom: 2px solid #1e3c72; margin-bottom: 12px; }
             .main-content::after { content: "Generated by USAT Enrollment System · " attr(data-generated); display: block; text-align: center; font-size: 8pt; color: #666; padding-top: 12px; border-top: 1px solid #ddd; margin-top: 20px; }
@@ -714,6 +852,8 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             .cell-female { color: #be185d !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
             .cell-accent { color: #4338ca !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
             .pill { border: 1px solid #999 !important; background: #f5f5f5 !important; color: #000 !important; font-size: 8pt !important; padding: 1px 5px !important; }
+            .status-chip, .status-chip .count { border: 1px solid #999 !important; background: #f5f5f5 !important; color: #000 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .status-summary-bar { background: #f5f5f5 !important; border-bottom: 1px solid #ccc !important; padding: 6px 10px !important; }
             .grade-group { page-break-inside: auto; }
             .grade-header { background: #1e3c72 !important; color: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; padding: 6px 10px !important; }
             .grade-header .grade-title { font-size: 12pt !important; }
@@ -823,6 +963,17 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         <?php endforeach; ?>
     </div>
 
+    <?php if ($graduated_excluded && $report_type !== 'graduated'): ?>
+    <div class="exclude-note">
+        <i class="bi bi-shield-check"></i>
+        <span>Graduated and Pending students are excluded from this report.</span>
+        <span class="hint-inline">
+            <i class="bi bi-info-circle me-1"></i>
+            Pick a specific status below (or view the <a href="?report=graduated" style="color:inherit;text-decoration:underline;font-weight:700">Graduated report</a>) to see them.
+        </span>
+    </div>
+    <?php endif; ?>
+
     <div class="card filter-card">
         <div class="card-header">
             <h3><i class="bi bi-funnel"></i> Filters</h3>
@@ -880,7 +1031,7 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
                 <div class="field">
                     <label for="f_status">Status</label>
                     <select name="status_filter" id="f_status">
-                        <option value="">All Status</option>
+                        <option value="">All (excl. Graduated &amp; Pending)</option>
                         <?php foreach (['Active','Pending','Transferred','Stopped','Dropped','Graduated'] as $st): ?>
                             <option value="<?= $st ?>" <?= $status_filter===$st?'selected':'' ?>><?= $st ?></option>
                         <?php endforeach; ?>
@@ -905,6 +1056,7 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             <div class="stat-info">
                 <div class="stat-value"><?= number_format($total_students) ?></div>
                 <div class="stat-label">Total Students</div>
+                <?php if ($graduated_excluded): ?><div class="stat-hint">Excl. Graduated &amp; Pending</div><?php endif; ?>
             </div>
         </div>
         <div class="stat-card tone-purple">
@@ -946,7 +1098,7 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
         <div class="col-12">
             <div class="card">
-                <div class="card-header"><h3><i class="bi bi-graph-up"></i> Yearly Trend</h3><span class="hint">Total students per school year</span></div>
+                <div class="card-header"><h3><i class="bi bi-graph-up"></i> Yearly Trend</h3><span class="hint">Total students per school year (excl. Graduated &amp; Pending)</span></div>
                 <div class="card-body"><div class="chart-wrap tall"><canvas id="trendChart"></canvas></div></div>
             </div>
         </div>
@@ -1038,6 +1190,27 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             </div>
         </div>
 
+        <?php if (!empty($masterlist_status_counts)): ?>
+        <div class="card" style="margin-bottom:1rem">
+            <div class="status-summary-bar">
+                <span class="label"><i class="bi bi-tags-fill me-1"></i>Status breakdown</span>
+                <?php foreach ($masterlist_status_counts as $st => $cnt):
+                    $cls  = 'status-chip ' . strtolower($st);
+                    $icon = $statusIcon($st);
+                ?>
+                    <span class="<?= $cls ?>">
+                        <i class="bi <?= $icon ?>"></i>
+                        <?= htmlspecialchars($st) ?>
+                        <span class="count"><?= number_format($cnt) ?></span>
+                    </span>
+                <?php endforeach; ?>
+                <span class="total-chip">
+                    <i class="bi bi-people-fill me-1"></i>Total: <?= number_format(count($masterlist)) ?>
+                </span>
+            </div>
+        </div>
+        <?php endif; ?>
+
         <?php foreach ($grouped_masterlist as $grade => $strands):
             $grade_total = 0; $grade_m = 0; $grade_f = 0;
             foreach ($strands as $secs) {
@@ -1117,14 +1290,16 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
                                     <th>Name</th>
                                     <th>Sex</th>
                                     <th>Age</th>
-                                    <th>Status</th>
+                                    <th style="width:130px">Status</th>
                                     <th style="text-align:right;width:70px" class="no-print">Action</th>
                                 </tr>
                             </thead>
                             <tbody>
                             <?php $i = 1; foreach ($students as $m):
                                 $status = $m['status'] ?? 'Active';
-                                $pill = $status === 'Active' ? 'success' : ($status === 'Pending' ? 'warning' : ($status === 'Graduated' ? 'info' : 'muted'));
+                                if ($status === '' || $status === null) $status = 'Active';
+                                $pillClass = $statusPillClass($status);
+                                $statusIconHtml = $statusIcon($status);
                             ?>
                                 <tr>
                                     <td class="cell-muted"><?= $i++ ?></td>
@@ -1133,7 +1308,12 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
                                     <td class="cell-strong"><?= htmlspecialchars($m['last_name'].', '.$m['first_name'].($m['middle_name']?' '.$m['middle_name']:'')) ?></td>
                                     <td><?= htmlspecialchars($m['sex']??'—') ?></td>
                                     <td class="cell-muted"><?= htmlspecialchars($m['age']??'—') ?></td>
-                                    <td><span class="pill <?= $pill ?>"><?= htmlspecialchars($status) ?></span></td>
+                                    <td>
+                                        <span class="pill <?= $pillClass ?>">
+                                            <i class="bi <?= $statusIconHtml ?>"></i>
+                                            <?= htmlspecialchars($status) ?>
+                                        </span>
+                                    </td>
                                     <td style="text-align:right" class="no-print">
                                         <a href="view_student.php?id=<?= (int)$m['student_id'] ?>" class="btn btn-icon btn-outline-primary" title="View">
                                             <i class="bi bi-arrow-right-short" style="font-size:1.15rem"></i>

@@ -19,15 +19,31 @@ $params = [];
 $types  = "";
 
 if ($student_id_filter > 0) {
+    // Single-student export (from view_student.php) is not filtered by status,
+    // so the admin always gets that student's complete record.
     $where[]  = "s.student_id = ?";
     $params[] = $student_id_filter;
     $types   .= "i";
 } else {
     if ($selected_sy !== '')    { $where[] = "e.school_year = ?";  $params[] = $selected_sy;    $types .= "s"; }
-    if ($grade_filter !== '')   { $where[] = "e.grade_level = ?"; $params[] = $grade_filter;   $types .= "s"; }
-    if ($strand_filter !== '')  { $where[] = "e.strand = ?";      $params[] = $strand_filter;  $types .= "s"; }
-    if ($section_filter !== '') { $where[] = "e.section = ?";     $params[] = $section_filter; $types .= "s"; }
-    if ($status_filter !== '')  { $where[] = "e.status = ?";      $params[] = $status_filter;  $types .= "s"; }
+    if ($grade_filter !== '')   { $where[] = "e.grade_level = ?";  $params[] = $grade_filter;   $types .= "s"; }
+    if ($strand_filter !== '')  { $where[] = "e.strand = ?";       $params[] = $strand_filter;  $types .= "s"; }
+    if ($section_filter !== '') { $where[] = "e.section = ?";      $params[] = $section_filter; $types .= "s"; }
+
+    // Pending enrollments are never included in bulk exports
+    $where[] = "(e.status IS NULL OR e.status <> 'Pending')";
+
+    if ($status_filter === '') {
+        // No status chosen: also hide Graduated (they only appear when explicitly selected)
+        $where[] = "(e.status IS NULL OR e.status <> 'Graduated')";
+    } elseif ($status_filter === 'Active') {
+        // NULL status is treated as Active, matching the rest of the system
+        $where[] = "(e.status = 'Active' OR e.status IS NULL)";
+    } else {
+        $where[]  = "e.status = ?";
+        $params[] = $status_filter;
+        $types   .= "s";
+    }
 }
 
 $where_sql = $where ? "WHERE " . implode(" AND ", $where) : "";
@@ -67,6 +83,11 @@ function normalizeTerm($t) {
 /**
  * Fetch all students (with optional filter) plus their enrollments,
  * education, and grades grouped by grade level + term.
+ *
+ * NOTE: `p.mother_name` was removed from this SELECT. It is never written
+ * by edit_student.php or process_enroll.php — only `mother_maiden_name` is.
+ * If your schema happens to define `mother_name`, no harm; if it doesn't,
+ * the previous query threw a fatal error on this page.
  */
 function fetchExportData(mysqli $conn, string $where_sql, array $params, string $types): array {
     $sql = "
@@ -75,7 +96,7 @@ function fetchExportData(mysqli $conn, string $where_sql, array $params, string 
                s.sex, s.birth_date, s.age, s.civil_status, s.nationality, s.religion,
                s.height, s.weight, s.email, s.phone, s.special_skills,
                p.father_name, p.father_occupation, p.father_contact,
-               p.mother_name, p.mother_maiden_name, p.mother_occupation, p.mother_contact,
+               p.mother_maiden_name, p.mother_occupation, p.mother_contact,
                p.guardian_fullname, p.guardian_relation, p.guardian_contact,
                p.ave_family_income, p.is_4ps, p.household_id AS parent_household_id,
                a.purok_street, a.barangay, a.town_city, a.province,
@@ -127,7 +148,6 @@ function fetchExportData(mysqli $conn, string $where_sql, array $params, string 
                     'father_name'       => $r['father_name'],
                     'father_occupation' => $r['father_occupation'],
                     'father_contact'    => $r['father_contact'],
-                    'mother_name'       => $r['mother_name'],
                     'mother_maiden_name'=> $r['mother_maiden_name'],
                     'mother_occupation' => $r['mother_occupation'],
                     'mother_contact'    => $r['mother_contact'],
@@ -301,6 +321,7 @@ if ($student_id_filter > 0) {
     if ($strand_filter !== '')  $filter_desc[] = "Strand: $strand_filter";
     if ($section_filter !== '') $filter_desc[] = "Section: $section_filter";
     if ($status_filter !== '')  $filter_desc[] = "Status: $status_filter";
+    if ($status_filter === '')  $filter_desc[] = "Excludes Graduated & Pending";
 }
 $filter_text = $filter_desc ? implode(' · ', $filter_desc) : 'All students';
 
@@ -725,10 +746,12 @@ if ($format === 'word') {
 }
 
 // ====================== DROPDOWN DATA ======================
-$sy_list      = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC")->fetch_all(MYSQLI_ASSOC) ?: [];
-$grade_list   = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' ORDER BY grade_level ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
-$strand_list  = $conn->query("SELECT DISTINCT strand FROM enrollment_form WHERE strand IS NOT NULL AND strand != '' ORDER BY strand ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
-$section_list = $conn->query("SELECT DISTINCT section FROM enrollment_form WHERE section IS NOT NULL AND section != '' ORDER BY section ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
+// Pending-only values are hidden from the dropdowns. Graduated values stay
+// available because the Status filter can still export graduated students.
+$sy_list      = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' AND (status IS NULL OR status <> 'Pending') ORDER BY school_year DESC")->fetch_all(MYSQLI_ASSOC) ?: [];
+$grade_list   = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' AND (status IS NULL OR status <> 'Pending') ORDER BY grade_level ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
+$strand_list  = $conn->query("SELECT DISTINCT strand FROM enrollment_form WHERE strand IS NOT NULL AND strand != '' AND (status IS NULL OR status <> 'Pending') ORDER BY strand ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
+$section_list = $conn->query("SELECT DISTINCT section FROM enrollment_form WHERE section IS NOT NULL AND section != '' AND (status IS NULL OR status <> 'Pending') ORDER BY section ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
 
 // Preview counts per student (how many have grades, etc.)
 $preview_total = count($students);
@@ -944,6 +967,8 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .btn-primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
         .btn-outline-secondary{color:var(--text-2);border-color:var(--border)}
         .btn-outline-secondary:hover{background:var(--surface-2);color:var(--text);border-color:var(--border-strong)}
+        .btn-outline-danger{color:var(--red);border-color:color-mix(in srgb, var(--red) 35%, transparent)}
+        .btn-outline-danger:hover{background:var(--red);color:#fff;border-color:var(--red)}
         .theme-btn{
             width:38px;height:38px;border-radius:10px;
             border:1px solid var(--border);background:var(--surface);
@@ -1211,6 +1236,15 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 </head>
 <body>
 
+<?php
+    $__current = basename($_SERVER['PHP_SELF']);
+    $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
+    // Student sub-pages all highlight "Students"
+    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
+    $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
+    $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
+?>
+
 <!-- ================= Sidebar ================= -->
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
@@ -1222,9 +1256,10 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     </div>
     <nav class="sidebar-nav">
         <div class="nav-label">Overview</div>
-        <a href="dashboard.php"><i class="bi bi-speedometer2"></i> Dashboard</a>
-        <a href="student_profile.php" class="active"><i class="bi bi-people-fill"></i> Students</a>
+        <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
+        <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
         <?php
+    // Pending badge intentionally counts Pending records (this is the review queue)
     $__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
 ?>
 <a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
@@ -1235,7 +1270,16 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </span>
     <?php endif; ?>
 </a>
-        <a href="reports.php"><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+        <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+
+        <?php if ($__super): ?>
+        <div class="nav-label" style="margin-top:.5rem">Administration</div>
+        <a href="create_account.php"<?= $__a('create_account.php') ?>><i class="bi bi-person-plus"></i> Accounts</a>
+        <a href="audit_log.php"<?= $__a('audit_log.php') ?>><i class="bi bi-shield-check"></i> Audit Log</a>
+        <?php endif; ?>
+
+        <div class="nav-label" style="margin-top:.5rem">Account</div>
+        <a href="profile.php"<?= $__a('profile.php') ?>><i class="bi bi-person-gear"></i> My Profile</a>
     </nav>
     <div class="sidebar-footer">
         <a href="logout.php" class="btn btn-outline-danger btn-sm w-100">

@@ -98,10 +98,6 @@ function assignProvisionalSection(
 
 /**
  * Turn a raw exception message into [user_message, action_hint, step_number].
- *
- * The step number is which wizard step the user should be sent back to so
- * they can fix the problem. Steps: 1=Student, 2=Parents, 3=Address,
- * 4=Education, 5=Enrollment/Documents.
  */
 function classify_enrollment_error(string $msg, string $corr): array
 {
@@ -157,6 +153,13 @@ function classify_enrollment_error(string $msg, string $corr): array
             5,
         ];
     }
+    if (str_contains($m, 'document verification failed') || str_contains($m, 'jhs')) {
+        return [
+            'Your JHS Certificate could not be verified.',
+            'Please re-upload a clearer copy of the Junior High School Certificate (Front).',
+            5,
+        ];
+    }
 
     // ---- Personal info problems → step 1 ----
     if (str_contains($m, 'birth date')) {
@@ -200,16 +203,124 @@ function classify_enrollment_error(string $msg, string $corr): array
     ];
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   VERIFICATION MAPPING HELPERS
+   ─────────────────────────────────────────────────────────────────
+   Convert the in-session verification verdicts (produced by
+   document_content_verify.php and stored on the Review page) into the
+   exact shape that entrance_documents expects.
+   ══════════════════════════════════════════════════════════════════ */
+
+/**
+ * Route a document by its key to the appropriate verdict builder.
+ * Returns null for documents that aren't content-verified.
+ */
+function build_document_content_verdict(string $doc_key): ?array
+{
+    if ($doc_key === 'jhs_certificate_front') {
+        return build_jhs_front_verdict();
+    }
+    if ($doc_key === 'pictures_2x2') {
+        return build_photo_2x2_verdict();
+    }
+    return null;
+}
+
+/**
+ * JHS Certificate (Front) — OCR / pdftotext identity check.
+ */
+function build_jhs_front_verdict(): ?array
+{
+    $nv = $_SESSION['name_verify'] ?? null;
+    if (!is_array($nv) || empty($nv)) {
+        return null;
+    }
+
+    $map = [
+        'match'        => 'verified',
+        'partial'      => 'needs_review',
+        'unverifiable' => 'needs_review',
+        'mismatch'     => 'failed',
+    ];
+    $internal  = $nv['status'] ?? 'unverifiable';
+    $db_status = $map[$internal] ?? 'needs_review';
+
+    $matched_payload = [
+        'name_parts' => [
+            'first'  => $nv['parts']['first']  ?? null,
+            'middle' => $nv['parts']['middle'] ?? null,
+            'last'   => $nv['parts']['last']   ?? null,
+        ],
+        'lrn' => [
+            'expected' => $nv['lrn']['expected'] ?? null,
+            'found'    => $nv['lrn']['best']     ?? null,
+            'distance' => $nv['lrn']['distance'] ?? null,
+        ],
+        'ocr_rotation'   => (int)($nv['rotation'] ?? 0),
+        'ocr_psm'        => (int)($nv['psm']     ?? 6),
+        'ocr_score'      => (int)($nv['score']   ?? 0),
+        'detection_path' => $nv['source']        ?? null,
+    ];
+
+    $notes = [];
+    if (!empty($nv['message']))          $notes[] = $nv['message'];
+    if (!empty($nv['name']['message']))  $notes[] = 'Name: ' . $nv['name']['message'];
+    if (!empty($nv['lrn']['message']))   $notes[] = 'LRN: '  . $nv['lrn']['message'];
+
+    return [
+        'status'       => $db_status,
+        'score'        => (int)($nv['score'] ?? 0),
+        'engine'       => $nv['source'] ?? null,
+        'text_excerpt' => mb_substr((string)($nv['extracted'] ?? ''), 0, 4000),
+        'matched'      => $matched_payload,
+        'notes'        => $notes,
+    ];
+}
+
+/**
+ * 2×2 Picture — lightweight format check.
+ */
+function build_photo_2x2_verdict(): ?array
+{
+    $p2 = $_SESSION['photo_2x2_check'] ?? null;
+    if (!is_array($p2) || empty($p2)) {
+        return null;
+    }
+
+    $map = [
+        'match'        => 'verified',
+        'partial'      => 'needs_review',
+        'unverifiable' => 'needs_review',
+        'mismatch'     => 'failed',
+    ];
+    $db_status = $map[$p2['status'] ?? 'unverifiable'] ?? 'needs_review';
+
+    return [
+        'status'       => $db_status,
+        'score'        => 0,
+        'engine'       => 'format_check',
+        'text_excerpt' => $p2['message'] ?? '',
+        'matched'      => [
+            'check'   => 'aspect_ratio_and_dimensions',
+            'result'  => $p2['status'] ?? 'unknown',
+            'message' => $p2['message'] ?? '',
+        ],
+        'notes'        => [$p2['message'] ?? ''],
+    ];
+}
+
 /**
  * Verify, encrypt, and store a staged file.
  *
- * Structural checks are HARD failures. Content checks are SOFT failures —
- * a mismatch is recorded for the registrar, but does not block enrollment.
+ * The optional $precomputed_content parameter carries the verdict that
+ * already ran on the Review page. When supplied, it replaces the internal
+ * verify_document_content() call and is written verbatim to the DB.
  */
 function store_encrypted_file(
     string $staging_path,
     int $student_id,
-    string $doc_label = ''
+    string $doc_label = '',
+    ?array $precomputed_content = null
 ): array {
     if (!is_file($staging_path)) {
         throw new Exception("Staged file missing.");
@@ -220,17 +331,19 @@ function store_encrypted_file(
         throw new Exception("File verification failed: " . ($verify['error'] ?? 'unknown'));
     }
 
-    // ---- Content check is SOFT: never let a missing helper block enrollment ----
-    if (function_exists('verify_document_content')) {
+    // ── Content check ──
+    if ($precomputed_content !== null) {
+        $content = $precomputed_content;
+    } elseif (function_exists('verify_document_content')) {
         $content = verify_document_content($staging_path, $doc_label);
     } else {
-        error_log('store_encrypted_file: verify_document_content() not available — content check skipped.');
+        error_log('store_encrypted_file: no precomputed content and no verify_document_content() — skipped.');
         $content = [
             'status'  => 'skipped',
             'score'   => 0,
             'engine'  => null,
             'matched' => [],
-            'notes'   => ['Content verification helper was not available at runtime.'],
+            'notes'   => ['No verification data available at save time.'],
         ];
     }
 
@@ -238,16 +351,14 @@ function store_encrypted_file(
 
     if ($content_status === 'failed') {
         error_log(sprintf(
-            'store_encrypted_file: content mismatch for "%s" (score=%d) — downgraded to needs_review. Notes: %s',
+            'store_encrypted_file: content mismatch for "%s" (score=%d) — downgraded to needs_review.',
             $doc_label,
-            (int)($content['score'] ?? 0),
-            implode(' | ', $content['notes'] ?? [])
+            (int)($content['score'] ?? 0)
         ));
-
         $content['status'] = 'needs_review';
         $content['notes']  = array_merge(
             (array)($content['notes'] ?? []),
-            ['Auto-flagged by system: content did not match expected keywords. Registrar must verify manually.']
+            ['Auto-flagged by system: content did not match expected keywords.']
         );
     }
 
@@ -650,7 +761,11 @@ try {
 
             if ($staging === '' || !is_file($staging)) continue;
 
-            $stored = store_encrypted_file($staging, $student_info_id, $label);
+            // ★ NEW: Pull the pre-computed verdict for this specific document.
+            // Returns null for docs that weren't content-verified.
+            $precomputed = build_document_content_verdict($doc_key);
+
+            $stored = store_encrypted_file($staging, $student_info_id, $label, $precomputed);
             $written_files[] = DOCUMENTS_DIR . $stored['filename'];
 
             $safe_name = preg_replace('/[^A-Za-z0-9._\- ]/', '_', $name);
@@ -711,6 +826,7 @@ try {
 
     unset($_SESSION['csrf_token']);
     unset($_SESSION['form_data'], $_SESSION['uploaded_files'], $_SESSION['enroll_error']);
+    unset($_SESSION['name_verify'], $_SESSION['photo_2x2_check']);
 
     $_SESSION['success'] = true;
     $_SESSION['success_message'] = "Your enrollment has been <strong>submitted for review</strong>.<br><br>
@@ -741,7 +857,6 @@ try {
     error_log("Enrollment Error [{$corr}]: " . $raw_msg);
     error_log("Error Trace [{$corr}]: " . $e->getTraceAsString());
 
-    // Debug log for support
     @file_put_contents(
         __DIR__ . '/../enroll_debug.log',
         date('c') . " [{$corr}]\n"
