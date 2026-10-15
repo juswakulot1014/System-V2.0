@@ -1,26 +1,50 @@
-# Force HTTPS redirect — DISABLED
-# Reason: Server is on private IP 10.49.238.160 with a self-signed cert.
-# Public CAs can't sign private IPs, so forcing HTTPS shows
-#   net::ERR_CERT_AUTHORITY_INVALID
-# Re-enable once you have a real domain + Let's Encrypt cert.
-#
-# <IfModule mod_rewrite.c>
-#     RewriteEngine On
-#     RewriteCond %{HTTPS} off
-#     RewriteCond %{HTTP:X-Forwarded-Proto} !https
-#     RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
-# </IfModule>
+# ═════════════════════════════════════════════════════════════════
+# USAT Enrollment System — Apache hardening
+# Only .htaccess-safe directives. Nothing from <Directory>/<VirtualHost>.
+# ═════════════════════════════════════════════════════════════════
 
-<FilesMatch "(^\.|\.env$|\.git|\.htaccess$|\.gitignore$|composer\.(json|lock)$)">
+# ── Turn off directory listing ──
+Options -Indexes
+
+# ── Block direct access to sensitive file extensions ──
+<FilesMatch "\.(log|env|ini|sql|md|bak|old|swp|json|lock|yml|yaml)$">
     Require all denied
 </FilesMatch>
 
+# ── Block dotfiles (.git, .env, .htaccess itself) ──
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# ── Block direct access to config / logs / vendor / staging dirs ──
+RedirectMatch 404 ^/(config|logs|vendor|staging|uploads)(/.*)?$
+
+# ── Force HTTPS (enable once you have a valid certificate) ──
+# <IfModule mod_rewrite.c>
+#     RewriteEngine On
+#     RewriteCond %{HTTPS} off
+#     RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+# </IfModule>
+
+# ── Global security headers (backup layer; PHP also sets these) ──
 <IfModule mod_headers.c>
-    Header unset X-Powered-By
     Header always set X-Content-Type-Options "nosniff"
     Header always set X-Frame-Options "DENY"
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always unset X-Powered-By
 </IfModule>
-php_flag expose_php off
 
-Options -Indexes
+# ── Disable PHP error display (log only) ──
+# NOTE: php_flag / php_value only work if PHP runs as an Apache module
+# (mod_php). On PHP-FPM / CGI, these will error. Comment them out if the
+# server uses FPM.
+# <IfModule mod_php7.c>
+#     php_flag expose_php off
+#     php_flag display_errors off
+#     php_flag log_errors on
+# </IfModule>
+# <IfModule mod_php8.c>
+#     php_flag expose_php off
+#     php_flag display_errors off
+#     php_flag log_errors on
+# </IfModule>

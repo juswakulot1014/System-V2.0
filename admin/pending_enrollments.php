@@ -511,31 +511,44 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 <body>
 
 <?php
-    $__current = basename($_SERVER['PHP_SELF']);
-    $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
-    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php'];
-    $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
-    $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
-?>
+/* ── Sidebar include: shared across all admin pages ── */
+$__current = basename($_SERVER['PHP_SELF']);
+$__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
 
+// Sub-pages that should keep "Students" highlighted
+$__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
+// Graduate and promote pages share the same highlight group
+$__promote_pages = ['promote.php','graduates.php'];
+
+$__act = $__current;
+if (in_array($__current, $__student_pages, true)) $__act = 'student_profile.php';
+
+$__a = fn($f) => $f === $__act ? ' class="active"' : '';
+
+$__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
+?>
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
         <img src="../assets/img/usat.jpg" alt="USAT" onerror="this.style.background='var(--accent)'">
-        <div>
-            <div class="brand-name">USAT Admin</div>
-            <div class="brand-sub">Enrollment System</div>
+        <div class="brand-text">
+            <span class="brand-name">USAT Admin</span>
+            <span class="brand-sub">Enrollment System</span>
         </div>
     </div>
     <nav class="sidebar-nav">
         <div class="nav-label">Overview</div>
         <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
-        <a href="pending_enrollments.php" class="active">
+        <a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
             <i class="bi bi-hourglass-split"></i> Pending
-            <?php if ($stat_total > 0): ?>
-                <span class="badge-pill"><?= $stat_total ?></span>
+            <?php if ($__pending_count > 0): ?>
+                <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
+                    <?= $__pending_count ?>
+                </span>
             <?php endif; ?>
         </a>
+        <a href="promote.php"<?= $__a('promote.php') ?>><i class="bi bi-rocket-takeoff"></i> Promote</a>
+        <a href="graduates.php"<?= $__a('graduates.php') ?>><i class="bi bi-mortarboard-fill"></i> Graduates</a>
         <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
 
         <?php if ($__super): ?>
@@ -553,7 +566,6 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
         </a>
     </div>
 </aside>
-
 <div class="main-content" id="mainContent">
 
     <?php if (isset($_SESSION['success'])): ?>

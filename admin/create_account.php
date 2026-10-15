@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . '/../config/auth.php';
+require_once __DIR__ . '/../config/audit.php';
 
+// Only superadmins may manage accounts
 if (($_SESSION['admin_role'] ?? '') !== 'superadmin') {
     $_SESSION['error'] = "Access Denied! Only the Principal can manage accounts.";
     header("Location: dashboard.php");
@@ -10,35 +12,54 @@ if (($_SESSION['admin_role'] ?? '') !== 'superadmin') {
 // ====================== HANDLE ADD ACCOUNT ======================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_account'])) {
     verify_csrf();
-    $fullname = trim($_POST['fullname']);
-    $username = trim($_POST['username']);
-    $password = $_POST['password'];
-    $role     = trim($_POST['role']);
 
-    if (empty($fullname) || empty($username) || empty($password) || empty($role)) {
+    $fullname = trim((string)($_POST['fullname'] ?? ''));
+    $username = trim((string)($_POST['username'] ?? ''));
+    $password = (string)($_POST['password'] ?? '');
+    $role     = trim((string)($_POST['role'] ?? ''));
+
+    // ---- Input validation ----
+    if ($fullname === '' || $username === '' || $password === '' || $role === '') {
         $_SESSION['error'] = "All fields are required!";
-    } elseif (strlen($password) < 8) {
-        $_SESSION['error'] = "Password must be at least 8 characters!";
+    } elseif (!preg_match('/^[A-Za-z0-9_.\-]{3,50}$/', $username)) {
+        $_SESSION['error'] = "Username must be 3–50 characters and contain only letters, numbers, dots, dashes, or underscores.";
+    } elseif (!in_array($role, ['registrar', 'superadmin'], true)) {
+        $_SESSION['error'] = "Invalid role selected.";
+    } elseif (($pw_err = validate_strong_password($password)) !== null) {
+        $_SESSION['error'] = $pw_err;
     } else {
-        $check = $conn->prepare("SELECT id FROM admins WHERE username = ?");
+        // ---- Duplicate username check (prepared) ----
+        $check = $conn->prepare("SELECT id FROM admins WHERE username = ? LIMIT 1");
         $check->bind_param("s", $username);
         $check->execute();
+        $exists = $check->get_result()->num_rows > 0;
+        $check->close();
 
-        if ($check->get_result()->num_rows > 0) {
+        if ($exists) {
             $_SESSION['error'] = "Username already exists!";
         } else {
-            $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+            $hashed = password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
+
             $stmt = $conn->prepare("INSERT INTO admins (fullname, username, password, role) VALUES (?, ?, ?, ?)");
-            $stmt->bind_param("ssss", $fullname, $username, $hashed_password, $role);
+            $stmt->bind_param("ssss", $fullname, $username, $hashed, $role);
 
             if ($stmt->execute()) {
+                $new_id = (int)$conn->insert_id;
+                $stmt->close();
+
+                audit_log($conn, 'admin.create', [
+                    'type'     => 'admin',
+                    'id'       => $new_id,
+                    'username' => $username,
+                    'role'     => $role,
+                ]);
+
                 $_SESSION['success'] = "Account created for " . htmlspecialchars($fullname) . "!";
             } else {
+                $stmt->close();
                 $_SESSION['error'] = "Failed to create account.";
             }
-            $stmt->close();
         }
-        $check->close();
     }
     header("Location: create_account.php");
     exit();
@@ -47,21 +68,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_account'])) {
 // ====================== HANDLE DELETE ACCOUNT ======================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_account'])) {
     verify_csrf();
-    $account_id = (int)$_POST['account_id'];
 
-    if ($account_id == $_SESSION['admin_id']) {
+    $account_id = (int)($_POST['account_id'] ?? 0);
+
+    if ($account_id <= 0) {
+        $_SESSION['error'] = "Invalid account ID.";
+        header("Location: create_account.php");
+        exit();
+    }
+
+    if ($account_id === (int)($_SESSION['admin_id'] ?? 0)) {
         $_SESSION['error'] = "You cannot delete your own account!";
     } else {
-        $count_sa = $conn->query("SELECT COUNT(*) as cnt FROM admins WHERE role='superadmin'")->fetch_assoc()['cnt'];
-        $target_role = $conn->query("SELECT role FROM admins WHERE id=$account_id")->fetch_assoc()['role'] ?? '';
+        // ---- Count superadmins (prepared) ----
+        $count_stmt = $conn->prepare("SELECT COUNT(*) AS cnt FROM admins WHERE role = ?");
+        $sa_role    = 'superadmin';
+        $count_stmt->bind_param("s", $sa_role);
+        $count_stmt->execute();
+        $count_sa = (int)($count_stmt->get_result()->fetch_assoc()['cnt'] ?? 0);
+        $count_stmt->close();
 
-        if ($target_role === 'superadmin' && $count_sa <= 1) {
+        // ---- Fetch target role (prepared — was raw interpolation) ----
+        $role_stmt = $conn->prepare("SELECT fullname, username, role FROM admins WHERE id = ? LIMIT 1");
+        $role_stmt->bind_param("i", $account_id);
+        $role_stmt->execute();
+        $target = $role_stmt->get_result()->fetch_assoc();
+        $role_stmt->close();
+
+        if (!$target) {
+            $_SESSION['error'] = "Account not found.";
+        } elseif ($target['role'] === 'superadmin' && $count_sa <= 1) {
             $_SESSION['error'] = "Cannot delete the last Super Admin account!";
         } else {
-            $stmt = $conn->prepare("DELETE FROM admins WHERE id = ?");
-            $stmt->bind_param("i", $account_id);
-            $stmt->execute() ? $_SESSION['success'] = "Account deleted!" : $_SESSION['error'] = "Failed to delete.";
-            $stmt->close();
+            $del = $conn->prepare("DELETE FROM admins WHERE id = ?");
+            $del->bind_param("i", $account_id);
+            $ok = $del->execute();
+            $del->close();
+
+            if ($ok) {
+                audit_log($conn, 'admin.delete', [
+                    'type'     => 'admin',
+                    'id'       => $account_id,
+                    'username' => $target['username'],
+                    'role'     => $target['role'],
+                ]);
+                $_SESSION['success'] = "Account deleted!";
+            } else {
+                $_SESSION['error'] = "Failed to delete.";
+            }
         }
     }
     header("Location: create_account.php");
@@ -70,13 +124,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_account'])) {
 
 // ====================== FETCH ACCOUNTS ======================
 $accounts = $conn->query("SELECT id, fullname, username, role, created_at FROM admins ORDER BY created_at DESC")->fetch_all(MYSQLI_ASSOC);
-$total_accounts = count($accounts);
-$superadmin_count = count(array_filter($accounts, fn($a) => $a['role'] === 'superadmin'));
-$registrar_count = $total_accounts - $superadmin_count;
+
+$total_accounts   = count($accounts);
+$superadmin_count = 0;
+$registrar_count  = 0;
+foreach ($accounts as $a) {
+    if (($a['role'] ?? '') === 'superadmin') $superadmin_count++;
+    else                                     $registrar_count++;
+}
 
 $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 'dark' : 'light';
 ?>
-
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="<?= $theme ?>">
 <head>
@@ -84,22 +142,14 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Accounts • USAT Admin</title>
 
-    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700;14..32,800&display=swap" rel="stylesheet">
-
-    <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-
-    <!-- Bootstrap Icons — served from cdnjs because CSP font-src allows it -->
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
 
     <style>
-        /* ============================================================
-           Design tokens (matches dashboard.php / student_profile.php)
-           ============================================================ */
         :root {
             --bg: #f4f6fb;
             --surface: #ffffff;
@@ -129,7 +179,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             --radius-sm: 8px;
             --radius: 12px;
             --radius-lg: 16px;
-            --radius-xl: 20px;
 
             --sidebar-w: 264px;
         }
@@ -165,9 +214,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             -webkit-font-smoothing:antialiased;
         }
 
-        /* ============================================================
-           Sidebar
-           ============================================================ */
         .sidebar{
             position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);
             background:var(--surface);border-right:1px solid var(--border);
@@ -206,9 +252,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .sidebar-nav a i{font-size:1.05rem;width:20px;text-align:center;flex-shrink:0}
         .sidebar-footer{padding:.75rem;border-top:1px solid var(--border)}
 
-        /* ============================================================
-           Main content
-           ============================================================ */
         .main-content{
             margin-left:var(--sidebar-w);
             padding:1.5rem clamp(1rem,2.5vw,2rem) 2rem;
@@ -230,9 +273,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .menu-toggle:hover{background:var(--surface-2)}
 
-        /* ============================================================
-           Stat cards
-           ============================================================ */
         .stat-grid{
             display:grid;
             grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
@@ -281,9 +321,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             font-size:.72rem;color:var(--text-3);margin-top:.3rem;font-weight:500;
         }
 
-        /* ============================================================
-           Cards
-           ============================================================ */
         .card{
             background:var(--surface);border-radius:var(--radius-lg);
             border:1px solid var(--border);box-shadow:var(--shadow-sm);
@@ -303,9 +340,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .card-body{padding:1.25rem}
         .card-body.no-padding{padding:0}
 
-        /* ============================================================
-           Table
-           ============================================================ */
         .table-scroll{overflow-x:auto}
         .table-admin{width:100%;border-collapse:separate;border-spacing:0}
         .table-admin thead th{
@@ -333,9 +367,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .cell-muted{color:var(--text-2);font-size:.82rem}
         .cell-center{text-align:center}
 
-        /* ============================================================
-           Avatar (account row)
-           ============================================================ */
         .account-cell{display:flex;align-items:center;gap:.75rem;min-width:0}
         .account-avatar{
             width:38px;height:38px;border-radius:50%;
@@ -349,9 +380,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .account-info .nm{font-weight:600;font-size:.88rem;line-height:1.2;color:var(--text)}
         .account-info .un{font-size:.74rem;color:var(--text-2);font-variant-numeric:tabular-nums}
 
-        /* ============================================================
-           Pills / badges
-           ============================================================ */
         .pill{
             display:inline-flex;align-items:center;gap:.35rem;
             padding:.25rem .65rem;border-radius:999px;
@@ -366,9 +394,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .pill.warning{background:var(--amber-soft);color:var(--amber);border-color:color-mix(in srgb, var(--amber) 22%, transparent)}
         .pill.muted  {background:var(--surface-2);color:var(--text-2);border-color:var(--border)}
 
-        /* ============================================================
-           Buttons
-           ============================================================ */
         .btn{font-weight:500;border-radius:9px;font-size:.82rem;transition:all .15s}
         .btn-primary{background:var(--accent);border-color:var(--accent)}
         .btn-primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
@@ -393,9 +418,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .theme-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
 
-        /* ============================================================
-           Modals
-           ============================================================ */
         .modal-content{border-radius:var(--radius-lg);border:none;box-shadow:var(--shadow-lg)}
         .modal-header{
             padding:1rem 1.25rem;border-bottom:1px solid var(--border);
@@ -422,9 +444,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             color:var(--text-3);pointer-events:none;font-size:.9rem;
         }
 
-        /* ============================================================
-           Empty state
-           ============================================================ */
         .empty{
             padding:3rem 1.5rem;text-align:center;color:var(--text-2);
         }
@@ -437,9 +456,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .empty .empty-title{font-weight:600;color:var(--text);margin-bottom:.25rem}
         .empty .empty-sub{font-size:.85rem;color:var(--text-2)}
 
-        /* ============================================================
-           Flash alerts
-           ============================================================ */
         .flash{
             display:flex;align-items:center;gap:.65rem;
             padding:.75rem 1rem;border-radius:var(--radius);
@@ -450,9 +466,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .flash.error  {background:var(--red-soft);  color:var(--red);  border-color:color-mix(in srgb, var(--red) 25%, transparent)}
         .flash .btn-close{margin-left:auto;opacity:.6}
 
-        /* ============================================================
-           Responsive
-           ============================================================ */
         @media (max-width:1024px){
             .sidebar{transform:translateX(-100%)}
             .sidebar.open{transform:translateX(0)}
@@ -471,14 +484,22 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 <body>
 
 <?php
-    $__current = basename($_SERVER['PHP_SELF']);
-    $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
-    // Student sub-pages all highlight "Students"
-    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
-    $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
-    $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
+/* ── Sidebar include: shared across all admin pages ── */
+$__current = basename($_SERVER['PHP_SELF']);
+$__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
+
+// Sub-pages that should keep "Students" highlighted
+$__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
+// Graduate and promote pages share the same highlight group
+$__promote_pages = ['promote.php','graduates.php'];
+
+$__act = $__current;
+if (in_array($__current, $__student_pages, true)) $__act = 'student_profile.php';
+
+$__a = fn($f) => $f === $__act ? ' class="active"' : '';
+
+$__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
 ?>
-<!-- ================= Sidebar ================= -->
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
         <img src="../assets/img/usat.jpg" alt="USAT" onerror="this.style.background='var(--accent)'">
@@ -491,17 +512,16 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         <div class="nav-label">Overview</div>
         <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
-        <?php
-    $__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
-?>
-<a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
-    <i class="bi bi-hourglass-split"></i> Pending
-    <?php if ($__pending_count > 0): ?>
-        <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
-            <?= $__pending_count ?>
-        </span>
-    <?php endif; ?>
-</a>
+        <a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
+            <i class="bi bi-hourglass-split"></i> Pending
+            <?php if ($__pending_count > 0): ?>
+                <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
+                    <?= $__pending_count ?>
+                </span>
+            <?php endif; ?>
+        </a>
+        <a href="promote.php"<?= $__a('promote.php') ?>><i class="bi bi-rocket-takeoff"></i> Promote</a>
+        <a href="graduates.php"<?= $__a('graduates.php') ?>><i class="bi bi-mortarboard-fill"></i> Graduates</a>
         <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
 
         <?php if ($__super): ?>
@@ -521,7 +541,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 </aside>
 <div class="main-content" id="mainContent">
 
-    <!-- ================= Flash alerts ================= -->
     <?php if(isset($_SESSION['success'])): ?>
         <div class="flash success">
             <i class="bi bi-check-circle-fill"></i>
@@ -537,7 +556,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
         <?php unset($_SESSION['error']); endif; ?>
 
-    <!-- ================= Topbar ================= -->
     <div class="topbar">
         <div class="d-flex align-items-center gap-3">
             <button class="menu-toggle" id="menuToggle"><i class="bi bi-list fs-5"></i></button>
@@ -560,7 +578,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
     </div>
 
-    <!-- ================= Stat grid ================= -->
     <div class="stat-grid">
         <div class="stat-card tone-blue">
             <div class="stat-icon"><i class="bi bi-people-fill"></i></div>
@@ -588,7 +605,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
     </div>
 
-    <!-- ================= Accounts table ================= -->
     <div class="card">
         <div class="card-header">
             <h3>
@@ -614,9 +630,9 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
                         </thead>
                         <tbody>
                         <?php foreach($accounts as $row):
-                            $is_self = ($row['id'] == $_SESSION['admin_id']);
+                            $is_self  = ((int)$row['id'] === (int)($_SESSION['admin_id'] ?? 0));
                             $is_super = ($row['role'] === 'superadmin');
-                            $parts = explode(' ', trim($row['fullname']));
+                            $parts    = preg_split('/\s+/', trim((string)$row['fullname']));
                             $initials = strtoupper(substr($parts[0] ?? '?', 0, 1) . substr(end($parts) ?: '', 0, 1));
                         ?>
                             <tr class="<?= $is_self ? 'is-self' : '' ?>">
@@ -644,8 +660,10 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
                                 <td class="cell-muted"><?= date('M d, Y', strtotime($row['created_at'])) ?></td>
                                 <td style="text-align:center">
                                     <?php if(!$is_self): ?>
-                                        <button class="btn btn-outline-danger btn-xs"
-                                                onclick="confirmDelete(<?= (int)$row['id'] ?>,'<?= addslashes(htmlspecialchars($row['fullname'])) ?>')">
+                                        <button type="button"
+                                                class="btn btn-outline-danger btn-xs delete-btn"
+                                                data-id="<?= (int)$row['id'] ?>"
+                                                data-name="<?= htmlspecialchars($row['fullname'], ENT_QUOTES, 'UTF-8') ?>">
                                             <i class="bi bi-trash3 me-1"></i> Delete
                                         </button>
                                     <?php else: ?>
@@ -671,11 +689,10 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 <div id="sidebarOverlay" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.5);backdrop-filter:blur(2px);z-index:199"
      onclick="document.getElementById('sidebar').classList.remove('open');this.style.display='none'"></div>
 
-<!-- ================= Add Account Modal ================= -->
 <div class="modal fade" id="addAccountModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
-            <form method="POST">
+            <form method="POST" autocomplete="off">
                 <div class="modal-header">
                     <h6 class="modal-title fw-bold"><i class="bi bi-person-plus me-2"></i>Create New Account</h6>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
@@ -685,19 +702,20 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 
                     <div class="mb-3">
                         <label class="form-label">Full Name</label>
-                        <input type="text" name="fullname" class="form-control" placeholder="e.g. Juan Dela Cruz" required>
+                        <input type="text" name="fullname" class="form-control" placeholder="e.g. Juan Dela Cruz" required maxlength="100" autocomplete="off">
                     </div>
                     <div class="mb-3">
                         <label class="form-label">Username</label>
-                        <input type="text" name="username" class="form-control" placeholder="e.g. juan_admin" required autocomplete="off">
+                        <input type="text" name="username" class="form-control" placeholder="e.g. juan_admin" required maxlength="50" pattern="[A-Za-z0-9_.\-]{3,50}" autocomplete="off">
+                        <div class="form-text mt-1">3–50 characters. Letters, numbers, dots, dashes, underscores only.</div>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">Password</label>
                         <div class="input-group-icon">
-                            <input type="password" name="password" id="newAccountPassword" class="form-control" placeholder="Min. 8 characters" minlength="8" required autocomplete="new-password">
+                            <input type="password" name="password" id="newAccountPassword" class="form-control" placeholder="Min. 10 characters" minlength="10" maxlength="128" required autocomplete="new-password">
                             <i class="bi bi-eye" id="togglePassword" style="pointer-events:auto;cursor:pointer" title="Show password"></i>
                         </div>
-                        <div class="form-text mt-1">Minimum 8 characters. Use a strong, unique password.</div>
+                        <div class="form-text mt-1">At least 10 characters with uppercase, lowercase, number, and special character.</div>
                     </div>
                     <div class="mb-0">
                         <label class="form-label">Role</label>
@@ -719,7 +737,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     </div>
 </div>
 
-<!-- ================= Delete Confirmation Modal ================= -->
 <div class="modal fade" id="deleteConfirmModal" tabindex="-1">
     <div class="modal-dialog modal-sm modal-dialog-centered">
         <div class="modal-content">
@@ -764,16 +781,20 @@ function st(t) {
 }
 (function () {
     const m = document.cookie.match(/admin_theme=([^;]+)/);
-    st(m ? m[1] : 'light');
+    st(m ? decodeURIComponent(m[1]) : 'light');
 })();
 tb.addEventListener('click', () => st(h.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark'));
 
-// ---------- Delete confirmation ----------
-function confirmDelete(id, name) {
-    document.getElementById('deleteAccountId').value = id;
-    document.getElementById('deleteAccountName').textContent = name;
-    new bootstrap.Modal(document.getElementById('deleteConfirmModal')).show();
-}
+// ---------- Delete confirmation (safe — no inline JS, no string injection) ----------
+const deleteModal = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
+
+document.querySelectorAll('.delete-btn').forEach(btn => {
+    btn.addEventListener('click', function () {
+        document.getElementById('deleteAccountId').value = this.dataset.id;
+        document.getElementById('deleteAccountName').textContent = this.dataset.name;
+        deleteModal.show();
+    });
+});
 
 // ---------- Show/hide password ----------
 const pw = document.getElementById('newAccountPassword');
@@ -786,7 +807,7 @@ if (pw && tp) {
     });
 }
 
-// ---------- Clear form when modal closes (so error state doesn't persist) ----------
+// ---------- Clear form when modal closes ----------
 const addModal = document.getElementById('addAccountModal');
 if (addModal) {
     addModal.addEventListener('hidden.bs.modal', function () {

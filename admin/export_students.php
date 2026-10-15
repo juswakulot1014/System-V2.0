@@ -8,42 +8,35 @@ $mode   = $_GET['mode']   ?? 'students';  // CSV mode: 'students' | 'grades' | '
 
 $student_id_filter = (int)($_GET['student_id'] ?? 0);
 
-$selected_sy    = trim($_GET['school_year']    ?? '');
-$grade_filter   = trim($_GET['grade_level']    ?? '');
-$strand_filter  = trim($_GET['strand_filter']  ?? '');
-$section_filter = trim($_GET['section_filter'] ?? '');
-$status_filter  = trim($_GET['status_filter']  ?? '');
+$selected_sy    = trim((string)($_GET['school_year']    ?? ''));
+$grade_filter   = trim((string)($_GET['grade_level']    ?? ''));
+$strand_filter  = trim((string)($_GET['strand_filter']  ?? ''));
+$section_filter = trim((string)($_GET['section_filter'] ?? ''));
+$status_filter  = trim((string)($_GET['status_filter']  ?? ''));
 
 $where  = [];
 $params = [];
 $types  = "";
 
 if ($student_id_filter > 0) {
-    // Single-student export (from view_student.php) is not filtered by status,
-    // so the admin always gets that student's complete record.
     $where[]  = "s.student_id = ?";
     $params[] = $student_id_filter;
     $types   .= "i";
 } else {
-    if ($selected_sy !== '')    { $where[] = "e.school_year = ?";  $params[] = $selected_sy;    $types .= "s"; }
-    if ($grade_filter !== '')   { $where[] = "e.grade_level = ?";  $params[] = $grade_filter;   $types .= "s"; }
-    if ($strand_filter !== '')  { $where[] = "e.strand = ?";       $params[] = $strand_filter;  $types .= "s"; }
-    if ($section_filter !== '') { $where[] = "e.section = ?";      $params[] = $section_filter; $types .= "s"; }
-
-    // Pending enrollments are never included in bulk exports
-    $where[] = "(e.status IS NULL OR e.status <> 'Pending')";
-
-    if ($status_filter === '') {
-        // No status chosen: also hide Graduated (they only appear when explicitly selected)
-        $where[] = "(e.status IS NULL OR e.status <> 'Graduated')";
-    } elseif ($status_filter === 'Active') {
-        // NULL status is treated as Active, matching the rest of the system
-        $where[] = "(e.status = 'Active' OR e.status IS NULL)";
-    } else {
-        $where[]  = "e.status = ?";
+    // Graduated and Pending are excluded by default.
+    // Picking an explicit status overrides the default and includes only that status.
+    if ($status_filter !== '') {
+        $where[] = "COALESCE(e.status, 'Active') = ?";
         $params[] = $status_filter;
-        $types   .= "s";
+        $types .= "s";
+    } else {
+        $where[] = "COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending')";
     }
+
+    if ($selected_sy !== '')    { $where[] = "e.school_year = ?";  $params[] = $selected_sy;    $types .= "s"; }
+    if ($grade_filter !== '')   { $where[] = "e.grade_level = ?"; $params[] = $grade_filter;   $types .= "s"; }
+    if ($strand_filter !== '')  { $where[] = "e.strand = ?";      $params[] = $strand_filter;  $types .= "s"; }
+    if ($section_filter !== '') { $where[] = "e.section = ?";     $params[] = $section_filter; $types .= "s"; }
 }
 
 $where_sql = $where ? "WHERE " . implode(" AND ", $where) : "";
@@ -84,10 +77,10 @@ function normalizeTerm($t) {
  * Fetch all students (with optional filter) plus their enrollments,
  * education, and grades grouped by grade level + term.
  *
- * NOTE: `p.mother_name` was removed from this SELECT. It is never written
+ * NOTE: `p.mother_name` is intentionally NOT selected. It is never written
  * by edit_student.php or process_enroll.php — only `mother_maiden_name` is.
  * If your schema happens to define `mother_name`, no harm; if it doesn't,
- * the previous query threw a fatal error on this page.
+ * selecting it would throw a fatal error on this page.
  */
 function fetchExportData(mysqli $conn, string $where_sql, array $params, string $types): array {
     $sql = "
@@ -261,7 +254,6 @@ function buildGradeStructure(array $grades): array {
         ];
     }
 
-    // Sort subjects alphabetically within each term
     foreach ($structure as $gl => &$terms) {
         foreach ($terms as $tm => &$subjects) {
             usort($subjects, function($a, $b) {
@@ -321,9 +313,8 @@ if ($student_id_filter > 0) {
     if ($strand_filter !== '')  $filter_desc[] = "Strand: $strand_filter";
     if ($section_filter !== '') $filter_desc[] = "Section: $section_filter";
     if ($status_filter !== '')  $filter_desc[] = "Status: $status_filter";
-    if ($status_filter === '')  $filter_desc[] = "Excludes Graduated & Pending";
 }
-$filter_text = $filter_desc ? implode(' · ', $filter_desc) : 'All students';
+$filter_text = $filter_desc ? implode(' · ', $filter_desc) : 'All students (excl. Graduated & Pending)';
 
 // ====================== CSV EXPORT ======================
 if ($format === 'csv') {
@@ -379,7 +370,6 @@ if ($format === 'csv') {
             'Status','Voucher Status',
         ];
 
-        // Grade columns for Grade 11 (3 terms) and Grade 12 (3 terms)
         foreach (['Grade 11', 'Grade 12'] as $gl) {
             foreach (['1st Term', '2nd Term', '3rd Term'] as $tm) {
                 $header[] = "$gl - $tm";
@@ -426,7 +416,6 @@ if ($format === 'csv') {
                         $base[] = '';
                         continue;
                     }
-                    // Compose "CODE: grade | CODE: grade | ..."
                     $parts = [];
                     foreach ($subs as $sub) {
                         $code = $sub['code'] ?: $sub['name'];
@@ -664,7 +653,7 @@ if ($format === 'word') {
             }
             echo '</table>';
 
-            // Transferee info (from any enrollment that has it)
+            // Transferee info
             $prevInfo = null;
             foreach ($s['enrollments'] as $en) {
                 if (!empty($en['previous_school_name'])) { $prevInfo = $en; break; }
@@ -718,7 +707,6 @@ if ($format === 'word') {
                     echo '<td style="text-align:center">' . htmlspecialchars($remark) . '</td>';
                     echo '</tr>';
                 }
-                // Term GWA row
                 echo '<tr class="gwa-row">';
                 echo '<td colspan="2" style="text-align:right">General Average for ' . htmlspecialchars($tm) . ':</td>';
                 echo '<td class="grade-num">' . ($tmGwa !== null ? number_format($tmGwa, 2) : '—') . '</td>';
@@ -746,15 +734,12 @@ if ($format === 'word') {
 }
 
 // ====================== DROPDOWN DATA ======================
-// Pending-only values are hidden from the dropdowns. Graduated values stay
-// available because the Status filter can still export graduated students.
-$sy_list      = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' AND (status IS NULL OR status <> 'Pending') ORDER BY school_year DESC")->fetch_all(MYSQLI_ASSOC) ?: [];
-$grade_list   = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' AND (status IS NULL OR status <> 'Pending') ORDER BY grade_level ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
-$strand_list  = $conn->query("SELECT DISTINCT strand FROM enrollment_form WHERE strand IS NOT NULL AND strand != '' AND (status IS NULL OR status <> 'Pending') ORDER BY strand ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
-$section_list = $conn->query("SELECT DISTINCT section FROM enrollment_form WHERE section IS NOT NULL AND section != '' AND (status IS NULL OR status <> 'Pending') ORDER BY section ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
+$sy_list      = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC")->fetch_all(MYSQLI_ASSOC) ?: [];
+$grade_list   = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' ORDER BY grade_level ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
+$strand_list  = $conn->query("SELECT DISTINCT strand FROM enrollment_form WHERE strand IS NOT NULL AND strand != '' ORDER BY strand ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
+$section_list = $conn->query("SELECT DISTINCT section FROM enrollment_form WHERE section IS NOT NULL AND section != '' ORDER BY section ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
 
-// Preview counts per student (how many have grades, etc.)
-$preview_total = count($students);
+$preview_total       = count($students);
 $preview_with_grades = 0;
 foreach ($students as $s) { if (!empty($s['grades'])) $preview_with_grades++; }
 
@@ -767,22 +752,14 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= $student_id_filter > 0 ? 'Export Student' : 'Export Students' ?> • USAT Admin</title>
 
-    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700;14..32,800&display=swap" rel="stylesheet">
-
-    <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-
-    <!-- Bootstrap Icons — served from cdnjs because CSP font-src allows it -->
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
 
     <style>
-        /* ============================================================
-           Design tokens (matched to the rest of the app)
-           ============================================================ */
         :root {
             --bg: #f4f6fb;
             --surface: #ffffff;
@@ -851,9 +828,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             -webkit-font-smoothing:antialiased;
         }
 
-        /* ============================================================
-           Sidebar
-           ============================================================ */
         .sidebar{
             position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);
             background:var(--surface);border-right:1px solid var(--border);
@@ -892,9 +866,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .sidebar-nav a i{font-size:1.05rem;width:20px;text-align:center;flex-shrink:0}
         .sidebar-footer{padding:.75rem;border-top:1px solid var(--border)}
 
-        /* ============================================================
-           Main content
-           ============================================================ */
         .main-content{
             margin-left:var(--sidebar-w);
             padding:1.5rem clamp(1rem,2.5vw,2rem) 2rem;
@@ -923,9 +894,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .breadcrumb-nav a{color:var(--accent);text-decoration:none;font-weight:500}
         .breadcrumb-nav a:hover{text-decoration:underline}
 
-        /* ============================================================
-           Cards
-           ============================================================ */
         .card{
             background:var(--surface);border-radius:var(--radius-lg);
             border:1px solid var(--border);box-shadow:var(--shadow-sm);
@@ -945,9 +913,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .card-body{padding:1.25rem}
         .card-body.no-padding{padding:0}
 
-        /* ============================================================
-           Meta badge
-           ============================================================ */
         .meta-badge{
             font-size:.72rem;font-weight:600;
             padding:.25rem .7rem;border-radius:999px;
@@ -959,9 +924,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             border-color:color-mix(in srgb, var(--green) 22%, transparent);
         }
 
-        /* ============================================================
-           Buttons
-           ============================================================ */
         .btn{font-weight:500;border-radius:9px;font-size:.82rem;transition:all .15s}
         .btn-primary{background:var(--accent);border-color:var(--accent)}
         .btn-primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
@@ -978,9 +940,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .theme-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
 
-        /* ============================================================
-           Single student banner
-           ============================================================ */
         .single-banner{
             background:linear-gradient(135deg,var(--accent),var(--accent-2));
             color:#fff;padding:1.35rem 1.5rem;
@@ -1024,9 +983,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .single-banner .btn-light:hover{background:#fff;transform:translateY(-1px)}
 
-        /* ============================================================
-           Filter bar
-           ============================================================ */
         .filter-bar{
             display:grid;
             grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
@@ -1055,9 +1011,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             margin-top:.25rem;
         }
 
-        /* ============================================================
-           Export cards
-           ============================================================ */
         .export-grid{
             display:grid;
             grid-template-columns:repeat(auto-fit,minmax(340px,1fr));
@@ -1118,7 +1071,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             color:var(--accent);
         }
 
-        /* Export icon tones */
         .icon-word  {background:linear-gradient(135deg,var(--blue-soft),#bfdbfe);color:var(--blue)}
         .icon-csv   {background:linear-gradient(135deg,var(--green-soft),#a7f3d0);color:var(--green)}
         .icon-grades{background:linear-gradient(135deg,var(--amber-soft),#fde68a);color:var(--amber)}
@@ -1128,9 +1080,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         [data-bs-theme="dark"] .icon-grades{background:linear-gradient(135deg,#78350f,#92400e);color:#fde68a}
         [data-bs-theme="dark"] .icon-full  {background:linear-gradient(135deg,#4c1d95,#5b21b6);color:#ddd6fe}
 
-        /* ============================================================
-           Preview table
-           ============================================================ */
         .table-scroll{overflow-x:auto}
         .table-admin{width:100%;border-collapse:separate;border-spacing:0}
         .table-admin thead th{
@@ -1164,9 +1113,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             color:var(--accent);font-size:.88rem;
         }
 
-        /* ============================================================
-           Pills
-           ============================================================ */
         .pill{
             display:inline-flex;align-items:center;gap:.35rem;
             padding:.22rem .65rem;border-radius:999px;
@@ -1186,9 +1132,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             font-variant-numeric:tabular-nums;
         }
 
-        /* ============================================================
-           Empty state
-           ============================================================ */
         .empty{
             padding:3rem 1.5rem;text-align:center;color:var(--text-2);
         }
@@ -1201,9 +1144,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .empty .empty-title{font-weight:600;color:var(--text);margin-bottom:.25rem}
         .empty .empty-sub{font-size:.85rem;color:var(--text-2)}
 
-        /* ============================================================
-           Table footer note
-           ============================================================ */
         .table-note{
             text-align:center;
             padding:.85rem 1rem;
@@ -1213,9 +1153,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .table-note i{color:var(--accent);margin-right:.3rem}
 
-        /* ============================================================
-           Responsive
-           ============================================================ */
         @media (max-width:1024px){
             .sidebar{transform:translateX(-100%)}
             .sidebar.open{transform:translateX(0)}
@@ -1239,13 +1176,10 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 <?php
     $__current = basename($_SERVER['PHP_SELF']);
     $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
-    // Student sub-pages all highlight "Students"
     $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
     $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
     $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
 ?>
-
-<!-- ================= Sidebar ================= -->
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
         <img src="../assets/img/usat.jpg" alt="USAT" onerror="this.style.background='var(--accent)'">
@@ -1259,7 +1193,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
         <?php
-    // Pending badge intentionally counts Pending records (this is the review queue)
     $__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
 ?>
 <a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
@@ -1290,7 +1223,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 
 <div class="main-content">
 
-    <!-- ================= Topbar ================= -->
     <div class="topbar">
         <div class="d-flex align-items-center gap-3">
             <button class="menu-toggle" id="menuToggle"><i class="bi bi-list fs-5"></i></button>
@@ -1315,10 +1247,8 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </button>
     </div>
 
-    <!-- ================= Single student banner ================= -->
     <?php if ($student_id_filter > 0 && $single_name): ?>
         <?php
-        // Safe initials extraction
         $nameParts = explode(',', $single_name);
         $lastInitial  = trim(substr($nameParts[0] ?? 'S', 0, 1));
         $firstInitial = trim(substr($nameParts[1] ?? 'S', 0, 1));
@@ -1339,7 +1269,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
     <?php endif; ?>
 
-    <!-- ================= Filters ================= -->
     <?php if ($student_id_filter <= 0): ?>
     <div class="card">
         <div class="card-header">
@@ -1390,8 +1319,8 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
                 <div class="field">
                     <label for="f_status">Status</label>
                     <select id="f_status" name="status_filter">
-                        <option value="">All</option>
-                        <?php foreach (['Active','Transferred','Stopped','Dropped','Graduated'] as $st): ?>
+                        <option value="">All (excl. Graduated &amp; Pending)</option>
+                        <?php foreach (['Active','Pending','Transferred','Stopped','Dropped','Graduated'] as $st): ?>
                             <option value="<?= $st ?>" <?= $status_filter === $st ? 'selected' : '' ?>><?= $st ?></option>
                         <?php endforeach; ?>
                     </select>
@@ -1409,7 +1338,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     </div>
     <?php endif; ?>
 
-    <!-- ================= Export formats ================= -->
     <div class="card">
         <div class="card-header">
             <h3><i class="bi bi-download"></i> Export Formats</h3>
@@ -1480,7 +1408,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
     </div>
 
-    <!-- ================= Preview ================= -->
     <div class="card">
         <div class="card-header">
             <h3><i class="bi bi-eye"></i> Preview</h3>
@@ -1518,7 +1445,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
                                 $info = $s['info'];
                                 $name = trim(($info['last_name'] ?? '') . ', ' . ($info['first_name'] ?? '') . ' ' . ($info['middle_name'] ?? ''));
 
-                                // Determine current grade level from latest enrollment
                                 $latestEn = null;
                                 if (!empty($s['enrollments'])) {
                                     $latestEn = end($s['enrollments']);
@@ -1616,7 +1542,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-// ---------- Sidebar ----------
 const sb = document.getElementById('sidebar');
 const ov = document.getElementById('sidebarOverlay');
 document.getElementById('menuToggle')?.addEventListener('click', () => {
@@ -1624,7 +1549,6 @@ document.getElementById('menuToggle')?.addEventListener('click', () => {
     ov.style.display = sb.classList.contains('open') ? 'block' : 'none';
 });
 
-// ---------- Theme ----------
 const tb = document.getElementById('themeToggle');
 const ti = document.getElementById('themeIcon');
 const h  = document.documentElement;

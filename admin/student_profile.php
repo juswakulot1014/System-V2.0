@@ -4,6 +4,28 @@ require_once __DIR__ . '/../config/audit.php';
 
 $current_page = basename($_SERVER['PHP_SELF']);
 
+// ────────────────────────────────────────────────
+// Cached pending-enrollment counter
+// ────────────────────────────────────────────────
+if (!function_exists('get_pending_count')) {
+    function get_pending_count(mysqli $conn): int
+    {
+        if (isset($_SESSION['__pending_count'], $_SESSION['__pending_count_at'])
+            && (time() - (int)$_SESSION['__pending_count_at']) < 30) {
+            return (int)$_SESSION['__pending_count'];
+        }
+        $stmt = $conn->prepare("SELECT COUNT(*) AS c FROM enrollment_form WHERE status = ?");
+        $pending = 'Pending';
+        $stmt->bind_param('s', $pending);
+        $stmt->execute();
+        $n = (int)($stmt->get_result()->fetch_assoc()['c'] ?? 0);
+        $stmt->close();
+        $_SESSION['__pending_count']    = $n;
+        $_SESSION['__pending_count_at'] = time();
+        return $n;
+    }
+}
+
 function strandInitials(string $strand): string {
     $stopwords = ['and','of','the','for','in','on','to','a','an','at','by','with','or'];
     $words = preg_split('/\s+/', trim($strand));
@@ -24,34 +46,46 @@ function formatStudentName(array $s): string {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   POST: UPDATE SCHOOL YEAR AFTER PROMOTION
+   POST: UPDATE SCHOOL YEAR (kept as backend fallback)
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_school_year'])) {
     verify_csrf();
 
-    $old_sy = trim($_POST['old_school_year'] ?? '');
-    $new_sy = trim($_POST['new_school_year'] ?? '');
+    $old_sy = trim((string)($_POST['old_school_year'] ?? ''));
+    $new_sy = trim((string)($_POST['new_school_year'] ?? ''));
 
     if (empty($old_sy) || empty($new_sy)) {
         $_SESSION['error'] = "Both old and new school years are required.";
     } elseif ($old_sy === $new_sy) {
         $_SESSION['error'] = "New school year must be different from the old one.";
+    } elseif (!preg_match('/^\d{4}-\d{4}$/', $new_sy)) {
+        $_SESSION['error'] = "New school year must be in the format YYYY-YYYY.";
     } else {
         $conn->begin_transaction();
         try {
-            $stmt = $conn->prepare("UPDATE enrollment_form SET school_year = ? WHERE school_year = ? AND grade_level IN ('Grade 12', 'Graduated')");
+            $stmt = $conn->prepare("
+                UPDATE enrollment_form
+                   SET school_year = ?
+                 WHERE school_year = ?
+                   AND status = 'Graduated'
+            ");
             $stmt->bind_param("ss", $new_sy, $old_sy);
             $stmt->execute();
             $updated = $stmt->affected_rows;
             $stmt->close();
             $conn->commit();
 
-            audit_log($conn, 'schoolyear.bulk_update', ['type'=>'school_year','from'=>$old_sy,'to'=>$new_sy,'affected'=>$updated]);
+            audit_log($conn, 'schoolyear.bulk_update', [
+                'type'     => 'school_year',
+                'from'     => $old_sy,
+                'to'       => $new_sy,
+                'affected' => $updated,
+            ]);
 
             if ($updated > 0) {
-                $_SESSION['success'] = "School year updated! $updated promoted student(s) moved from $old_sy to $new_sy.";
+                $_SESSION['success'] = "School year updated! $updated Graduated record(s) moved from $old_sy to $new_sy.";
             } else {
-                $_SESSION['info'] = "No promoted students found with school year $old_sy.";
+                $_SESSION['info'] = "No Graduated records with school year $old_sy.";
             }
         } catch (Exception $e) {
             $conn->rollback();
@@ -63,83 +97,141 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_school_year'])
 }
 
 /* ═══════════════════════════════════════════════════════════
-   POST: PROMOTE SELECTED STUDENTS
+   POST: PROMOTE SELECTED (kept as backend fallback — no UI
+   now triggers this; use promote.php instead)
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['promote_selected'])) {
     verify_csrf();
 
     $selected_ids    = $_POST['selected_students'] ?? [];
-    $promote_sy      = trim($_POST['promote_school_year'] ?? '');
-    $new_school_year = trim($_POST['new_school_year'] ?? '');
+    $promote_sy      = trim((string)($_POST['promote_school_year'] ?? ''));
+    $new_school_year = trim((string)($_POST['new_school_year'] ?? ''));
 
-    if (empty($selected_ids)) {
+    if (empty($selected_ids) || !is_array($selected_ids)) {
         $_SESSION['error'] = "No students selected for promotion.";
     } elseif (empty($promote_sy)) {
         $_SESSION['error'] = "School Year is required.";
     } elseif (empty($new_school_year)) {
         $_SESSION['error'] = "New School Year is required.";
+    } elseif (!preg_match('/^\d{4}-\d{4}$/', $new_school_year)) {
+        $_SESSION['error'] = "New school year must be in the format YYYY-YYYY.";
+    } elseif ($promote_sy === $new_school_year) {
+        $_SESSION['error'] = "New school year must be different from the current one.";
     } else {
+        $selected_ids = array_values(array_filter(array_map('intval', $selected_ids), fn($v) => $v > 0));
+
         $conn->begin_transaction();
         try {
-            $promoted_11    = 0;
-            $graduated_12   = 0;
-            $admin_id = (int)($_SESSION['admin_id'] ?? 0);
+            $promoted_11  = 0;
+            $graduated_12 = 0;
+            $skipped      = 0;
+            $admin_id     = (int)($_SESSION['admin_id'] ?? 0);
 
-            foreach ($selected_ids as $student_id) {
-                $sid = (int)$student_id;
+            $check = $conn->prepare("
+                SELECT enrollment_id, grade_level, term, track, strand, program, section, status
+                FROM enrollment_form
+                WHERE student_id = ?
+                  AND school_year = ?
+                  AND (status = 'Active' OR status IS NULL)
+                ORDER BY enrollment_id DESC
+                LIMIT 1
+            ");
 
-                $check = $conn->prepare("SELECT grade_level, status FROM enrollment_form WHERE student_id = ? AND school_year = ? AND (status = 'Active' OR status IS NULL) LIMIT 1");
+            $dup_check = $conn->prepare("
+                SELECT 1 FROM enrollment_form
+                WHERE student_id = ? AND school_year = ? AND grade_level = 'Grade 12'
+                LIMIT 1
+            ");
+
+            $ins12 = $conn->prepare("
+                INSERT INTO enrollment_form
+                    (student_id, school_year, grade_level, term, track, strand, program, section, status)
+                VALUES (?, ?, 'Grade 12', ?, ?, ?, ?, ?, 'Active')
+            ");
+
+            $grad12 = $conn->prepare("
+                UPDATE enrollment_form
+                   SET status = 'Graduated'
+                 WHERE enrollment_id = ? AND grade_level = 'Grade 12'
+            ");
+
+            $hist = $conn->prepare("
+                INSERT INTO student_status_history
+                    (student_id, old_status, new_status, reason, changed_by)
+                VALUES (?, ?, 'Graduated', ?, ?)
+            ");
+
+            $hist_active = $conn->prepare("
+                INSERT INTO student_status_history
+                    (student_id, old_status, new_status, reason, changed_by)
+                VALUES (?, ?, 'Active', ?, ?)
+            ");
+
+            foreach ($selected_ids as $sid) {
                 $check->bind_param("is", $sid, $promote_sy);
                 $check->execute();
-                $result = $check->get_result()->fetch_assoc();
-                $check->close();
+                $enr = $check->get_result()->fetch_assoc();
 
-                if ($result) {
-                    if ($result['grade_level'] === 'Grade 11') {
-                        $upd = $conn->prepare("UPDATE enrollment_form SET grade_level = 'Grade 12', school_year = ? WHERE student_id = ? AND school_year = ?");
-                        $upd->bind_param("sis", $new_school_year, $sid, $promote_sy);
-                        $upd->execute();
-                        if ($upd->affected_rows > 0) $promoted_11++;
-                        $upd->close();
-                    } elseif ($result['grade_level'] === 'Grade 12') {
-                        $old_status = $result['status'] ?? 'Active';
+                if (!$enr) { $skipped++; continue; }
 
-                        $upd = $conn->prepare("UPDATE enrollment_form SET status = 'Graduated', school_year = ? WHERE student_id = ? AND school_year = ? AND grade_level = 'Grade 12'");
-                        $upd->bind_param("sis", $new_school_year, $sid, $promote_sy);
-                        $upd->execute();
-                        if ($upd->affected_rows > 0) {
-                            $graduated_12++;
+                if ($enr['grade_level'] === 'Grade 11') {
+                    $dup_check->bind_param("is", $sid, $new_school_year);
+                    $dup_check->execute();
+                    $already = $dup_check->get_result()->num_rows > 0;
+                    if ($already) { $skipped++; continue; }
 
-                            $hist = $conn->prepare("
-                                INSERT INTO student_status_history
-                                    (student_id, old_status, new_status, reason, changed_by)
-                                VALUES (?, ?, 'Graduated', ?, ?)
-                            ");
-                            $reason = "Graduated via batch promotion ($promote_sy → $new_school_year)";
-                            $hist->bind_param("issi", $sid, $old_status, $reason, $admin_id);
-                            $hist->execute();
-                            $hist->close();
-                        }
-                        $upd->close();
+                    $ins12->bind_param(
+                        "issssss",
+                        $sid, $new_school_year,
+                        $enr['term'], $enr['track'], $enr['strand'],
+                        $enr['program'], $enr['section']
+                    );
+                    if ($ins12->execute()) {
+                        $promoted_11++;
+                        $old_status = $enr['status'] ?? 'Active';
+                        $reason     = "Promoted Grade 11 → Grade 12 ($promote_sy → $new_school_year)";
+                        $hist_active->bind_param("issi", $sid, $old_status, $reason, $admin_id);
+                        $hist_active->execute();
+                    }
+                } elseif ($enr['grade_level'] === 'Grade 12') {
+                    $grad12->bind_param("i", $enr['enrollment_id']);
+                    $grad12->execute();
+                    if ($grad12->affected_rows > 0) {
+                        $graduated_12++;
+                        $old_status = $enr['status'] ?? 'Active';
+                        $reason     = "Graduated via batch promotion ($promote_sy → $new_school_year)";
+                        $hist->bind_param("issi", $sid, $old_status, $reason, $admin_id);
+                        $hist->execute();
                     }
                 }
             }
 
+            $check->close(); $dup_check->close(); $ins12->close();
+            $grad12->close(); $hist->close(); $hist_active->close();
+
             $conn->commit();
 
-            audit_log($conn, 'student.promote', ['type'=>'batch','from_sy'=>$promote_sy,'to_sy'=>$new_school_year,'promoted'=>$promoted_11,'graduated'=>$graduated_12]);
+            audit_log($conn, 'student.promote', [
+                'type'      => 'batch',
+                'from_sy'   => $promote_sy,
+                'to_sy'     => $new_school_year,
+                'promoted'  => $promoted_11,
+                'graduated' => $graduated_12,
+                'skipped'   => $skipped,
+            ]);
 
             $msg = [];
-            if ($promoted_11 > 0)  $msg[] = "$promoted_11 → Grade 12";
-            if ($graduated_12 > 0) $msg[] = "$graduated_12 → Graduated";
+            if ($promoted_11 > 0)  $msg[] = "$promoted_11 promoted to Grade 12";
+            if ($graduated_12 > 0) $msg[] = "$graduated_12 marked Graduated";
+            if ($skipped > 0)      $msg[] = "$skipped skipped (already have target SY)";
 
-            if (!empty($msg)) {
-                $_SESSION['success'] = "Promotion completed! " . implode(" • ", $msg) . ". School year updated to $new_school_year.";
-            } else {
-                $_SESSION['error'] = "No eligible active students were promoted.";
-            }
+            $_SESSION['success'] = !empty($msg)
+                ? "Promotion completed! " . implode(" • ", $msg) . ". Previous grade-level records preserved."
+                : "No eligible active students were promoted.";
+
         } catch (Exception $e) {
             $conn->rollback();
+            error_log('promote_selected failed: ' . $e->getMessage());
             $_SESSION['error'] = "Promotion failed: " . $e->getMessage();
         }
     }
@@ -148,103 +240,124 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['promote_selected'])) 
 }
 
 /* ═══════════════════════════════════════════════════════════
-   POST: PROMOTE ALL (bulk by grade level)
+   POST: PROMOTE ALL (kept as backend fallback)
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['promote_students'])) {
     verify_csrf();
 
-    $promote_sy      = trim($_POST['school_year']     ?? '');
-    $promote_type    = trim($_POST['promote_type']    ?? '');
-    $new_school_year = trim($_POST['new_school_year'] ?? '');
+    $promote_sy      = trim((string)($_POST['school_year']     ?? ''));
+    $promote_type    = trim((string)($_POST['promote_type']    ?? ''));
+    $new_school_year = trim((string)($_POST['new_school_year'] ?? ''));
 
     if (empty($promote_sy)) {
         $_SESSION['error'] = "Please select a School Year to promote students.";
     } elseif (empty($new_school_year)) {
         $_SESSION['error'] = "Please provide a New School Year.";
+    } elseif (!preg_match('/^\d{4}-\d{4}$/', $new_school_year)) {
+        $_SESSION['error'] = "New school year must be in the format YYYY-YYYY.";
+    } elseif (!in_array($promote_type, ['grade11','grade12','both'], true)) {
+        $_SESSION['error'] = "Invalid promotion type.";
+    } elseif ($promote_sy === $new_school_year) {
+        $_SESSION['error'] = "New school year must be different from the current one.";
     } else {
         $conn->begin_transaction();
         try {
-            $total_promoted = 0;
             $admin_id = (int)($_SESSION['admin_id'] ?? 0);
+            $p11 = 0; $p12 = 0;
 
-            if ($promote_type === 'grade11') {
-                $stmt = $conn->prepare("UPDATE enrollment_form SET grade_level = 'Grade 12', school_year = ? WHERE grade_level = 'Grade 11' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
-                $stmt->bind_param("ss", $new_school_year, $promote_sy);
-                $stmt->execute();
-                $total_promoted = $stmt->affected_rows;
-                $stmt->close();
-                $_SESSION['success'] = $total_promoted > 0 ? "$total_promoted student(s) promoted from Grade 11 to Grade 12. School year updated to $new_school_year." : "No active Grade 11 students found.";
+            if ($promote_type === 'grade11' || $promote_type === 'both') {
+                $sel = $conn->prepare("
+                    SELECT enrollment_id, student_id, term, track, strand, program, section, status
+                    FROM enrollment_form
+                    WHERE grade_level = 'Grade 11'
+                      AND school_year = ?
+                      AND (status = 'Active' OR status IS NULL)
+                ");
+                $sel->bind_param("s", $promote_sy);
+                $sel->execute();
+                $rows = $sel->get_result()->fetch_all(MYSQLI_ASSOC);
+                $sel->close();
 
-            } elseif ($promote_type === 'grade12') {
-                $aff = $conn->prepare("SELECT DISTINCT student_id FROM enrollment_form WHERE grade_level = 'Grade 12' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
-                $aff->bind_param("s", $promote_sy);
-                $aff->execute();
-                $affected_ids = array_column($aff->get_result()->fetch_all(MYSQLI_ASSOC), 'student_id');
-                $aff->close();
+                $ins12 = $conn->prepare("
+                    INSERT INTO enrollment_form
+                        (student_id, school_year, grade_level, term, track, strand, program, section, status)
+                    VALUES (?, ?, 'Grade 12', ?, ?, ?, ?, ?, 'Active')
+                ");
+                $hist = $conn->prepare("
+                    INSERT INTO student_status_history
+                        (student_id, old_status, new_status, reason, changed_by)
+                    VALUES (?, ?, 'Active', ?, ?)
+                ");
 
-                $stmt = $conn->prepare("UPDATE enrollment_form SET status = 'Graduated', school_year = ? WHERE grade_level = 'Grade 12' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
-                $stmt->bind_param("ss", $new_school_year, $promote_sy);
-                $stmt->execute();
-                $total_promoted = $stmt->affected_rows;
-                $stmt->close();
-
-                if (!empty($affected_ids)) {
-                    $hist = $conn->prepare("
-                        INSERT INTO student_status_history
-                            (student_id, old_status, new_status, reason, changed_by)
-                        VALUES (?, 'Active', 'Graduated', ?, ?)
-                    ");
-                    $reason = "Bulk graduated via Promote All ($promote_sy → $new_school_year)";
-                    foreach ($affected_ids as $aid) {
-                        $aid = (int)$aid;
-                        $hist->bind_param("isi", $aid, $reason, $admin_id);
+                foreach ($rows as $r) {
+                    $ins12->bind_param(
+                        "issssss",
+                        $r['student_id'], $new_school_year,
+                        $r['term'], $r['track'], $r['strand'],
+                        $r['program'], $r['section']
+                    );
+                    if ($ins12->execute()) {
+                        $p11++;
+                        $old_status = $r['status'] ?? 'Active';
+                        $reason     = "Bulk promoted Grade 11 → Grade 12 ($promote_sy → $new_school_year)";
+                        $hist->bind_param("issi", $r['student_id'], $old_status, $reason, $admin_id);
                         $hist->execute();
                     }
-                    $hist->close();
                 }
-                $_SESSION['success'] = $total_promoted > 0 ? "$total_promoted student(s) graduated. School year updated to $new_school_year." : "No active Grade 12 students found.";
+                $ins12->close(); $hist->close();
+            }
 
-            } elseif ($promote_type === 'both') {
-                $stmt = $conn->prepare("UPDATE enrollment_form SET grade_level = 'Grade 12', school_year = ? WHERE grade_level = 'Grade 11' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
-                $stmt->bind_param("ss", $new_school_year, $promote_sy); $stmt->execute(); $p11 = $stmt->affected_rows; $stmt->close();
+            if ($promote_type === 'grade12' || $promote_type === 'both') {
+                $sel = $conn->prepare("
+                    SELECT enrollment_id, student_id, status
+                    FROM enrollment_form
+                    WHERE grade_level = 'Grade 12'
+                      AND school_year = ?
+                      AND (status = 'Active' OR status IS NULL)
+                ");
+                $sel->bind_param("s", $promote_sy);
+                $sel->execute();
+                $rows = $sel->get_result()->fetch_all(MYSQLI_ASSOC);
+                $sel->close();
 
-                $aff = $conn->prepare("SELECT DISTINCT student_id FROM enrollment_form WHERE grade_level = 'Grade 12' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
-                $aff->bind_param("s", $promote_sy);
-                $aff->execute();
-                $affected_ids = array_column($aff->get_result()->fetch_all(MYSQLI_ASSOC), 'student_id');
-                $aff->close();
+                $upd = $conn->prepare("UPDATE enrollment_form SET status = 'Graduated' WHERE enrollment_id = ?");
+                $hist = $conn->prepare("
+                    INSERT INTO student_status_history
+                        (student_id, old_status, new_status, reason, changed_by)
+                    VALUES (?, ?, 'Graduated', ?, ?)
+                ");
 
-                $stmt = $conn->prepare("UPDATE enrollment_form SET status = 'Graduated', school_year = ? WHERE grade_level = 'Grade 12' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
-                $stmt->bind_param("ss", $new_school_year, $promote_sy); $stmt->execute(); $p12 = $stmt->affected_rows; $stmt->close();
-
-                if (!empty($affected_ids)) {
-                    $hist = $conn->prepare("
-                        INSERT INTO student_status_history
-                            (student_id, old_status, new_status, reason, changed_by)
-                        VALUES (?, 'Active', 'Graduated', ?, ?)
-                    ");
-                    $reason = "Bulk graduated via Promote Both ($promote_sy → $new_school_year)";
-                    foreach ($affected_ids as $aid) {
-                        $aid = (int)$aid;
-                        $hist->bind_param("isi", $aid, $reason, $admin_id);
+                foreach ($rows as $r) {
+                    $upd->bind_param("i", $r['enrollment_id']);
+                    if ($upd->execute()) {
+                        $p12++;
+                        $old_status = $r['status'] ?? 'Active';
+                        $reason     = "Bulk graduated ($promote_sy → $new_school_year)";
+                        $hist->bind_param("issi", $r['student_id'], $old_status, $reason, $admin_id);
                         $hist->execute();
                     }
-                    $hist->close();
                 }
-
-                $total_promoted = $p11 + $p12;
-                $msg = [];
-                if ($p11 > 0) $msg[] = "$p11 → Grade 12";
-                if ($p12 > 0) $msg[] = "$p12 → Graduated";
-                $_SESSION['success'] = !empty($msg) ? "Promotion completed! " . implode(" • ", $msg) . ". School year updated to $new_school_year." : "No active students found.";
+                $upd->close(); $hist->close();
             }
 
             $conn->commit();
 
-            audit_log($conn, 'student.promote_all', ['type'=>'batch','from_sy'=>$promote_sy,'to_sy'=>$new_school_year,'mode'=>$promote_type,'affected'=>$total_promoted]);
+            audit_log($conn, 'student.promote_all', [
+                'type' => 'batch', 'from_sy' => $promote_sy, 'to_sy' => $new_school_year,
+                'mode' => $promote_type, 'g11' => $p11, 'g12' => $p12,
+            ]);
+
+            $msg = [];
+            if ($p11 > 0) $msg[] = "$p11 promoted to Grade 12";
+            if ($p12 > 0) $msg[] = "$p12 marked Graduated";
+
+            $_SESSION['success'] = !empty($msg)
+                ? "Promotion completed! " . implode(" • ", $msg) . ". All previous records preserved."
+                : "No active students found for the selected grade(s).";
 
         } catch (Exception $e) {
             $conn->rollback();
+            error_log('promote_all failed: ' . $e->getMessage());
             $_SESSION['error'] = "Promotion failed: " . $e->getMessage();
         }
     }
@@ -255,16 +368,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['promote_students'])) 
 /* ═══════════════════════════════════════════════════════════
    FILTER INPUTS
    ═══════════════════════════════════════════════════════════ */
-$search       = trim($_GET['search']       ?? $_POST['search']       ?? '');
-$grade_level  = trim($_GET['grade_level']  ?? $_POST['grade_level']  ?? '');
-$school_year  = trim($_GET['school_year']  ?? $_POST['school_year']  ?? '');
-$status       = trim($_GET['status']       ?? $_POST['status']       ?? '');
+$search       = trim((string)($_GET['search']       ?? ''));
+$grade_level  = trim((string)($_GET['grade_level']  ?? ''));
+$school_year  = trim((string)($_GET['school_year']  ?? ''));
+$status       = trim((string)($_GET['status']       ?? ''));
 
 /* ═══════════════════════════════════════════════════════════
    VIEW MODE — GRADUATED STUDENTS
    ═══════════════════════════════════════════════════════════ */
 $view_graduated = isset($_GET['view']) && $_GET['view'] === 'graduated';
-$grad_sy        = trim($_GET['grad_sy'] ?? '');
+$grad_sy        = trim((string)($_GET['grad_sy'] ?? ''));
 
 $grad_sy_list      = [];
 $grad_students     = [];
@@ -328,8 +441,8 @@ $offset   = ($page - 1) * $per_page;
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auto_assign'])) {
     verify_csrf();
 
-    $grade_level = trim($_POST['grade_level'] ?? '');
-    $school_year = trim($_POST['school_year'] ?? '');
+    $grade_level = trim((string)($_POST['grade_level'] ?? ''));
+    $school_year = trim((string)($_POST['school_year'] ?? ''));
 
     if (empty($grade_level) || empty($school_year)) {
         $_SESSION['error'] = "Please select Grade Level and School Year to auto-assign sections.";
@@ -472,7 +585,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auto_assign'])) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   MAIN STUDENTS QUERY  (skipped when in graduated view)
+   MAIN STUDENTS QUERY
    ═══════════════════════════════════════════════════════════ */
 $all_students        = [];
 $total_students      = 0;
@@ -486,18 +599,17 @@ if (!$view_graduated) {
     $sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.ext_name, s.sex, s.age, e.grade_level, e.school_year, e.section, e.strand, e.track, e.program, e.term, COALESCE(e.status, 'Active') AS status, COUNT(*) OVER() as total_count FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE 1=1";
 
     $params = []; $types = "";
-    if ($search !== '')      { $sql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)"; $like = "%$search%"; $params = [$like,$like,$like,$like]; $types = "ssss"; }
+    if ($search !== '')      {
+        $like = "%$search%";
+        $sql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)";
+        array_push($params, $like, $like, $like, $like);
+        $types .= "ssss";
+    }
     if ($grade_level !== '') { $sql .= " AND e.grade_level = ?"; $params[] = $grade_level; $types .= "s"; }
     if ($school_year !== '') { $sql .= " AND e.school_year = ?"; $params[] = $school_year; $types .= "s"; }
 
-    // ─────────────────────────────────────────────────────────
-    // Status filter
-    //   - empty / All  → exclude Graduated AND Pending
-    //   - Graduated    → show only Graduated
-    //   - anything else→ show only that status
-    // ─────────────────────────────────────────────────────────
     if ($status === '' || $status === 'All') {
-        $sql .= " AND COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending')";
+        $sql .= " AND COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
     } else {
         $sql .= " AND COALESCE(e.status, 'Active') = ?";
         $params[] = $status; $types .= "s";
@@ -512,17 +624,13 @@ if (!$view_graduated) {
     $stmt->execute();
     $all_students = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $total_students = !empty($all_students) ? (int)$all_students[0]['total_count'] : 0;
-    $total_pages = ceil($total_students / $per_page);
+    $total_pages = (int)ceil($total_students / $per_page);
     $stmt->close();
 
-    // ─────────────────────────────────────────────────────────
-    // TOTAL STUDENTS STAT — excludes Graduated AND Pending.
-    // Search / grade / school-year filters still apply.
-    // ─────────────────────────────────────────────────────────
     $tsql = "SELECT COUNT(*) AS c
              FROM students_info s
              INNER JOIN enrollment_form e ON s.student_id = e.student_id
-             WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending')";
+             WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
     $tp = []; $tt = "";
     if ($search !== '') {
         $tlike = "%$search%";
@@ -540,17 +648,14 @@ if (!$view_graduated) {
     $ts->close();
     $total_all_students = (int)($ts_row['c'] ?? 0);
 
-    // ─────────────────────────────────────────────────────────
-    // Gender stats — also excludes Graduated AND Pending
-    // ─────────────────────────────────────────────────────────
     $gsql = "SELECT
                 SUM(CASE WHEN UPPER(TRIM(s.sex)) IN ('MALE','M') THEN 1 ELSE 0 END) AS boys,
                 SUM(CASE WHEN UPPER(TRIM(s.sex)) IN ('FEMALE','F') THEN 1 ELSE 0 END) AS girls
              FROM students_info s
              INNER JOIN enrollment_form e ON s.student_id = e.student_id
-             WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending')";
+             WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
     $gp = []; $gt = "";
-    if ($search !== '')      { $gsql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ?)"; $gp = [$like,$like,$like]; $gt = "sss"; }
+    if ($search !== '')      { $gsql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ?)"; $gp = [$like, $like, $like]; $gt = "sss"; }
     if ($grade_level !== '') { $gsql .= " AND e.grade_level = ?"; $gp[] = $grade_level; $gt .= "s"; }
     if ($school_year !== '') { $gsql .= " AND e.school_year = ?"; $gp[] = $school_year; $gt .= "s"; }
     $gs = $conn->prepare($gsql);
@@ -561,55 +666,23 @@ if (!$view_graduated) {
     $boys  = (int)($st['boys']  ?? 0);
     $girls = (int)($st['girls'] ?? 0);
 
-    // Section count — excludes Graduated AND Pending
     $sec_count_row = $conn->query("
         SELECT COUNT(DISTINCT section) AS c
         FROM enrollment_form
         WHERE section IS NOT NULL AND section != ''
-          AND COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending')
+          AND COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')
     ")->fetch_assoc();
     $sec_count = (int)($sec_count_row['c'] ?? 0);
 }
 
-// Promote preview counts (unchanged — active students only)
-$promote_preview_11 = 0; $promote_preview_12 = 0;
-if (!$view_graduated && $school_year) {
-    $ps = $conn->prepare("SELECT COUNT(*) as cnt FROM enrollment_form WHERE grade_level = 'Grade 11' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
-    $ps->bind_param("s", $school_year); $ps->execute(); $pr = $ps->get_result()->fetch_assoc(); $promote_preview_11 = (int)($pr['cnt']??0); $ps->close();
-    $ps = $conn->prepare("SELECT COUNT(*) as cnt FROM enrollment_form WHERE grade_level = 'Grade 12' AND school_year = ? AND (status = 'Active' OR status IS NULL)");
-    $ps->bind_param("s", $school_year); $ps->execute(); $pr = $ps->get_result()->fetch_assoc(); $promote_preview_12 = (int)($pr['cnt']??0); $ps->close();
-}
-
-$show_promote_mode = !$view_graduated && isset($_GET['show_promotable']) && $school_year;
-
-// Dropdowns
 $grade_levels = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' ORDER BY grade_level ASC");
 $school_years = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC");
-$possible_statuses = ['Active', 'Pending', 'Transferred', 'Stopped', 'Dropped', 'Graduated'];
+$possible_statuses = ['Active', 'Pending', 'Transferred', 'Stopped', 'Dropped', 'Graduated', 'Promoted'];
 $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 'dark' : 'light';
 
 $base_url = "?search=" . urlencode($search) . "&grade_level=" . urlencode($grade_level) . "&school_year=" . urlencode($school_year) . "&status=" . urlencode($status);
-if ($show_promote_mode) $base_url .= "&show_promotable=1";
-
-$next_sy = '';
-$parts = explode('-', $school_year);
-if (count($parts) === 2) {
-    $next_sy = ((int)$parts[0] + 1) . '-' . ((int)$parts[1] + 1);
-}
-
-$selection_sections = [];
-if ($show_promote_mode) {
-    foreach ($all_students as $s) {
-        $sec = trim((string)($s['section'] ?? ''));
-        if ($sec !== '' && !in_array($sec, $selection_sections, true)) {
-            $selection_sections[] = $sec;
-        }
-    }
-    sort($selection_sections, SORT_NATURAL | SORT_FLAG_CASE);
-}
 
 $csrf_token = csrf_token();
-$can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 > 0 || $promote_preview_12 > 0));
 ?>
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="<?= $theme ?>">
@@ -709,20 +782,17 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
         .filter-bar input:focus,.filter-bar select:focus{border-color:var(--accent);background:var(--surface);outline:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
         .filter-bar .actions{display:flex;gap:.5rem;flex-wrap:nowrap}
 
-        .bulk-actions{background:linear-gradient(135deg,var(--accent-soft),color-mix(in srgb,var(--accent-soft) 40%,var(--surface)));border:1px solid color-mix(in srgb,var(--accent) 20%,transparent);border-radius:var(--radius-lg);padding:1.1rem 1.25rem;margin-bottom:1.25rem;display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+        .bulk-actions{background:linear-gradient(135deg,var(--accent-soft),color-mix(in srgb,var(--accent-soft) 40%,var(--surface)));border:1px solid color-mix(in srgb,var(--accent) 20%,transparent);border-radius:var(--radius-lg);padding:1.1rem 1.25rem;margin-bottom:1.25rem;display:grid;grid-template-columns:1fr;gap:1rem}
         [data-bs-theme="dark"] .bulk-actions{background:linear-gradient(135deg,#1e2140,color-mix(in srgb,#1e2140 60%,var(--surface)))}
         .bulk-action{display:flex;align-items:flex-start;gap:.9rem;padding:1rem 1.1rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);transition:all .15s}
         .bulk-action:hover{border-color:var(--accent);box-shadow:var(--shadow-md);transform:translateY(-1px)}
         .bulk-action-icon{width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex-shrink:0;background:var(--green-soft);color:var(--green)}
-        .bulk-action-icon.promote-icon{background:linear-gradient(135deg,#fbbf24,#d97706);color:#fff}
         .bulk-action-body{flex:1;min-width:0}
         .bulk-action-title{font-size:.9rem;font-weight:700;color:var(--text);margin-bottom:.15rem}
         .bulk-action-desc{font-size:.78rem;color:var(--text-2);line-height:1.5;margin-bottom:.75rem}
         .bulk-action-btn{display:inline-flex;align-items:center;gap:.35rem;padding:.5rem 1rem;border-radius:9px;border:none;font-size:.82rem;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit}
         .bulk-action-btn.primary{background:var(--green);color:#fff}
         .bulk-action-btn.primary:hover{background:#047857;transform:translateY(-1px)}
-        .bulk-action-btn.promote{background:linear-gradient(135deg,#fbbf24,#d97706);color:#fff}
-        .bulk-action-btn.promote:hover{box-shadow:0 6px 16px -4px rgba(217,119,6,.5);transform:translateY(-1px)}
         .bulk-action-btn:disabled{opacity:.5;cursor:not-allowed;transform:none!important;box-shadow:none!important}
 
         .table-scroll{overflow-x:auto}
@@ -741,18 +811,15 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
         .student-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:1rem}
         .student-card{background:var(--surface);border-radius:var(--radius-lg);border:1px solid var(--border);box-shadow:var(--shadow-xs);padding:1.1rem 1.15rem;display:flex;gap:.9rem;align-items:flex-start;position:relative;transition:transform .18s,box-shadow .18s,border-color .18s}
         .student-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-md);border-color:var(--border-strong)}
-        .student-card.selected{border-color:var(--amber);box-shadow:0 0 0 3px color-mix(in srgb,var(--amber) 22%,transparent);background:color-mix(in srgb,var(--amber) 5%,var(--surface))}
-        .student-card .select-check{position:absolute;top:.85rem;right:.85rem;width:20px;height:20px;accent-color:var(--amber);cursor:pointer;z-index:2}
         .student-avatar{width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:1.05rem;flex-shrink:0;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent)}
         .student-card.graduated .student-avatar{background:linear-gradient(135deg,#059669,#047857);box-shadow:0 0 0 3px rgba(5,150,105,.15)}
         .student-info{flex:1;min-width:0}
-        .student-info h4{font-size:.92rem;font-weight:600;margin:0 0 .15rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:1.6rem;color:var(--text)}
+        .student-info h4{font-size:.92rem;font-weight:600;margin:0 0 .15rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
         .student-info .meta{font-size:.74rem;color:var(--text-2);font-variant-numeric:tabular-nums}
         .student-info .tags{display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.6rem}
 
         .tag{display:inline-flex;align-items:center;gap:.25rem;padding:.18rem .55rem;border-radius:999px;font-size:.68rem;font-weight:600;background:var(--surface-2);color:var(--text-2);border:1px solid var(--border);white-space:nowrap}
         .tag.accent{background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 22%,transparent)}
-        .tag.promotable{background:var(--amber-soft);color:var(--amber);border-color:color-mix(in srgb,var(--amber) 25%,transparent)}
         .tag.initials{background:var(--purple-soft);color:var(--purple);border-color:color-mix(in srgb,var(--purple) 22%,transparent);font-weight:700;letter-spacing:.4px}
         .tag.grad-sy{background:var(--green-soft);color:var(--green);border-color:color-mix(in srgb,var(--green) 25%,transparent);font-weight:700}
 
@@ -763,33 +830,6 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
         .pill.danger {background:var(--red-soft);color:var(--red)}
         .pill.muted  {background:var(--surface-2);color:var(--text-2)}
 
-        .promote-bar{position:sticky;top:.75rem;z-index:50;background:linear-gradient(135deg,#fbbf24,#d97706);color:#fff;border-radius:var(--radius);padding:.85rem 1.15rem;margin-bottom:1rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;box-shadow:0 8px 24px -8px rgba(217,119,6,.6)}
-        .promote-bar .selected-count{font-weight:700;font-size:1.15rem;line-height:1}
-        .promote-bar .selected-label{font-size:.78rem;opacity:.9;margin-top:.15rem}
-        .promote-bar input.form-control{background:rgba(255,255,255,.95);border:1px solid rgba(0,0,0,.08);color:#0f172a;font-weight:500}
-        .promote-bar input.form-control:focus{box-shadow:0 0 0 3px rgba(255,255,255,.35);border-color:transparent}
-        .btn-promote{background:#0f172a;color:#fff;border:none;font-weight:600;transition:all .15s}
-        .btn-promote:hover:not(:disabled){background:#1e293b;color:#fff;transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.25)}
-        .btn-promote:disabled{opacity:.5;cursor:not-allowed}
-
-        .selection-filters{background:linear-gradient(135deg,color-mix(in srgb,var(--accent-soft) 60%,var(--surface)),var(--surface));border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);border-radius:var(--radius);padding:1rem 1.15rem;margin-bottom:1rem}
-        [data-bs-theme="dark"] .selection-filters{background:linear-gradient(135deg,color-mix(in srgb,#1e2140 60%,var(--surface)),var(--surface))}
-        .sf-head{display:flex;align-items:flex-start;gap:.7rem;margin-bottom:.85rem}
-        .sf-head-icon{width:34px;height:34px;border-radius:9px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0}
-        .sf-head-title{font-size:.85rem;font-weight:700;color:var(--text);line-height:1.25;margin-bottom:.1rem}
-        .sf-head-desc{font-size:.75rem;color:var(--text-2);line-height:1.4}
-        .sf-grid{display:grid;grid-template-columns:1fr 1fr 2fr auto;gap:.65rem;align-items:end}
-        .sf-field{display:flex;flex-direction:column;gap:.3rem;min-width:0}
-        .sf-field label{font-size:.68rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:.3rem}
-        .sf-field label i{color:var(--accent);font-size:.75rem}
-        .sf-field select,.sf-field input{background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:.5rem .75rem;font-size:.83rem;color:var(--text);font-family:inherit;width:100%;transition:border-color .15s,box-shadow .15s}
-        .sf-field select:focus,.sf-field input:focus{border-color:var(--accent);outline:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
-        .sf-field-action{padding-bottom:0}
-        .sf-field-action .btn{padding:.5rem .75rem}
-        .sf-footer{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-top:.65rem;padding-top:.65rem;border-top:1px dashed color-mix(in srgb,var(--accent) 25%,transparent)}
-        .sf-summary{font-size:.78rem;font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums}
-        .sf-summary.muted{color:var(--text-2);font-weight:500}
-
         .btn{font-weight:500;border-radius:9px;font-size:.82rem;transition:all .15s}
         .btn-primary{background:var(--accent);border-color:var(--accent)}
         .btn-primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
@@ -799,6 +839,8 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
         .btn-outline-secondary:hover{background:var(--surface-2);color:var(--text);border-color:var(--border-strong)}
         .btn-outline-success{color:var(--green);border-color:color-mix(in srgb,var(--green) 35%,transparent)}
         .btn-outline-success:hover{background:var(--green);color:#fff;border-color:var(--green)}
+        .btn-outline-warning{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 40%,transparent)}
+        .btn-outline-warning:hover{background:var(--amber);color:#fff;border-color:var(--amber)}
         .btn-icon{width:32px;height:32px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:9px}
         .theme-btn{width:38px;height:38px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
         .theme-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
@@ -820,56 +862,7 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
         .flash.info   {background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 25%,transparent)}
         .flash .btn-close{margin-left:auto;opacity:.6}
 
-        .promote-modal .modal-content{border-radius:20px;overflow:hidden;border:none;box-shadow:0 24px 60px rgba(0,0,0,.25)}
-        .promote-modal .modal-dialog{max-width:640px}
-        .pm-hero{padding:1.75rem 1.75rem 1.5rem;background:linear-gradient(135deg,#fbbf24,#d97706);color:#fff;position:relative;overflow:hidden}
-        [data-bs-theme="dark"] .pm-hero{background:linear-gradient(135deg,#78350f,#92400e)}
-        .pm-hero::after{content:'';position:absolute;right:-50px;top:-50px;width:220px;height:220px;border-radius:50%;background:rgba(255,255,255,.12)}
-        .pm-hero-inner{position:relative;z-index:1;display:flex;align-items:center;gap:1rem}
-        .pm-hero .close-btn{position:absolute;top:1rem;right:1rem;z-index:2;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.25);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s}
-        .pm-hero .close-btn:hover{background:rgba(255,255,255,.4)}
-        .pm-hero-icon{width:56px;height:56px;border-radius:16px;background:rgba(255,255,255,.22);border:2px solid rgba(255,255,255,.35);display:flex;align-items:center;justify-content:center;font-size:1.5rem;flex-shrink:0;backdrop-filter:blur(4px)}
-        .pm-hero-info h4{margin:0 0 .3rem;font-size:1.15rem;font-weight:700;letter-spacing:-.01em}
-        .pm-hero-info p{margin:0;font-size:.85rem;opacity:.92}
-        .pm-body{padding:1.75rem}
-        .pm-section{margin-bottom:1.5rem}
-        .pm-section:last-child{margin-bottom:0}
-        .pm-section-label{font-size:.7rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.8px;margin-bottom:.75rem;display:flex;align-items:center;gap:.4rem}
-        .pm-section-label i{color:var(--accent)}
-        .pm-mode-grid{display:grid;grid-template-columns:1fr 1fr;gap:.65rem}
-        .pm-mode-option{display:flex;align-items:flex-start;gap:.75rem;padding:.9rem 1rem;border:1.5px solid var(--border);border-radius:12px;background:var(--surface-2);cursor:pointer;transition:all .15s;position:relative}
-        .pm-mode-option:hover{border-color:color-mix(in srgb,var(--accent) 40%,transparent);background:color-mix(in srgb,var(--accent) 4%,var(--surface-2))}
-        .pm-mode-option.selected{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent)}
-        .pm-mode-option input{position:absolute;opacity:0;pointer-events:none}
-        .pm-mode-icon{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;background:var(--surface);color:var(--text-2)}
-        .pm-mode-option.selected .pm-mode-icon{background:var(--accent);color:#fff}
-        .pm-mode-body{flex:1;min-width:0}
-        .pm-mode-title{font-size:.85rem;font-weight:700;color:var(--text);line-height:1.25;margin-bottom:.15rem}
-        .pm-mode-desc{font-size:.72rem;color:var(--text-2);line-height:1.4}
-        .pm-mode-count{display:inline-block;margin-top:.35rem;padding:.15rem .55rem;border-radius:999px;background:var(--surface);border:1px solid var(--border);font-size:.68rem;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
-        .pm-mode-option.selected .pm-mode-count{background:#fff;color:var(--accent);border-color:var(--accent)}
-        .pm-field{margin-bottom:1rem}
-        .pm-field label{display:block;font-size:.75rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:.4rem}
-        .pm-field input,.pm-field select{width:100%;background:var(--surface-2);border:1.5px solid var(--border);border-radius:11px;padding:.7rem .9rem;font-size:.92rem;color:var(--text);font-family:inherit;transition:border-color .15s,box-shadow .15s}
-        .pm-field input:focus,.pm-field select:focus{border-color:var(--accent);background:var(--surface);outline:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
-        .pm-field .hint{font-size:.72rem;color:var(--text-3);margin-top:.3rem}
-        .pm-preview{background:linear-gradient(135deg,#f0fdf4,#dcfce7);border:1.5px solid rgba(5,150,105,.25);border-radius:12px;padding:1rem 1.15rem}
-        [data-bs-theme="dark"] .pm-preview{background:linear-gradient(135deg,#052e24,#064e3b)}
-        .pm-preview-head{display:flex;align-items:center;gap:.5rem;font-size:.72rem;font-weight:700;color:var(--green);text-transform:uppercase;letter-spacing:.7px;margin-bottom:.6rem}
-        .pm-preview-head i{font-size:.9rem}
-        .pm-preview-line{display:flex;align-items:center;justify-content:space-between;gap:1rem;font-size:.85rem;color:var(--text);padding:.35rem 0}
-        .pm-preview-line + .pm-preview-line{border-top:1px dashed rgba(5,150,105,.2)}
-        .pm-preview-line .num{font-weight:700;font-variant-numeric:tabular-nums;color:var(--green)}
-        .pm-warn{display:flex;align-items:flex-start;gap:.65rem;padding:.85rem 1rem;background:var(--amber-soft);color:#92400e;border:1px solid rgba(217,119,6,.3);border-radius:11px;font-size:.82rem;line-height:1.55;margin-top:1rem}
-        [data-bs-theme="dark"] .pm-warn{color:#fcd34d}
-        .pm-warn i{font-size:1.05rem;flex-shrink:0;margin-top:1px}
-        .pm-warn strong{font-weight:700}
-        .pm-footer{padding:1.15rem 1.75rem;background:var(--surface-2);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:.75rem;flex-wrap:wrap}
-        .pm-footer .btn{padding:.6rem 1.25rem;font-weight:600;font-size:.85rem;border-radius:10px}
-        .pm-btn-confirm{background:linear-gradient(135deg,#059669,#047857);border:none;color:#fff;box-shadow:0 4px 12px -4px rgba(5,150,105,.5);transition:all .15s}
-        .pm-btn-confirm:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 8px 20px -4px rgba(5,150,105,.6);color:#fff}
-        .pm-btn-confirm:disabled{opacity:.5;cursor:not-allowed;transform:none}
-
+        /* Auto-assign modal */
         .aa-modal .modal-content{border-radius:20px;overflow:hidden;border:none}
         .aa-modal .modal-dialog{max-width:520px}
         .aa-hero{padding:1.5rem;background:linear-gradient(135deg,#059669,#047857);color:#fff}
@@ -883,6 +876,16 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
         .aa-check-body{flex:1}
         .aa-check-title{font-size:.85rem;font-weight:700;color:var(--text);margin-bottom:.15rem}
         .aa-check-desc{font-size:.75rem;color:var(--text-2);line-height:1.45}
+
+        .pm-field{margin-bottom:1rem}
+        .pm-field label{display:block;font-size:.75rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:.4rem}
+        .pm-field input,.pm-field select{width:100%;background:var(--surface-2);border:1.5px solid var(--border);border-radius:11px;padding:.7rem .9rem;font-size:.92rem;color:var(--text);font-family:inherit;transition:border-color .15s,box-shadow .15s}
+        .pm-field input:focus,.pm-field select:focus{border-color:var(--accent);background:var(--surface);outline:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+        .pm-field .hint{font-size:.72rem;color:var(--text-3);margin-top:.3rem}
+        .pm-footer{padding:1.15rem 1.75rem;background:var(--surface-2);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:.75rem;flex-wrap:wrap}
+        .pm-footer .btn{padding:.6rem 1.25rem;font-weight:600;font-size:.85rem;border-radius:10px}
+        .pm-btn-confirm{background:linear-gradient(135deg,#059669,#047857);border:none;color:#fff;box-shadow:0 4px 12px -4px rgba(5,150,105,.5);transition:all .15s}
+        .pm-btn-confirm:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 8px 20px -4px rgba(5,150,105,.6);color:#fff}
 
         .grad-hero{
             background:linear-gradient(135deg,#059669,#047857);color:#fff;
@@ -921,31 +924,34 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
             .filter-bar{grid-template-columns:1fr 1fr}
             .filter-bar .actions{grid-column:span 2;justify-content:stretch}
             .filter-bar .actions .btn{flex:1}
-            .bulk-actions{grid-template-columns:1fr}
-            .sf-grid{grid-template-columns:1fr 1fr}
-            .sf-field-wide{grid-column:1 / -1}
-            .sf-field-action{grid-column:1 / -1}
         }
         @media (max-width:640px){
             .stat-grid{grid-template-columns:repeat(2,1fr);gap:.75rem}
             .main-content{padding:1rem}
             .filter-bar{grid-template-columns:1fr}
             .student-grid{grid-template-columns:1fr}
-            .pm-mode-grid{grid-template-columns:1fr}
-            .sf-grid{grid-template-columns:1fr}
         }
     </style>
 </head>
 <body>
 
 <?php
-    $__current = basename($_SERVER['PHP_SELF']);
-    $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
-    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
-    $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
-    $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
-?>
+/* ── Sidebar include: shared across all admin pages ── */
+$__current = basename($_SERVER['PHP_SELF']);
+$__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
 
+// Sub-pages that should keep "Students" highlighted
+$__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
+// Graduate and promote pages share the same highlight group
+$__promote_pages = ['promote.php','graduates.php'];
+
+$__act = $__current;
+if (in_array($__current, $__student_pages, true)) $__act = 'student_profile.php';
+
+$__a = fn($f) => $f === $__act ? ' class="active"' : '';
+
+$__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
+?>
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
         <img src="../assets/img/usat.jpg" alt="USAT" onerror="this.style.background='var(--accent)'">
@@ -958,13 +964,16 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
         <div class="nav-label">Overview</div>
         <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
-        <?php $__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0); ?>
         <a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
             <i class="bi bi-hourglass-split"></i> Pending
             <?php if ($__pending_count > 0): ?>
-                <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1"><?= $__pending_count ?></span>
+                <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
+                    <?= $__pending_count ?>
+                </span>
             <?php endif; ?>
         </a>
+        <a href="promote.php"<?= $__a('promote.php') ?>><i class="bi bi-rocket-takeoff"></i> Promote</a>
+        <a href="graduates.php"<?= $__a('graduates.php') ?>><i class="bi bi-mortarboard-fill"></i> Graduates</a>
         <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
 
         <?php if ($__super): ?>
@@ -1191,6 +1200,9 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
             </div>
         </div>
         <div class="d-flex gap-2 align-items-center">
+            <a href="promote.php" class="btn btn-outline-warning btn-sm" title="Open the promotion page">
+                <i class="bi bi-rocket-takeoff me-1"></i> Promote
+            </a>
             <a href="?view=graduated" class="btn btn-outline-success btn-sm">
                 <i class="bi bi-mortarboard-fill me-1"></i> View Graduated
             </a>
@@ -1277,7 +1289,7 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
                 <div class="field">
                     <label for="f_status">Status</label>
                     <select id="f_status" name="status">
-                        <option value="">All (excl. Graduated &amp; Pending)</option>
+                        <option value="">All (excl. Graduated, Pending &amp; Promoted)</option>
                         <?php foreach($possible_statuses as $st): ?>
                             <option value="<?= $st ?>" <?= $st===$status?'selected':'' ?>><?= $st ?></option>
                         <?php endforeach; ?>
@@ -1311,30 +1323,6 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
                 </button>
             </div>
         </div>
-
-        <div class="bulk-action">
-            <div class="bulk-action-icon promote-icon"><i class="bi bi-rocket-takeoff"></i></div>
-            <div class="bulk-action-body">
-                <div class="bulk-action-title">Promote Students</div>
-                <div class="bulk-action-desc">
-                    <?php if ($can_bulk): ?>
-                        Advance <strong><?= $promote_preview_11 ?></strong> G11 student(s) and graduate <strong><?= $promote_preview_12 ?></strong> G12 student(s) for <?= htmlspecialchars($school_year) ?>.
-                    <?php else: ?>
-                        Filter to a specific School Year to enable batch promotion.
-                    <?php endif; ?>
-                </div>
-                <button type="button"
-                        class="bulk-action-btn promote"
-                        id="openPromoteBtn"
-                        data-sy="<?= htmlspecialchars($school_year) ?>"
-                        data-g11="<?= $promote_preview_11 ?>"
-                        data-g12="<?= $promote_preview_12 ?>"
-                        data-next-sy="<?= htmlspecialchars($next_sy) ?>"
-                        <?= $can_bulk ? '' : 'disabled' ?>>
-                    <i class="bi bi-rocket-takeoff"></i> Promote Students
-                </button>
-            </div>
-        </div>
     </div>
 
     <div class="card">
@@ -1342,24 +1330,8 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
             <h3>
                 <i class="bi bi-people"></i> Students
                 <span class="cell-muted" style="font-weight:500;font-size:.85rem">(<?= number_format($total_students) ?>)</span>
-                <?php if ($show_promote_mode): ?>
-                    <span class="tag promotable ms-2"><i class="bi bi-rocket-takeoff"></i> Selection mode</span>
-                <?php endif; ?>
             </h3>
             <div class="d-flex gap-2 align-items-center flex-wrap">
-                <?php if ($show_promote_mode): ?>
-                    <span class="cell-muted" id="visibleCounter" style="font-size:.78rem;font-weight:600"></span>
-                    <button class="btn btn-outline-secondary btn-sm" onclick="selectAllVisible()">
-                        <i class="bi bi-check-all me-1"></i> Select Visible
-                    </button>
-                    <button class="btn btn-outline-secondary btn-sm" onclick="deselectAll()">
-                        <i class="bi bi-x-circle me-1"></i> Deselect All
-                    </button>
-                    <a href="?school_year=<?= urlencode($school_year) ?>&grade_level=<?= urlencode($grade_level) ?>" class="btn btn-outline-secondary btn-sm">
-                        <i class="bi bi-arrow-left me-1"></i> Exit
-                    </a>
-                <?php endif; ?>
-
                 <?php if ($total_pages > 1): ?>
                     <div class="pagination ms-md-2">
                         <a href="<?= $base_url ?>&page=1" class="btn btn-sm <?= $page <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-left"></i></a>
@@ -1372,95 +1344,17 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
             </div>
         </div>
         <div class="card-body">
-            <?php if ($show_promote_mode): ?>
-            <div class="promote-bar" id="promoteBar" style="display:none">
-                <div>
-                    <div class="selected-count" id="selectedCount">0</div>
-                    <div class="selected-label">student(s) selected for promotion</div>
-                </div>
-                <div class="d-flex gap-2 align-items-center">
-                    <input type="text" id="promoteNewSY" class="form-control form-control-sm"
-                           placeholder="New SY (e.g. <?= htmlspecialchars($next_sy) ?>)"
-                           value="<?= htmlspecialchars($next_sy) ?>" style="width:180px">
-                    <button class="btn btn-promote btn-sm" id="promoteSelectedBtn" disabled onclick="submitPromoteSelected()">
-                        <i class="bi bi-rocket-takeoff me-1"></i> Promote
-                    </button>
-                </div>
-                <form method="POST" id="promoteForm" style="display:none">
-                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
-                    <input type="hidden" name="promote_selected" value="1">
-                    <input type="hidden" name="promote_school_year" value="<?= htmlspecialchars($school_year) ?>">
-                    <input type="hidden" name="new_school_year" id="promoteNewSYHidden">
-                    <div id="selectedIdsContainer"></div>
-                </form>
-            </div>
-            <?php endif; ?>
-
-            <?php if ($show_promote_mode): ?>
-            <div class="selection-filters" id="selectionFilters">
-                <div class="sf-head">
-                    <div class="sf-head-icon"><i class="bi bi-funnel-fill"></i></div>
-                    <div class="sf-head-text">
-                        <div class="sf-head-title">Filter students to promote</div>
-                        <div class="sf-head-desc">Narrow down who's visible below. <strong>Select Visible</strong> only affects the students currently shown.</div>
-                    </div>
-                </div>
-                <div class="sf-grid">
-                    <div class="sf-field">
-                        <label for="sfSection"><i class="bi bi-columns-gap"></i> Section</label>
-                        <select id="sfSection" onchange="applySelectionFilters()">
-                            <option value="">All sections</option>
-                            <?php foreach ($selection_sections as $sec): ?>
-                                <option value="<?= htmlspecialchars($sec) ?>"><?= htmlspecialchars($sec) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="sf-field">
-                        <label for="sfGrade"><i class="bi bi-mortarboard"></i> Grade Level</label>
-                        <select id="sfGrade" onchange="applySelectionFilters()">
-                            <option value="">All grades</option>
-                            <option value="Grade 11">Grade 11</option>
-                            <option value="Grade 12">Grade 12</option>
-                        </select>
-                    </div>
-                    <div class="sf-field sf-field-wide">
-                        <label for="sfStudent"><i class="bi bi-search"></i> Specific Student</label>
-                        <input type="text" id="sfStudent"
-                               placeholder="Search by name, LRN, or student ID"
-                               oninput="applySelectionFilters()">
-                    </div>
-                    <div class="sf-field sf-field-action">
-                        <button type="button" class="btn btn-outline-secondary btn-sm w-100" onclick="clearSelectionFilters()">
-                            <i class="bi bi-x-circle me-1"></i> Clear
-                        </button>
-                    </div>
-                </div>
-                <div class="sf-footer">
-                    <span class="sf-summary" id="sfSummary">Showing all students</span>
-                </div>
-            </div>
-            <?php endif; ?>
-
             <?php if($total_students > 0): ?>
                 <div class="student-grid">
                     <?php foreach($all_students as $s):
                         $name = htmlspecialchars(formatStudentName($s));
                         $initials = strtoupper(substr($s['first_name']??'',0,1).substr($s['last_name']??'',0,1));
                         $st = $s['status'] ?? 'Active';
-                        $isPromotable = ($st === 'Active') && in_array($s['grade_level']??'', ['Grade 11', 'Grade 12']);
                         $strand_txt = $s['strand'] ?? '';
                         $strand_init = $strand_txt !== '' ? strandInitials($strand_txt) : '—';
                         $pillClass = $st === 'Active' ? 'success' : ($st === 'Graduated' ? 'danger' : ($st === 'Dropped' ? 'danger' : 'warning'));
-                        $search_blob = trim(($s['last_name'] ?? '') . ' ' . ($s['first_name'] ?? '') . ' ' . ($s['middle_name'] ?? '') . ' ' . ($s['lrn'] ?? '') . ' ' . ($s['student_id_number'] ?? ''));
                     ?>
-                    <div class="student-card <?= $st === 'Graduated' ? 'graduated' : '' ?>"
-                         data-student-id="<?= (int)$s['student_id'] ?>"
-                         data-section="<?= htmlspecialchars($s['section'] ?? '') ?>"
-                         data-grade="<?= htmlspecialchars($s['grade_level'] ?? '') ?>"
-                         data-search="<?= htmlspecialchars($search_blob) ?>">
-                        <?php if ($show_promote_mode && $isPromotable): ?>
-                            <input type="checkbox" class="select-check student-checkbox" value="<?= (int)$s['student_id'] ?>" onchange="updateSelection()">
-                        <?php endif; ?>
+                    <div class="student-card <?= $st === 'Graduated' ? 'graduated' : '' ?>">
                         <div class="student-avatar"><?= htmlspecialchars($initials) ?></div>
                         <div class="student-info">
                             <h4 title="<?= $name ?>"><?= $name ?></h4>
@@ -1479,12 +1373,6 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
                                     <span class="tag initials" title="Strand initials"><?= htmlspecialchars($strand_init) ?></span>
                                 <?php else: ?>
                                     <span class="tag">—</span>
-                                <?php endif; ?>
-                                <?php if ($show_promote_mode && $isPromotable): ?>
-                                    <span class="tag promotable">
-                                        <i class="bi bi-arrow-up-circle"></i>
-                                        <?= $s['grade_level']=='Grade 11' ? '→ Grade 12' : '→ Graduate' ?>
-                                    </span>
                                 <?php endif; ?>
                                 <span class="pill <?= $pillClass ?>"><?= htmlspecialchars($st) ?></span>
                             </div>
@@ -1524,105 +1412,6 @@ $can_bulk   = (!$view_graduated && $school_year !== '' && ($promote_preview_11 >
 </div>
 
 <?php if (!$view_graduated): ?>
-<div class="modal fade promote-modal" id="promoteModal" tabindex="-1">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <form method="POST" action="student_profile.php" id="promoteFormMain">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
-                <input type="hidden" name="promote_students" value="1">
-                <input type="hidden" name="school_year" id="pm_sy">
-                <input type="hidden" name="promote_type" id="pm_type" value="both">
-
-                <div class="pm-hero">
-                    <button type="button" class="close-btn" data-bs-dismiss="modal"><i class="bi bi-x-lg"></i></button>
-                    <div class="pm-hero-inner">
-                        <div class="pm-hero-icon"><i class="bi bi-rocket-takeoff"></i></div>
-                        <div class="pm-hero-info">
-                            <h4>Promote Students</h4>
-                            <p id="pm_hero_sy">School Year —</p>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="pm-body">
-                    <div class="pm-section">
-                        <div class="pm-section-label"><i class="bi bi-diagram-2"></i> Select promotion mode</div>
-                        <div class="pm-mode-grid">
-                            <label class="pm-mode-option" data-mode="grade11">
-                                <input type="radio" name="_pm_mode" value="grade11">
-                                <div class="pm-mode-icon"><i class="bi bi-arrow-up-circle"></i></div>
-                                <div class="pm-mode-body">
-                                    <div class="pm-mode-title">Grade 11 → 12</div>
-                                    <div class="pm-mode-desc">Advance active Grade 11 students.</div>
-                                    <div class="pm-mode-count" id="pm_count_11">0 students</div>
-                                </div>
-                            </label>
-                            <label class="pm-mode-option" data-mode="grade12">
-                                <input type="radio" name="_pm_mode" value="grade12">
-                                <div class="pm-mode-icon"><i class="bi bi-mortarboard"></i></div>
-                                <div class="pm-mode-body">
-                                    <div class="pm-mode-title">Grade 12 → Graduate</div>
-                                    <div class="pm-mode-desc">Mark Grade 12 students as Graduated.</div>
-                                    <div class="pm-mode-count" id="pm_count_12">0 students</div>
-                                </div>
-                            </label>
-                        </div>
-                        <div style="margin-top:.6rem">
-                            <label class="pm-mode-option" data-mode="both" style="display:flex">
-                                <input type="radio" name="_pm_mode" value="both">
-                                <div class="pm-mode-icon"><i class="bi bi-rocket-takeoff"></i></div>
-                                <div class="pm-mode-body">
-                                    <div class="pm-mode-title">Promote Both</div>
-                                    <div class="pm-mode-desc">Advance Grade 11 <em>and</em> graduate Grade 12 in one operation.</div>
-                                    <div class="pm-mode-count" id="pm_count_both">0 students</div>
-                                </div>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="pm-section">
-                        <div class="pm-section-label"><i class="bi bi-calendar-range"></i> New School Year</div>
-                        <div class="pm-field">
-                            <input type="text" id="pm_new_sy" name="new_school_year" placeholder="e.g. 2027-2028" required>
-                            <div class="hint">Suggested: <strong id="pm_suggested">—</strong></div>
-                        </div>
-                    </div>
-
-                    <div class="pm-section">
-                        <div class="pm-preview" id="pm_preview">
-                            <div class="pm-preview-head"><i class="bi bi-eye"></i> What will happen</div>
-                            <div class="pm-preview-line">
-                                <span>Grade 11 students advancing to Grade 12</span>
-                                <span class="num" id="pm_preview_11">0</span>
-                            </div>
-                            <div class="pm-preview-line">
-                                <span>Grade 12 students marked as Graduated</span>
-                                <span class="num" id="pm_preview_12">0</span>
-                            </div>
-                        </div>
-
-                        <div class="pm-warn">
-                            <i class="bi bi-exclamation-triangle-fill"></i>
-                            <div>
-                                <strong>This action cannot be undone.</strong>
-                                Students' grade levels and statuses will be permanently changed.
-                                You can still edit individual students afterwards, but there is no bulk undo.
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="pm-footer">
-                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn pm-btn-confirm" id="pm_confirm">
-                        <i class="bi bi-check-lg me-1"></i> Confirm Promotion
-                    </button>
-                </div>
-            </form>
-        </div>
-    </div>
-</div>
-
 <div class="modal fade aa-modal" id="autoAssignModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -1693,96 +1482,6 @@ function st(t) {
 tb.addEventListener('click', () => st(h.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark'));
 
 <?php if (!$view_graduated): ?>
-const promoteModalEl = document.getElementById('promoteModal');
-const promoteModal   = new bootstrap.Modal(promoteModalEl);
-
-document.getElementById('openPromoteBtn').addEventListener('click', function() {
-    const sy      = this.dataset.sy;
-    const g11     = parseInt(this.dataset.g11, 10) || 0;
-    const g12     = parseInt(this.dataset.g12, 10) || 0;
-    const nextSy  = this.dataset.nextSy || '';
-
-    if (!sy) return;
-
-    document.getElementById('pm_hero_sy').textContent = 'School Year ' + sy;
-    document.getElementById('pm_sy').value = sy;
-
-    document.getElementById('pm_count_11').textContent = g11 + ' student' + (g11 === 1 ? '' : 's');
-    document.getElementById('pm_count_12').textContent = g12 + ' student' + (g12 === 1 ? '' : 's');
-    document.getElementById('pm_count_both').textContent = (g11 + g12) + ' student' + ((g11 + g12) === 1 ? '' : 's');
-
-    document.getElementById('pm_suggested').textContent = nextSy || '—';
-    document.getElementById('pm_new_sy').value = nextSy || '';
-
-    let defaultMode = 'both';
-    if (g11 === 0 && g12 > 0) defaultMode = 'grade12';
-    else if (g12 === 0 && g11 > 0) defaultMode = 'grade11';
-
-    setPromoteMode(defaultMode, g11, g12);
-
-    document.querySelectorAll('.pm-mode-option').forEach(opt => {
-        const mode = opt.dataset.mode;
-        const count = mode === 'grade11' ? g11 : mode === 'grade12' ? g12 : g11 + g12;
-        const radio = opt.querySelector('input');
-        if (count === 0) {
-            opt.style.opacity = '.45';
-            opt.style.pointerEvents = 'none';
-            radio.disabled = true;
-        } else {
-            opt.style.opacity = '';
-            opt.style.pointerEvents = '';
-            radio.disabled = false;
-        }
-    });
-
-    promoteModal.show();
-});
-
-function setPromoteMode(mode, g11, g12) {
-    document.getElementById('pm_type').value = mode;
-    document.querySelectorAll('.pm-mode-option').forEach(o => {
-        o.classList.toggle('selected', o.dataset.mode === mode);
-        const r = o.querySelector('input');
-        if (r) r.checked = (o.dataset.mode === mode);
-    });
-
-    let p11 = 0, p12 = 0;
-    if (mode === 'grade11' || mode === 'both') p11 = g11;
-    if (mode === 'grade12' || mode === 'both') p12 = g12;
-    document.getElementById('pm_preview_11').textContent = p11;
-    document.getElementById('pm_preview_12').textContent = p12;
-}
-
-document.querySelectorAll('.pm-mode-option').forEach(opt => {
-    opt.addEventListener('click', function(e) {
-        e.preventDefault();
-        const btn = document.getElementById('openPromoteBtn');
-        const g11 = parseInt(btn.dataset.g11, 10) || 0;
-        const g12 = parseInt(btn.dataset.g12, 10) || 0;
-        setPromoteMode(this.dataset.mode, g11, g12);
-    });
-});
-
-document.getElementById('promoteFormMain').addEventListener('submit', function(e) {
-    const sy    = document.getElementById('pm_sy').value;
-    const nsy   = document.getElementById('pm_new_sy').value.trim();
-
-    if (!nsy) {
-        e.preventDefault();
-        Swal.fire({ icon: 'warning', title: 'Missing School Year', text: 'Please enter the new school year.', confirmButtonColor: '#1565c0' });
-        return;
-    }
-    if (nsy === sy) {
-        e.preventDefault();
-        Swal.fire({ icon: 'warning', title: 'Same School Year', text: 'New school year must be different from the current one.', confirmButtonColor: '#1565c0' });
-        return;
-    }
-
-    const btn = document.getElementById('pm_confirm');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Processing...';
-});
-
 const aaModalEl = document.getElementById('autoAssignModal');
 const aaModal   = new bootstrap.Modal(aaModalEl);
 
@@ -1806,126 +1505,6 @@ document.getElementById('openAutoAssignBtn').addEventListener('click', function(
     document.getElementById('aa_replace').checked = false;
 
     aaModal.show();
-});
-
-function updateSelection() {
-    const c = document.querySelectorAll('.student-checkbox:checked');
-    const n = c.length;
-    const b = document.getElementById('promoteBar');
-    const t = document.getElementById('promoteSelectedBtn');
-    const l = document.getElementById('selectedCount');
-    const p = document.getElementById('selectedIdsContainer');
-
-    if (b) b.style.display = n > 0 ? 'flex' : 'none';
-    if (l) l.textContent = n;
-    if (t) t.disabled = n === 0;
-    if (p) {
-        p.innerHTML = '';
-        c.forEach(cb => {
-            const i = document.createElement('input');
-            i.type = 'hidden';
-            i.name = 'selected_students[]';
-            i.value = cb.value;
-            p.appendChild(i);
-        });
-    }
-    document.querySelectorAll('.student-checkbox').forEach(cb => {
-        const cd = cb.closest('.student-card');
-        if (cd) cd.classList.toggle('selected', cb.checked);
-    });
-}
-
-function selectAllVisible() {
-    document.querySelectorAll('.student-card').forEach(card => {
-        if (card.style.display === 'none') return;
-        const cb = card.querySelector('.student-checkbox');
-        if (cb) cb.checked = true;
-    });
-    updateSelection();
-}
-
-function deselectAll() {
-    document.querySelectorAll('.student-checkbox').forEach(cb => { cb.checked = false; });
-    updateSelection();
-}
-
-function submitPromoteSelected() {
-    const n = document.querySelectorAll('.student-checkbox:checked').length;
-    if (n === 0) { alert('No students selected.'); return; }
-    const nsy = document.getElementById('promoteNewSY').value.trim();
-    if (!nsy) { alert('Please enter the new school year.'); return; }
-    document.getElementById('promoteNewSYHidden').value = nsy;
-    if (confirm(`Promote ${n} selected student(s) to new SY ${nsy}?\n\n⚠️ This cannot be undone.`)) {
-        document.getElementById('promoteForm').submit();
-    }
-}
-
-function applySelectionFilters() {
-    const sectionEl = document.getElementById('sfSection');
-    const gradeEl   = document.getElementById('sfGrade');
-    const searchEl  = document.getElementById('sfStudent');
-    if (!sectionEl || !gradeEl || !searchEl) return;
-
-    const section = sectionEl.value.trim().toLowerCase();
-    const grade   = gradeEl.value.trim().toLowerCase();
-    const query   = searchEl.value.trim().toLowerCase();
-
-    const cards = document.querySelectorAll('.student-card');
-    let visible = 0;
-
-    cards.forEach(card => {
-        const cardSection = (card.dataset.section || '').toLowerCase();
-        const cardGrade   = (card.dataset.grade   || '').toLowerCase();
-        const haystack    = (card.dataset.search  || '').toLowerCase();
-
-        let show = true;
-        if (section && cardSection !== section)   show = false;
-        if (grade   && cardGrade   !== grade)     show = false;
-        if (query   && !haystack.includes(query)) show = false;
-
-        card.style.display = show ? '' : 'none';
-        if (show) visible++;
-    });
-
-    const total     = cards.length;
-    const counterEl = document.getElementById('visibleCounter');
-    const summaryEl = document.getElementById('sfSummary');
-
-    if (counterEl) {
-        counterEl.textContent = visible + ' of ' + total + ' visible';
-    }
-
-    if (summaryEl) {
-        const filters = [];
-        if (section) filters.push('Section: ' + sectionEl.options[sectionEl.selectedIndex].text);
-        if (grade)   filters.push('Grade: '   + gradeEl.options[gradeEl.selectedIndex].text);
-        if (query)   filters.push('Search: "' + searchEl.value.trim() + '"');
-
-        if (filters.length === 0) {
-            summaryEl.textContent = 'Showing all ' + total + ' student' + (total === 1 ? '' : 's');
-            summaryEl.classList.add('muted');
-        } else {
-            summaryEl.textContent = 'Showing ' + visible + ' of ' + total + ' — ' + filters.join(' · ');
-            summaryEl.classList.remove('muted');
-        }
-    }
-}
-
-function clearSelectionFilters() {
-    const sectionEl = document.getElementById('sfSection');
-    const gradeEl   = document.getElementById('sfGrade');
-    const searchEl  = document.getElementById('sfStudent');
-    if (sectionEl) sectionEl.value = '';
-    if (gradeEl)   gradeEl.value   = '';
-    if (searchEl)  searchEl.value  = '';
-    applySelectionFilters();
-}
-
-document.addEventListener('DOMContentLoaded', function () {
-    if (document.getElementById('selectionFilters')) {
-        applySelectionFilters();
-    }
-    updateSelection();
 });
 <?php endif; ?>
 </script>

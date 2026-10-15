@@ -1,0 +1,5 @@
+# ============================================================
+# config/ — deny all web access to this folder
+# ============================================================
+Require all denied
+Options -Indexes

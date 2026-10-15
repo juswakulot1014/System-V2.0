@@ -1,11 +1,30 @@
 <?php
-// admin/approve_enrollment.php — Approve or reject a pending enrollment.
+declare(strict_types=1);
+
+/**
+ * approve_enrollment.php — Approve or reject a pending enrollment.
+ *
+ * Hardening applied:
+ *   - Role gate (registrar / superadmin)
+ *   - Typed input casts + clean_string on reason
+ *   - Enrollment state re-checked inside transaction
+ *   - File cleanup uses safe_path() + containment
+ *   - Rejection deletion order documented, all in one transaction
+ *   - Structured security logging on failures
+ */
+
 require_once __DIR__ . '/../config/auth.php';
 require_once __DIR__ . '/../config/audit.php';
 require_once __DIR__ . '/../config/mailer.php';
+require_once __DIR__ . '/../config/security.php';
 
+/* ── Role gate ────────────────────────────────────────────────── */
 if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true)) {
     http_response_code(403);
+    security_log('approve_enrollment.forbidden', [
+        'admin_id' => (int)($_SESSION['admin_id'] ?? 0),
+        'ip'       => $_SERVER['REMOTE_ADDR'] ?? '',
+    ]);
     exit('Forbidden');
 }
 
@@ -16,8 +35,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 verify_csrf();
 
 $enrollment_id = (int)($_POST['enrollment_id'] ?? 0);
-$action        = $_POST['action'] ?? '';
-$reason        = trim($_POST['reason'] ?? '');
+$action        = clean_string($_POST['action'] ?? '', 20);
+$reason        = clean_string($_POST['reason'] ?? '', 1000);
 
 if ($enrollment_id <= 0 || !in_array($action, ['approve', 'reject'], true)) {
     $_SESSION['error'] = 'Invalid request.';
@@ -25,6 +44,7 @@ if ($enrollment_id <= 0 || !in_array($action, ['approve', 'reject'], true)) {
     exit;
 }
 
+/* ── Fetch the enrollment row ─────────────────────────────────── */
 $stmt = $conn->prepare("
     SELECT e.enrollment_id, e.student_id, e.school_year, e.grade_level, e.term,
            e.track, e.strand, e.program, e.section, e.status, e.enrolled_at,
@@ -55,9 +75,9 @@ $admin_id     = (int)$_SESSION['admin_id'];
 $student_name = trim(($enr['first_name'] ?? '') . ' ' . ($enr['last_name'] ?? ''));
 $student_id   = (int)$enr['student_id'];
 
-// ═══════════════════════════════════════════════════════════
-// REJECT → send decline email → delete the entire student
-// ═══════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════════════
+   REJECT → send decline email → delete student + all related rows
+   ═══════════════════════════════════════════════════════════════ */
 if ($action === 'reject') {
     if ($reason === '') {
         $_SESSION['error'] = 'A rejection reason is required.';
@@ -65,7 +85,7 @@ if ($action === 'reject') {
         exit;
     }
 
-    // ── 1. Capture file paths BEFORE any deletion ──
+    /* ── 1. Capture file paths BEFORE any deletion ────────────── */
     $doc_files = [];
     $dq = $conn->prepare("SELECT file_path FROM entrance_documents WHERE student_id = ? AND file_path IS NOT NULL");
     if ($dq) {
@@ -74,7 +94,14 @@ if ($action === 'reject') {
         $dres = $dq->get_result();
         while ($d = $dres->fetch_assoc()) {
             if (!empty($d['file_path'])) {
-                $doc_files[] = DOCUMENTS_DIR . basename($d['file_path']);
+                try {
+                    $doc_files[] = safe_path(DOCUMENTS_DIR, (string)$d['file_path']);
+                } catch (RuntimeException $e) {
+                    security_log('approve.reject.path_escape', [
+                        'doc'     => (string)$d['file_path'],
+                        'student' => $student_id,
+                    ]);
+                }
             }
         }
         $dq->close();
@@ -88,16 +115,20 @@ if ($action === 'reject') {
         $prow = $pq->get_result()->fetch_assoc();
         $pq->close();
         if (!empty($prow['photo'])) {
-            $photo_abs = student_photo_abs_path($prow['photo']);
+            try {
+                $photo_abs = safe_path(STUDENTS_PHOTO_DIR, (string)$prow['photo']);
+            } catch (RuntimeException $e) {
+                $photo_abs = null;
+            }
         }
     }
 
-    // ── 2. Send the decline email (student row still exists here) ──
-    $email_note    = '';
-    $email_sent    = false;
-    $email_target  = $enr['email'] ?? '';
+    /* ── 2. Decline email (student row still exists here) ─────── */
+    $email_note   = '';
+    $email_sent   = false;
+    $email_target = trim((string)($enr['email'] ?? ''));
 
-    if (!empty($email_target)) {
+    if ($email_target !== '' && filter_var($email_target, FILTER_VALIDATE_EMAIL)) {
         $subject = 'Enrollment Application Declined — USAT College Sagay City Inc.';
         $body    = rejection_email_html($student_name, $enr, $reason);
         $result  = send_mail($email_target, $subject, $body);
@@ -105,19 +136,19 @@ if ($action === 'reject') {
         log_email($conn, $enrollment_id, $student_id, $email_target, $subject, $result, $admin_id);
 
         if ($result['ok']) {
-            $email_sent  = true;
-            $email_note  = " A decline notification was sent to {$email_target}.";
+            $email_sent = true;
+            $email_note = " A decline notification was sent to {$email_target}.";
         } else {
-            $email_note  = format_email_failure_note($email_target, $result);
+            $email_note = format_email_failure_note($email_target, $result);
         }
     } else {
         $email_note = ' (No email on file — the student was not notified.)';
     }
 
-    // ── 3. Notify the registrar (best-effort, never fatal) ──
+    /* ── 3. Notify registrar (best-effort) ────────────────────── */
     notify_registrar($conn, $student_name, $enr, 'rejected', $reason);
 
-    // ── 4. Audit the decision BEFORE we lose the target row ──
+    /* ── 4. Audit BEFORE losing the row ───────────────────────── */
     audit_log($conn, 'enrollment.reject', [
         'type'           => 'student',
         'id'             => $student_id,
@@ -127,15 +158,14 @@ if ($action === 'reject') {
         'email_sent'     => $email_sent,
         'student_name'   => $student_name,
         'student_id_no'  => $enr['student_id_number'] ?? null,
-        'school_year'    => $enr['school_year']   ?? null,
-        'grade_level'    => $enr['grade_level']   ?? null,
-        'strand'         => $enr['strand']        ?? null,
+        'school_year'    => $enr['school_year']       ?? null,
+        'grade_level'    => $enr['grade_level']       ?? null,
+        'strand'         => $enr['strand']            ?? null,
     ]);
 
-    // ── 5. Delete the entire student record inside one transaction ──
+    /* ── 5. Delete all related rows in one transaction ────────── */
     $conn->begin_transaction();
     try {
-        // Child tables — order matters if FKs are enforced (safest first).
         $child_tables = [
             'student_grades',
             'entrance_documents',
@@ -149,10 +179,9 @@ if ($action === 'reject') {
         ];
 
         foreach ($child_tables as $tbl) {
-            // Skip tables that don't exist in this schema — don't fail the whole reject.
-            $del = $conn->prepare("DELETE FROM `$tbl` WHERE student_id = ?");
+            $safe_tbl = sql_identifier($tbl);
+            $del = $conn->prepare("DELETE FROM `{$safe_tbl}` WHERE student_id = ?");
             if (!$del) {
-                // Table probably missing — log and continue
                 error_log("reject_enrollment: could not prepare DELETE on {$tbl}: " . $conn->error);
                 continue;
             }
@@ -161,7 +190,6 @@ if ($action === 'reject') {
             $del->close();
         }
 
-        // Finally the master row
         $del = $conn->prepare("DELETE FROM students_info WHERE student_id = ?");
         $del->bind_param('i', $student_id);
         $del->execute();
@@ -174,19 +202,24 @@ if ($action === 'reject') {
 
         $conn->commit();
 
-        // ── 6. Only NOW unlink files from disk ──
-        $root = realpath(DOCUMENTS_DIR);
+        /* ── 6. Unlink files AFTER commit succeeds ─────────────── */
+        $root_docs   = realpath(DOCUMENTS_DIR);
+        $root_photos = realpath(STUDENTS_PHOTO_DIR);
+
         foreach ($doc_files as $abs) {
             $real = realpath($abs);
-            if ($real && $root && str_starts_with($real, $root . DIRECTORY_SEPARATOR)) {
+            if ($real && $root_docs && str_starts_with($real, $root_docs . DIRECTORY_SEPARATOR)) {
                 @unlink($real);
             }
         }
         if ($photo_abs && is_file($photo_abs)) {
-            @unlink($photo_abs);
+            $real = realpath($photo_abs);
+            if ($real && $root_photos && str_starts_with($real, $root_photos . DIRECTORY_SEPARATOR)) {
+                @unlink($real);
+            }
         }
 
-        // ── 7. Log the deletion for posterity ──
+        /* ── 7. Log the deletion ───────────────────────────────── */
         audit_log($conn, 'enrollment.reject_delete', [
             'type'          => 'student',
             'id'            => $student_id,
@@ -199,9 +232,15 @@ if ($action === 'reject') {
             "Enrollment declined for {$student_name}.{$email_note} "
           . "The student record and all related data have been removed from the system.";
 
-    } catch (\Throwable $e) {
+    } catch (Throwable $e) {
         $conn->rollback();
         error_log('reject_enrollment: deletion failed: ' . $e->getMessage());
+
+        security_log('approve.reject_delete_failed', [
+            'student_id'    => $student_id,
+            'enrollment_id' => $enrollment_id,
+            'error'         => $e->getMessage(),
+        ]);
 
         $_SESSION['error'] =
             "Decline email was processed, but the student record could NOT be fully deleted: "
@@ -212,15 +251,29 @@ if ($action === 'reject') {
     exit;
 }
 
-// ═══════════════════════════════════════════════════════════
-// APPROVE
-// ═══════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════════════
+   APPROVE
+   ═══════════════════════════════════════════════════════════════ */
 $conn->begin_transaction();
 try {
+    /* Re-check status inside the transaction (race-safe). */
+    $chk = $conn->prepare("SELECT status FROM enrollment_form WHERE enrollment_id = ? FOR UPDATE");
+    $chk->bind_param('i', $enrollment_id);
+    $chk->execute();
+    $cur = $chk->get_result()->fetch_assoc();
+    $chk->close();
+
+    if (!$cur || $cur['status'] !== 'Pending') {
+        $conn->rollback();
+        $_SESSION['error'] = 'This enrollment was already processed by another user.';
+        header('Location: pending_enrollments.php');
+        exit;
+    }
+
     $upd = $conn->prepare("
         UPDATE enrollment_form
-        SET status = 'Active', approved_by = ?, approved_at = NOW(), rejection_reason = NULL
-        WHERE enrollment_id = ? AND status = 'Pending'
+           SET status = 'Active', approved_by = ?, approved_at = NOW(), rejection_reason = NULL
+         WHERE enrollment_id = ? AND status = 'Pending'
     ");
     $upd->bind_param('ii', $admin_id, $enrollment_id);
     $upd->execute();
@@ -246,7 +299,7 @@ try {
             $hist->execute();
             $hist->close();
         }
-    } catch (\Throwable $ignore) {
+    } catch (Throwable $ignore) {
         error_log('approve_enrollment: status history insert skipped: ' . $ignore->getMessage());
     }
 
@@ -263,32 +316,39 @@ try {
     notify_registrar($conn, $student_name, $enr, 'approved', null);
 
     $email_note = '';
-    if (!empty($enr['email'])) {
+    $email_target = trim((string)($enr['email'] ?? ''));
+
+    if ($email_target !== '' && filter_var($email_target, FILTER_VALIDATE_EMAIL)) {
         $subject = 'You are officially enrolled — USAT College Sagay City Inc.';
         $body    = approval_email_html($student_name, $enr);
-        $result  = send_mail($enr['email'], $subject, $body);
-        log_email($conn, $enrollment_id, (int)$enr['student_id'], $enr['email'], $subject, $result, $admin_id);
+        $result  = send_mail($email_target, $subject, $body);
+        log_email($conn, $enrollment_id, (int)$enr['student_id'], $email_target, $subject, $result, $admin_id);
 
         $email_note = $result['ok']
-            ? " Confirmation email sent to {$enr['email']}."
-            : format_email_failure_note($enr['email'], $result);
+            ? " Confirmation email sent to {$email_target}."
+            : format_email_failure_note($email_target, $result);
     } else {
-        $email_note = " (No email on file — student was not notified.)";
+        $email_note = ' (No email on file — student was not notified.)';
     }
 
     $_SESSION['success'] = "Enrollment approved for {$student_name}.{$email_note}";
-} catch (\Throwable $e) {
+
+} catch (Throwable $e) {
     $conn->rollback();
     error_log('Approve enrollment failed: ' . $e->getMessage());
+    security_log('approve.failed', [
+        'enrollment_id' => $enrollment_id,
+        'error'         => $e->getMessage(),
+    ]);
     $_SESSION['error'] = 'Approval failed. Please try again.';
 }
 
 header('Location: pending_enrollments.php');
 exit;
 
-// ═════════════════════════════════════════════════════════════
-// HELPERS
-// ═════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════════════
+   HELPERS
+   ═══════════════════════════════════════════════════════════════ */
 
 function format_email_failure_note(string $to, array $result): string
 {
@@ -301,22 +361,23 @@ function format_email_failure_note(string $to, array $result): string
     }
 
     return sprintf(
-        " (Warning: email to %s failed after %d attempt(s) [%s] — %s)",
-        htmlspecialchars($to),
+        ' (Warning: email to %s failed after %d attempt(s) [%s] — %s)',
+        htmlspecialchars($to, ENT_QUOTES, 'UTF-8'),
         $attempts,
         $kind,
-        htmlspecialchars($err)
+        htmlspecialchars($err, ENT_QUOTES, 'UTF-8')
     );
 }
 
 function log_email(mysqli $conn, int $eid, int $sid, string $to, string $subject, array $r, int $admin_id): void
 {
-    $status = $r['ok'] ? 'sent' : 'failed';
+    $status = !empty($r['ok']) ? 'sent' : 'failed';
 
-    if (!$r['ok']) {
+    if ($status === 'failed') {
         $err = trim((string)($r['error'] ?? 'unknown'));
         if (isset($r['attempts'])) {
-            $err = sprintf('[attempts=%d, transient=%s] %s',
+            $err = sprintf(
+                '[attempts=%d, transient=%s] %s',
                 (int)$r['attempts'],
                 !empty($r['transient']) ? 'yes' : 'no',
                 $err
@@ -339,7 +400,7 @@ function log_email(mysqli $conn, int $eid, int $sid, string $to, string $subject
 
 function notify_registrar(mysqli $conn, string $student_name, array $enr, string $action, ?string $reason): void
 {
-    $raw = trim(getenv('REGISTRAR_NOTIFY_EMAIL') ?: '');
+    $raw = trim((string)(getenv('REGISTRAR_NOTIFY_EMAIL') ?: ''));
     if ($raw === '') return;
 
     $recipients = array_filter(
@@ -359,7 +420,7 @@ function notify_registrar(mysqli $conn, string $student_name, array $enr, string
 
     foreach ($recipients as $rcpt) {
         $r = send_mail($rcpt, $subject, $body);
-        if (!$r['ok']) {
+        if (empty($r['ok'])) {
             error_log(sprintf(
                 'notify_registrar: failed to %s after %d attempt(s) — %s',
                 $rcpt,
@@ -372,14 +433,14 @@ function notify_registrar(mysqli $conn, string $student_name, array $enr, string
 
 function approval_email_html(string $name, array $e): string
 {
-    $sy      = htmlspecialchars($e['school_year']);
-    $grade   = htmlspecialchars($e['grade_level']);
-    $strand  = htmlspecialchars($e['strand'] ?: '—');
-    $program = htmlspecialchars($e['program'] ?: '—');
-    $section = htmlspecialchars($e['section'] ?: 'TBA');
-    $idno    = htmlspecialchars($e['student_id_number']);
-    $lrn     = htmlspecialchars($e['lrn']);
-    $name    = htmlspecialchars($name);
+    $sy      = htmlspecialchars((string)$e['school_year'], ENT_QUOTES, 'UTF-8');
+    $grade   = htmlspecialchars((string)$e['grade_level'], ENT_QUOTES, 'UTF-8');
+    $strand  = htmlspecialchars((string)($e['strand']  ?: '—'), ENT_QUOTES, 'UTF-8');
+    $program = htmlspecialchars((string)($e['program'] ?: '—'), ENT_QUOTES, 'UTF-8');
+    $section = htmlspecialchars((string)($e['section'] ?: 'TBA'), ENT_QUOTES, 'UTF-8');
+    $idno    = htmlspecialchars((string)$e['student_id_number'], ENT_QUOTES, 'UTF-8');
+    $lrn     = htmlspecialchars((string)$e['lrn'], ENT_QUOTES, 'UTF-8');
+    $name    = htmlspecialchars($name, ENT_QUOTES, 'UTF-8');
     $year    = date('Y');
 
     return <<<HTML
@@ -424,14 +485,14 @@ HTML;
 
 function rejection_email_html(string $name, array $e, string $reason): string
 {
-    $name   = htmlspecialchars($name);
-    $reason = htmlspecialchars($reason);
+    $name   = htmlspecialchars($name, ENT_QUOTES, 'UTF-8');
+    $reason = htmlspecialchars($reason, ENT_QUOTES, 'UTF-8');
     $year   = date('Y');
-    $idno   = htmlspecialchars($e['student_id_number'] ?? '—');
-    $lrn    = htmlspecialchars($e['lrn'] ?? '—');
-    $sy     = htmlspecialchars($e['school_year'] ?? '—');
-    $grade  = htmlspecialchars($e['grade_level'] ?? '—');
-    $strand = htmlspecialchars($e['strand'] ?: '—');
+    $idno   = htmlspecialchars((string)($e['student_id_number'] ?? '—'), ENT_QUOTES, 'UTF-8');
+    $lrn    = htmlspecialchars((string)($e['lrn'] ?? '—'), ENT_QUOTES, 'UTF-8');
+    $sy     = htmlspecialchars((string)($e['school_year'] ?? '—'), ENT_QUOTES, 'UTF-8');
+    $grade  = htmlspecialchars((string)($e['grade_level'] ?? '—'), ENT_QUOTES, 'UTF-8');
+    $strand = htmlspecialchars((string)($e['strand'] ?: '—'), ENT_QUOTES, 'UTF-8');
 
     return <<<HTML
 <!DOCTYPE html>
@@ -477,18 +538,23 @@ function rejection_email_html(string $name, array $e, string $reason): string
 HTML;
 }
 
-function registrar_notification_html(string $student_name, array $e, string $action, string $admin_name, ?string $reason = null): string
-{
-    $student_name = htmlspecialchars($student_name);
-    $admin_name   = htmlspecialchars($admin_name);
-    $idno         = htmlspecialchars($e['student_id_number'] ?? '—');
-    $lrn          = htmlspecialchars($e['lrn'] ?? '—');
-    $sy           = htmlspecialchars($e['school_year'] ?? '—');
-    $grade        = htmlspecialchars($e['grade_level'] ?? '—');
-    $strand       = htmlspecialchars($e['strand'] ?: '—');
-    $program      = htmlspecialchars($e['program'] ?: '—');
-    $section      = htmlspecialchars($e['section'] ?: 'TBA');
-    $email        = htmlspecialchars($e['email'] ?: '(no email on file)');
+function registrar_notification_html(
+    string $student_name,
+    array $e,
+    string $action,
+    string $admin_name,
+    ?string $reason = null
+): string {
+    $student_name = htmlspecialchars($student_name, ENT_QUOTES, 'UTF-8');
+    $admin_name   = htmlspecialchars($admin_name, ENT_QUOTES, 'UTF-8');
+    $idno         = htmlspecialchars((string)($e['student_id_number'] ?? '—'), ENT_QUOTES, 'UTF-8');
+    $lrn          = htmlspecialchars((string)($e['lrn'] ?? '—'), ENT_QUOTES, 'UTF-8');
+    $sy           = htmlspecialchars((string)($e['school_year'] ?? '—'), ENT_QUOTES, 'UTF-8');
+    $grade        = htmlspecialchars((string)($e['grade_level'] ?? '—'), ENT_QUOTES, 'UTF-8');
+    $strand       = htmlspecialchars((string)($e['strand'] ?: '—'), ENT_QUOTES, 'UTF-8');
+    $program      = htmlspecialchars((string)($e['program'] ?: '—'), ENT_QUOTES, 'UTF-8');
+    $section      = htmlspecialchars((string)($e['section'] ?: 'TBA'), ENT_QUOTES, 'UTF-8');
+    $email        = htmlspecialchars((string)($e['email'] ?: '(no email on file)'), ENT_QUOTES, 'UTF-8');
     $when         = date('F d, Y g:i A');
     $year         = date('Y');
     $isApprove    = ($action === 'approved');
@@ -500,7 +566,7 @@ function registrar_notification_html(string $student_name, array $e, string $act
 
     $reasonBlock = '';
     if (!$isApprove && $reason !== null && $reason !== '') {
-        $reasonEsc = htmlspecialchars($reason);
+        $reasonEsc = htmlspecialchars($reason, ENT_QUOTES, 'UTF-8');
         $reasonBlock = <<<HTML
           <tr><td colspan="2" style="padding:14px 12px;background:#fef2f2;border-left:4px solid #dc2626;border-radius:8px">
             <strong style="color:#991b1b;display:block;margin-bottom:6px;font-size:13px">Rejection Reason</strong>

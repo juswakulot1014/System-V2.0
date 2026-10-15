@@ -498,7 +498,7 @@ if (!function_exists('verify_name_in_document')) {
             $scale = $target / $long;
             $nw = max(1, (int)round($w * $scale));
             $nh = max(1, (int)round($h * $scale));
-            $small = @imagescale($im, $nw, $nh, IMG_BILINEAR);
+           $small = @imagescale($im, $nw, $nh, IMG_BILINEAR_FIXED);
             if ($small) { imagedestroy($im); $im = $small; }
         }
 

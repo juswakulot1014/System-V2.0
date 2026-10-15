@@ -875,11 +875,21 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 <body>
 
 <?php
-    $__current = basename($_SERVER['PHP_SELF']);
-    $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
-    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
-    $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
-    $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
+/* ── Sidebar include: shared across all admin pages ── */
+$__current = basename($_SERVER['PHP_SELF']);
+$__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
+
+// Sub-pages that should keep "Students" highlighted
+$__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
+// Graduate and promote pages share the same highlight group
+$__promote_pages = ['promote.php','graduates.php'];
+
+$__act = $__current;
+if (in_array($__current, $__student_pages, true)) $__act = 'student_profile.php';
+
+$__a = fn($f) => $f === $__act ? ' class="active"' : '';
+
+$__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
 ?>
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
@@ -893,23 +903,24 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         <div class="nav-label">Overview</div>
         <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
-        <?php
-    $__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
-?>
-<a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
-    <i class="bi bi-hourglass-split"></i> Pending
-    <?php if ($__pending_count > 0): ?>
-        <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
-            <?= $__pending_count ?>
-        </span>
-    <?php endif; ?>
-</a>
+        <a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
+            <i class="bi bi-hourglass-split"></i> Pending
+            <?php if ($__pending_count > 0): ?>
+                <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
+                    <?= $__pending_count ?>
+                </span>
+            <?php endif; ?>
+        </a>
+        <a href="promote.php"<?= $__a('promote.php') ?>><i class="bi bi-rocket-takeoff"></i> Promote</a>
+        <a href="graduates.php"<?= $__a('graduates.php') ?>><i class="bi bi-mortarboard-fill"></i> Graduates</a>
         <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
+
         <?php if ($__super): ?>
         <div class="nav-label" style="margin-top:.5rem">Administration</div>
         <a href="create_account.php"<?= $__a('create_account.php') ?>><i class="bi bi-person-plus"></i> Accounts</a>
         <a href="audit_log.php"<?= $__a('audit_log.php') ?>><i class="bi bi-shield-check"></i> Audit Log</a>
         <?php endif; ?>
+
         <div class="nav-label" style="margin-top:.5rem">Account</div>
         <a href="profile.php"<?= $__a('profile.php') ?>><i class="bi bi-person-gear"></i> My Profile</a>
     </nav>
@@ -919,7 +930,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </a>
     </div>
 </aside>
-
 <div class="main-content" id="mainContent"
      data-report-title="<?= htmlspecialchars($reports[$report_type]['title']) ?>"
      data-generated="<?= date('F d, Y g:i A') ?>">

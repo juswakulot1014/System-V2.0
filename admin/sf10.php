@@ -37,6 +37,16 @@ function autoRemark($grade) {
     return ((float)$grade >= 75) ? 'Passed' : 'Failed';
 }
 
+// ====================== REQUESTED GRADE VIEW ======================
+// ?grade=Grade 11 limits the SF10 to that level. Anything else (or no parameter)
+// gives the full Senior High School record. Only the two known levels are accepted.
+$ALL_LEVELS  = ['Grade 11', 'Grade 12'];
+$onlyLevel   = normalizeGradeLevel($_GET['grade'] ?? '');
+if (!in_array($onlyLevel, $ALL_LEVELS, true)) {
+    $onlyLevel = null;
+}
+$levels = $onlyLevel !== null ? [$onlyLevel] : $ALL_LEVELS;
+
 // ====================== FETCH STUDENT ======================
 $sql = "
     SELECT s.student_id, s.student_id_number, s.lrn,
@@ -71,7 +81,8 @@ if (!$student) {
 $enrollments = [];
 $en_stmt = $conn->prepare("
     SELECT enrollment_id, school_year, grade_level, term,
-           track, strand, program, section
+           track, strand, program, section,
+           voucher_status, household_id, status, cct_4ps
     FROM enrollment_form
     WHERE student_id = ?
     ORDER BY school_year ASC, term ASC, enrollment_id ASC
@@ -79,8 +90,55 @@ $en_stmt = $conn->prepare("
 $en_stmt->bind_param("i", $student_id);
 $en_stmt->execute();
 $res = $en_stmt->get_result();
-while ($row = $res->fetch_assoc()) $enrollments[(int)$row['enrollment_id']] = $row;
+while ($row = $res->fetch_assoc()) {
+    $enrollments[(int)$row['enrollment_id']] = $row;
+}
 $en_stmt->close();
+
+/* ═══════════════════════════════════════════════════════════════
+   Pick the "primary" enrollment for each grade level.
+   Preference: latest school year, latest term (3rd > 2nd > 1st),
+   then highest enrollment_id.
+   ═══════════════════════════════════════════════════════════════ */
+$primaryEnrollmentByGrade = ['Grade 11' => null, 'Grade 12' => null];
+$termRank = ['1st Term' => 1, '2nd Term' => 2, '3rd Term' => 3];
+
+foreach ($enrollments as $en) {
+    $gl = normalizeGradeLevel($en['grade_level'] ?? '');
+    $tm = normalizeTerm($en['term'] ?? '');
+    if ($gl === null) continue;
+
+    $candidate = $en;
+    $candidate['_term_rank'] = $termRank[$tm] ?? 0;
+    $candidate['_sy']        = (string)($en['school_year'] ?? '');
+
+    $current = $primaryEnrollmentByGrade[$gl];
+
+    if ($current === null) {
+        $primaryEnrollmentByGrade[$gl] = $candidate;
+        continue;
+    }
+
+    $cmp_sy = strcmp($candidate['_sy'], (string)$current['_sy']);
+    if ($cmp_sy > 0) {
+        $primaryEnrollmentByGrade[$gl] = $candidate;
+    } elseif ($cmp_sy === 0 && $candidate['_term_rank'] > $current['_term_rank']) {
+        $primaryEnrollmentByGrade[$gl] = $candidate;
+    } elseif ($cmp_sy === 0
+              && $candidate['_term_rank'] === $current['_term_rank']
+              && (int)$candidate['enrollment_id'] > (int)$current['enrollment_id']) {
+        $primaryEnrollmentByGrade[$gl] = $candidate;
+    }
+}
+
+// Header track/strand/program come from the enrollment of the level being shown.
+// For the full record, they come from the latest enrollment (already in $student).
+if ($onlyLevel !== null && !empty($primaryEnrollmentByGrade[$onlyLevel])) {
+    $pe = $primaryEnrollmentByGrade[$onlyLevel];
+    $student['track']   = $pe['track']   ?? $student['track'];
+    $student['strand']  = $pe['strand']  ?? $student['strand'];
+    $student['program'] = $pe['program'] ?? $student['program'];
+}
 
 // ====================== FETCH ALL GRADES ======================
 $grades_by_enrollment = [];
@@ -100,38 +158,27 @@ while ($row = $res->fetch_assoc()) {
 $gr_stmt->close();
 
 // ====================== BUILD SF10 STRUCTURE ======================
+$emptyTerm = ['enrollment' => null, 'subjects' => [], 'gwa' => null, 'school_year' => ''];
 $sf10 = [
-    'Grade 11' => [
-        '1st Term' => ['enrollment' => null, 'subjects' => [], 'gwa' => null, 'school_year' => ''],
-        '2nd Term' => ['enrollment' => null, 'subjects' => [], 'gwa' => null, 'school_year' => ''],
-        '3rd Term' => ['enrollment' => null, 'subjects' => [], 'gwa' => null, 'school_year' => ''],
-    ],
-    'Grade 12' => [
-        '1st Term' => ['enrollment' => null, 'subjects' => [], 'gwa' => null, 'school_year' => ''],
-        '2nd Term' => ['enrollment' => null, 'subjects' => [], 'gwa' => null, 'school_year' => ''],
-        '3rd Term' => ['enrollment' => null, 'subjects' => [], 'gwa' => null, 'school_year' => ''],
-    ],
+    'Grade 11' => ['1st Term' => $emptyTerm, '2nd Term' => $emptyTerm, '3rd Term' => $emptyTerm],
+    'Grade 12' => ['1st Term' => $emptyTerm, '2nd Term' => $emptyTerm, '3rd Term' => $emptyTerm],
 ];
 
+// Flatten grades, resolving grade level and term from the enrollment when a row lacks them
 $allGrades = [];
 foreach ($grades_by_enrollment as $en_id => $rows) {
+    $enRow = $enrollments[$en_id] ?? null;
     foreach ($rows as $g) {
         $gl = normalizeGradeLevel($g['grade_level'] ?? '');
         $tm = normalizeTerm($g['term'] ?? '');
-        if ($gl === null) {
-            $enRow = $enrollments[$en_id] ?? null;
-            if ($enRow) $gl = normalizeGradeLevel($enRow['grade_level'] ?? '');
-        }
-        if ($tm === null) {
-            $enRow = $enrollments[$en_id] ?? null;
-            if ($enRow) $tm = normalizeTerm($enRow['term'] ?? '');
-        }
+        if ($gl === null && $enRow) $gl = normalizeGradeLevel($enRow['grade_level'] ?? '');
+        if ($tm === null && $enRow) $tm = normalizeTerm($enRow['term'] ?? '');
         if ($gl === null || $tm === null) continue;
 
         $allGrades[] = [
             'grade_level' => $gl,
             'term'        => $tm,
-            'school_year' => $g['school_year'] ?? ($enrollments[$en_id]['school_year'] ?? ''),
+            'school_year' => $g['school_year'] ?? ($enRow['school_year'] ?? ''),
             'code'        => $g['subject_code'],
             'name'        => $g['subject_name'],
             'grade'       => $g['grade'],
@@ -140,7 +187,8 @@ foreach ($grades_by_enrollment as $en_id => $rows) {
     }
 }
 
-foreach ($enrollments as $en_id => $en) {
+// Attach enrollment info to each term slot
+foreach ($enrollments as $en) {
     $gl = normalizeGradeLevel($en['grade_level'] ?? '');
     $tm = normalizeTerm($en['term'] ?? '');
     if ($gl === null || $tm === null) continue;
@@ -148,17 +196,19 @@ foreach ($enrollments as $en_id => $en) {
     $sf10[$gl][$tm]['school_year'] = $en['school_year'];
 }
 
+// Place each subject into its term block (one row per subject code)
 foreach ($allGrades as $g) {
-    $block = &$sf10[$g['grade_level']][$g['term']];
+    $gl = $g['grade_level'];
+    $tm = $g['term'];
 
-    if (empty($block['school_year']) && !empty($g['school_year'])) {
-        $block['school_year'] = $g['school_year'];
+    if (empty($sf10[$gl][$tm]['school_year']) && !empty($g['school_year'])) {
+        $sf10[$gl][$tm]['school_year'] = $g['school_year'];
     }
 
     $key = !empty($g['code']) ? $g['code'] : ('__' . $g['name']);
 
-    if (!isset($block['subjects'][$key])) {
-        $block['subjects'][$key] = [
+    if (!isset($sf10[$gl][$tm]['subjects'][$key])) {
+        $sf10[$gl][$tm]['subjects'][$key] = [
             'code'   => $g['code'],
             'name'   => $g['name'],
             'final'  => null,
@@ -167,57 +217,51 @@ foreach ($allGrades as $g) {
     }
 
     if ($g['grade'] !== null && is_numeric($g['grade'])) {
-        $block['subjects'][$key]['final'] = (float)$g['grade'];
+        $sf10[$gl][$tm]['subjects'][$key]['final'] = (float)$g['grade'];
     }
     if (!empty($g['remarks'])) {
-        $block['subjects'][$key]['remark'] = $g['remarks'];
+        $sf10[$gl][$tm]['subjects'][$key]['remark'] = $g['remarks'];
     }
 }
-unset($block);
 
-foreach ($sf10 as $gl => &$terms) {
-    foreach ($terms as $termName => &$block) {
-        $finalGrades = [];
-        foreach ($block['subjects'] as &$subj) {
-            if ($subj['final'] !== null) $finalGrades[] = $subj['final'];
-        }
-        unset($subj);
-
-        uasort($block['subjects'], function($a, $b) {
+// Sort subjects and compute term GWAs
+foreach ($ALL_LEVELS as $gl) {
+    foreach (['1st Term', '2nd Term', '3rd Term'] as $tm) {
+        $subjects = $sf10[$gl][$tm]['subjects'];
+        uasort($subjects, function ($a, $b) {
             return strcasecmp($a['code'] ?: $a['name'], $b['code'] ?: $b['name']);
         });
+        $sf10[$gl][$tm]['subjects'] = $subjects;
 
-        $block['gwa'] = count($finalGrades) > 0
-            ? round(array_sum($finalGrades) / count($finalGrades), 2)
+        $finals = [];
+        foreach ($subjects as $subj) {
+            if ($subj['final'] !== null) $finals[] = $subj['final'];
+        }
+        $sf10[$gl][$tm]['gwa'] = count($finals) > 0
+            ? round(array_sum($finals) / count($finals), 2)
             : null;
     }
 }
-unset($terms);
 
+// Grade-level GWAs and overall GWA, over the levels being shown
+$gradeLevelGwa = [];
 $allFinalGrades = [];
-foreach ($sf10 as $gl => $terms) {
-    foreach ($terms as $termName => $block) {
-        foreach ($block['subjects'] as $subj) {
-            if ($subj['final'] !== null) $allFinalGrades[] = $subj['final'];
+foreach ($levels as $gl) {
+    $vals  = [];
+    $finals = [];
+    foreach (['1st Term', '2nd Term', '3rd Term'] as $tm) {
+        if ($sf10[$gl][$tm]['gwa'] !== null) $vals[] = $sf10[$gl][$tm]['gwa'];
+        foreach ($sf10[$gl][$tm]['subjects'] as $subj) {
+            if ($subj['final'] !== null) $finals[] = $subj['final'];
         }
     }
+    $gradeLevelGwa[$gl] = count($vals) > 0 ? round(array_sum($vals) / count($vals), 2) : null;
+    $allFinalGrades     = array_merge($allFinalGrades, $finals);
 }
+
 $overall_gwa = count($allFinalGrades) > 0
     ? round(array_sum($allFinalGrades) / count($allFinalGrades), 2)
     : null;
-
-$gradeLevelGwa = [];
-foreach ($sf10 as $gl => $terms) {
-    $vals = [];
-    foreach ($terms as $termName => $block) {
-        if ($block['gwa'] !== null) $vals[] = $block['gwa'];
-    }
-    $gradeLevelGwa[$gl] = count($vals) > 0
-        ? round(array_sum($vals) / count($vals), 2)
-        : null;
-}
-
-$gradeLevelGWA = $gradeLevelGwa;
 
 $fullName = trim(($student['last_name'] ?? '') . ', ' . ($student['first_name'] ?? '') . ' ' . ($student['middle_name'] ?? ''));
 $address = implode(', ', array_filter([
@@ -227,7 +271,11 @@ $address = implode(', ', array_filter([
     $student['province']     ?? null,
 ])) ?: '—';
 
-audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
+audit_log($conn, 'sf10.print', [
+    'type' => 'student',
+    'id'   => $student_id,
+    'view' => $onlyLevel ?? 'full',
+]);
 
 ?>
 <!DOCTYPE html>
@@ -247,8 +295,18 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             --head-bg:    #e4e4e7;
             --band-bg:    #f1f1f3;
             --accent:     #1e3a8a;
+            --accent-2:   #2563eb;
             --gold:       #fef3c7;
             --paper-grey: #d6d6d6;
+
+            --green:      #059669;
+            --green-soft: #d1fae5;
+            --red:        #dc2626;
+            --red-soft:   #fee2e2;
+            --amber:      #d97706;
+            --amber-soft: #fef3c7;
+            --purple:     #7c3aed;
+            --purple-soft:#ede9fe;
 
             --paper-width:  215.9mm;
             --paper-height: 330.2mm;
@@ -455,6 +513,18 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             letter-spacing: 0.4px;
         }
 
+        /* Archived-view notice (only shown with ?grade=) */
+        .archive-notice {
+            margin: 0 0 14px;
+            padding: 6px 10px;
+            border: 1px solid #f59e0b;
+            background: #fffbeb;
+            font-size: 10.5px;
+            font-style: italic;
+            color: #92400e;
+            text-align: center;
+        }
+
         /* ============================================================
            Section titles
            ============================================================ */
@@ -519,6 +589,11 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             border-radius: 2px;
             overflow: hidden;
         }
+        .grade-block.page-break {
+            page-break-before: always;
+            break-before: page;
+        }
+
         .grade-header {
             background: var(--accent);
             color: #fff;
@@ -543,6 +618,106 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             text-transform: none;
         }
 
+        /* ============================================================
+           Enrollment details panel
+           ============================================================ */
+        .enrollment-panel {
+            background: #fafafc;
+            border-bottom: 1px solid var(--ink);
+            padding: 12px 14px;
+            page-break-inside: avoid;
+        }
+
+        .enrollment-panel-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 10.5px;
+            font-weight: bold;
+            letter-spacing: 1.4px;
+            text-transform: uppercase;
+            color: var(--accent);
+            margin-bottom: 10px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid #d4d4d8;
+        }
+        .enrollment-panel-header i {
+            font-size: 12px;
+        }
+
+        .enrollment-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0;
+            border: 1px solid #cbd5e1;
+            border-radius: 4px;
+            overflow: hidden;
+            background: #fff;
+        }
+
+        .enrollment-item {
+            padding: 8px 11px;
+            border-right: 1px solid #cbd5e1;
+            border-bottom: 1px solid #cbd5e1;
+            background: #fff;
+            min-height: 46px;
+        }
+        .enrollment-item:nth-child(3n)        { border-right: none; }
+        .enrollment-item:nth-last-child(-n+3) { border-bottom: none; }
+
+        .enrollment-item .lbl {
+            font-size: 8.5px;
+            font-weight: bold;
+            color: #64748b;
+            letter-spacing: 0.6px;
+            text-transform: uppercase;
+            margin-bottom: 3px;
+        }
+        .enrollment-item .val {
+            font-size: 10.5px;
+            font-weight: 600;
+            color: #0f172a;
+            line-height: 1.35;
+            word-break: break-word;
+        }
+        .enrollment-item .val.accent { color: var(--accent); }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 1px 8px 1px 6px;
+            border-radius: 999px;
+            font-size: 9.5px;
+            font-weight: bold;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+            border: 1px solid;
+        }
+        .status-pill::before {
+            content: '';
+            width: 6px; height: 6px; border-radius: 50%;
+            background: currentColor;
+        }
+        .status-pill.active      { background: var(--green-soft);  color: var(--green);  border-color: #10b981; }
+        .status-pill.pending     { background: var(--amber-soft);  color: var(--amber);  border-color: #f59e0b; }
+        .status-pill.graduated   { background: var(--purple-soft); color: var(--purple); border-color: #8b5cf6; }
+        .status-pill.danger      { background: var(--red-soft);    color: var(--red);    border-color: #ef4444; }
+        .status-pill.muted       { background: #f1f5f9;            color: #475569;       border-color: #cbd5e1; }
+        .status-pill.muted::before { background: #94a3b8; }
+
+        .enrollment-empty {
+            background: #fff7ed;
+            border-left: 3px solid #f59e0b;
+            padding: 10px 14px;
+            font-size: 10.5px;
+            font-style: italic;
+            color: #92400e;
+        }
+
+        /* ============================================================
+           Term blocks
+           ============================================================ */
         .term-header {
             background: var(--band-bg);
             padding: 6px 14px;
@@ -722,7 +897,9 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             }
             .grade-block,
             .signature-block,
-            .overall-table { page-break-inside: avoid; }
+            .overall-table,
+            .enrollment-panel { page-break-inside: avoid; }
+            .grade-block.page-break { page-break-before: always; break-before: page; }
             .section-title { page-break-after: avoid; }
             .official-header { page-break-after: avoid; }
             .grade-header,
@@ -732,7 +909,10 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             .gwa-row td,
             .grade-footer,
             .overall-table td,
-            .official-header .logo {
+            .official-header .logo,
+            .enrollment-item,
+            .enrollment-panel-header,
+            .status-pill {
                 -webkit-print-color-adjust: exact;
                 print-color-adjust: exact;
             }
@@ -752,6 +932,9 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
             }
             .official-header .logo { width: 88px; height: 88px; }
             .signature-block { flex-direction: column; gap: 50px; }
+            .enrollment-grid { grid-template-columns: 1fr 1fr; }
+            .enrollment-item:nth-child(3n) { border-right: 1px solid #cbd5e1; }
+            .enrollment-item:nth-child(2n) { border-right: none; }
         }
     </style>
 </head>
@@ -802,9 +985,15 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
 
         <div class="title-band">
             <div class="title">Learner's Permanent Academic Record</div>
-            <div class="subtitle">SF 10 – SHS · Senior High School (Grade 11 to Grade 12)</div>
+            <div class="subtitle">SF 10 – SHS · Senior High School (<?= $onlyLevel !== null ? h($onlyLevel) : 'Grade 11 to Grade 12' ?>)</div>
         </div>
     </div>
+
+    <?php if ($onlyLevel !== null): ?>
+        <div class="archive-notice">
+            Archived view: showing the <?= h($onlyLevel) ?> record only.
+        </div>
+    <?php endif; ?>
 
     <!-- Personal Info -->
     <div class="section-title">Learner's Personal Information</div>
@@ -865,8 +1054,11 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
     <!-- Scholastic Record -->
     <div class="section-title">Scholastic Record — Senior High School</div>
 
-    <?php foreach (['Grade 11', 'Grade 12'] as $gradeLevel): ?>
-        <div class="grade-block">
+    <?php foreach ($levels as $idx => $gradeLevel):
+        $pageBreakClass = ($idx > 0) ? ' page-break' : '';
+        $enr = $primaryEnrollmentByGrade[$gradeLevel] ?? null;
+    ?>
+        <div class="grade-block<?= $pageBreakClass ?>">
             <div class="grade-header">
                 <span><?= strtoupper($gradeLevel) ?></span>
                 <?php if ($gradeLevelGwa[$gradeLevel] !== null): ?>
@@ -874,14 +1066,104 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
                 <?php endif; ?>
             </div>
 
-            <?php foreach (['1st Term', '2nd Term', '3rd Term'] as $termName): ?>
+            <!-- ENROLLMENT DETAILS PANEL -->
+            <?php if ($enr): ?>
                 <?php
-                $block = $sf10[$gradeLevel][$termName];
-                $en    = $block['enrollment'];
-                $sy    = $block['school_year'];
-                $subjects = $block['subjects'];
-                $hasGrades = !empty($subjects);
+                    $status_raw = strtolower(trim((string)($enr['status'] ?? 'Active')));
+                    if ($status_raw === '') $status_raw = 'active';
+
+                    $status_class = match ($status_raw) {
+                        'active'      => 'active',
+                        'pending'     => 'pending',
+                        'graduated'   => 'graduated',
+                        'dropped',
+                        'stopped',
+                        'transferred' => 'danger',
+                        default       => 'muted',
+                    };
+
+                    $voucher_raw  = trim((string)($enr['voucher_status'] ?? ''));
+                    $voucher_disp = ($voucher_raw !== '') ? $voucher_raw : '—';
+
+                    $hh_raw = trim((string)($enr['household_id'] ?? ''));
+                    $is_4ps = !empty($enr['cct_4ps']) ? 'Yes' : 'No';
                 ?>
+                <div class="enrollment-panel">
+                    <div class="enrollment-panel-header">
+                        <i class="bi bi-mortarboard-fill"></i>
+                        Enrollment Details — <?= h($gradeLevel) ?>
+                    </div>
+                    <div class="enrollment-grid">
+                        <div class="enrollment-item">
+                            <div class="lbl">School Year</div>
+                            <div class="val"><?= h(nz($enr['school_year'])) ?></div>
+                        </div>
+                        <div class="enrollment-item">
+                            <div class="lbl">Grade Level</div>
+                            <div class="val"><?= h(nz($enr['grade_level'])) ?></div>
+                        </div>
+                        <div class="enrollment-item">
+                            <div class="lbl">Term</div>
+                            <div class="val"><?= h(nz($enr['term'])) ?></div>
+                        </div>
+                        <div class="enrollment-item">
+                            <div class="lbl">Section</div>
+                            <div class="val accent"><?= h(nz($enr['section'])) ?></div>
+                        </div>
+                        <div class="enrollment-item">
+                            <div class="lbl">Track</div>
+                            <div class="val"><?= h(nz($enr['track'])) ?></div>
+                        </div>
+                        <div class="enrollment-item">
+                            <div class="lbl">Strand</div>
+                            <div class="val"><?= h(nz($enr['strand'])) ?></div>
+                        </div>
+                        <div class="enrollment-item">
+                            <div class="lbl">Program</div>
+                            <div class="val"><?= h(nz($enr['program'])) ?></div>
+                        </div>
+                        <div class="enrollment-item">
+                            <div class="lbl">Voucher Status</div>
+                            <div class="val"><?= h($voucher_disp) ?></div>
+                        </div>
+                        <div class="enrollment-item">
+                            <div class="lbl">Household ID</div>
+                            <div class="val"><?= h($hh_raw !== '' ? $hh_raw : '—') ?></div>
+                        </div>
+                        <div class="enrollment-item">
+                            <div class="lbl">CCT / 4Ps</div>
+                            <div class="val"><?= h($is_4ps) ?></div>
+                        </div>
+                        <div class="enrollment-item" style="grid-column: span 2;">
+                            <div class="lbl">Status</div>
+                            <div class="val">
+                                <span class="status-pill <?= $status_class ?>">
+                                    <?= h(ucfirst($status_raw)) ?>
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            <?php else: ?>
+                <div class="enrollment-panel">
+                    <div class="enrollment-panel-header">
+                        <i class="bi bi-mortarboard-fill"></i>
+                        Enrollment Details — <?= h($gradeLevel) ?>
+                    </div>
+                    <div class="enrollment-empty">
+                        No enrollment record on file for <?= h($gradeLevel) ?>.
+                    </div>
+                </div>
+            <?php endif; ?>
+
+            <!-- Term-by-term grades -->
+            <?php foreach (['1st Term', '2nd Term', '3rd Term'] as $termName):
+                $block     = $sf10[$gradeLevel][$termName];
+                $en        = $block['enrollment'];
+                $sy        = $block['school_year'];
+                $subjects  = $block['subjects'];
+                $hasGrades = !empty($subjects);
+            ?>
                 <div class="term-header">
                     <span><?= h($termName) ?></span>
                     <?php if ($sy): ?>
@@ -933,7 +1215,11 @@ audit_log($conn, 'sf10.print', ['type'=>'student','id'=>$student_id]);
     <?php if ($overall_gwa !== null): ?>
         <table class="overall-table">
             <tr>
-                <td style="width:80%">Overall General Weighted Average (Grade 11 – Grade 12)</td>
+                <td style="width:80%">
+                    <?= $onlyLevel !== null
+                        ? 'Overall General Weighted Average (' . h($onlyLevel) . ')'
+                        : 'Overall General Weighted Average (Grade 11 – Grade 12)' ?>
+                </td>
                 <td><?= number_format($overall_gwa, 2) ?></td>
             </tr>
         </table>

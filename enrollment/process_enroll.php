@@ -1,27 +1,67 @@
 <?php
+declare(strict_types=1);
+
+/**
+ * process_enroll.php — Finalize a public enrollment submission.
+ *
+ * FIXES:
+ *   - CSRF failure no longer rotates the token (retries stay valid).
+ *   - Every exception carries a [context:stage] tag for classification.
+ *   - parents_info INSERT no longer references the non-existent
+ *     `mother_name` column (schema only has `mother_maiden_name`).
+ *   - entrance_documents checkbox INSERT now uses 3 placeholders so
+ *     bind_params() receives a matching value count (was 2 placeholders
+ *     vs 3 values → ArgumentCountError).
+ *   - bind_params() guards against placeholder/value count mismatch
+ *     with a clear error before mysqli throws an opaque one.
+ *   - Success payload is stored as structured data (`success_data`)
+ *     instead of a pre-rendered HTML string.
+ */
+
 require_once __DIR__ . '/../config/bootstrap.php';
 require_once __DIR__ . '/../config/crypto.php';
+require_once __DIR__ . '/../config/security.php';
 require_once __DIR__ . '/../config/file_verify.php';
 require_once __DIR__ . '/../config/document_content_verify.php';
 
-// Check request method
+/* ── Method check ─────────────────────────────────────────────── */
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     $_SESSION['error'] = 'Invalid request method.';
     header('Location: enroll_form.php');
     exit();
 }
 
-// Verify CSRF token
-if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'] ?? '', $_POST['csrf_token'])) {
-    // Preserve the user's work so they don't lose their form data.
+/* ── Rate limit ───────────────────────────────────────────────── */
+$rl = rate_limit_session(
+    'process_enroll_' . ($_SERVER['REMOTE_ADDR'] ?? 'unknown'),
+    50,
+    60
+);
+if (!$rl['allowed']) {
+    security_log('process_enroll.ratelimited', ['ip' => $_SERVER['REMOTE_ADDR'] ?? '']);
+    $_SESSION['error'] = 'Too many submissions. Please wait a minute and try again.';
+    header('Location: enroll_form.php');
+    exit();
+}
+
+/* ── CSRF ─────────────────────────────────────────────────────── */
+if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'] ?? '', (string)$_POST['csrf_token'])) {
+    error_log(sprintf(
+        '[process_enroll] CSRF mismatch ip=%s posted_set=%s posted_len=%d session_set=%s session_len=%d',
+        $_SERVER['REMOTE_ADDR'] ?? '?',
+        isset($_POST['csrf_token']) ? 'y' : 'n',
+        strlen((string)($_POST['csrf_token'] ?? '')),
+        isset($_SESSION['csrf_token']) ? 'y' : 'n',
+        strlen((string)($_SESSION['csrf_token'] ?? ''))
+    ));
+
     if (!isset($_SESSION['form_data']) && !empty($_POST)) {
         $restore = $_POST;
-        unset($restore['csrf_token']);                 // don't cache the stale token
+        unset($restore['csrf_token']);
         $_SESSION['form_data'] = $restore;
     }
 
-    // Refresh the session token so the next attempt has a valid one.
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    security_log('process_enroll.csrf_fail', ['ip' => $_SERVER['REMOTE_ADDR'] ?? '']);
 
     $_SESSION['error'] = 'Your session expired. Please review and submit again.';
     header('Location: enroll_form.php?edit=1');
@@ -30,9 +70,20 @@ if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'] ?? '', 
 
 /**
  * Auto-detect types and bind params safely.
+ * Guards against placeholder/value count mismatch with a clear error.
  */
 function bind_params(mysqli_stmt $stmt, array $values): void
 {
+    $expected = mysqli_stmt_param_count($stmt);
+    $got      = count($values);
+    if ($expected !== $got) {
+        throw new InvalidArgumentException(sprintf(
+            'bind_params: statement expects %d placeholders, got %d values',
+            $expected,
+            $got
+        ));
+    }
+
     $types = '';
     foreach ($values as $v) {
         $types .= match (true) {
@@ -103,118 +154,94 @@ function classify_enrollment_error(string $msg, string $corr): array
 {
     $m = strtolower($msg);
 
-    // ---- Document / upload problems → step 5 ----
-    if (str_contains($m, 'file verification failed')) {
+    if (preg_match('/\[([a-z_]+):([a-z_]+)\]/i', $msg, $tag)) {
+        $table = strtolower($tag[1]);
+
+        if (str_contains($m, 'unknown column') || str_contains($m, "doesn't exist")) {
+            return [
+                'The enrollment form is temporarily unable to save your information.',
+                'This is a configuration issue on our side. Please contact the registrar and quote reference: ' . $corr,
+                5,
+            ];
+        }
+        if (str_contains($m, 'duplicate entry')) {
+            return [
+                'This record has already been submitted.',
+                'It looks like your enrollment was already saved. Please refresh the page or contact the registrar with reference: ' . $corr,
+                5,
+            ];
+        }
+        if ($table === 'file') {
+            return [
+                'One of your uploaded documents could not be saved.',
+                'Please re-upload the affected document and submit again. If it keeps failing, contact the registrar with reference: ' . $corr,
+                5,
+            ];
+        }
         return [
-            'One of your uploaded documents was rejected by the file checker.',
-            'Please make sure the file is a valid PDF, JPG, or PNG under the size limit, then re-upload it.',
+            'A system error occurred while saving your enrollment (' . $table . ').',
+            'Please try again in a moment. If it persists, contact the registrar with reference: ' . $corr,
             5,
         ];
+    }
+
+    if (str_contains($m, 'file verification failed')) {
+        return ['One of your uploaded documents was rejected by the file checker.',
+                'Please make sure the file is a valid PDF, JPG, or PNG under the size limit, then re-upload it.', 5];
     }
     if (str_contains($m, 'staged file missing')) {
-        return [
-            'One of your uploaded documents could not be found.',
-            'Please re-upload the affected document and submit again.',
-            5,
-        ];
+        return ['One of your uploaded documents could not be found.',
+                'Please re-upload the affected document and submit again.', 5];
     }
     if (str_contains($m, 'empty file')) {
-        return [
-            'One of your uploaded documents is empty or unreadable.',
-            'Please re-upload a valid copy of the document.',
-            5,
-        ];
+        return ['One of your uploaded documents is empty or unreadable.',
+                'Please re-upload a valid copy of the document.', 5];
     }
     if (str_contains($m, 'too many files')) {
-        return [
-            'You tried to upload too many documents.',
-            'Please keep the total number of uploads to 10 or fewer.',
-            5,
-        ];
+        return ['You tried to upload too many documents.',
+                'Please keep the total number of uploads to 10 or fewer.', 5];
     }
     if (str_contains($m, 'cannot write encrypted file') || str_contains($m, 'storage write failed')) {
-        return [
-            'The system could not save your uploaded documents.',
-            'Please try again in a moment. If it keeps failing, contact the registrar with reference: ' . $corr,
-            5,
-        ];
+        return ['The system could not save your uploaded documents.',
+                'Please try again in a moment. If it keeps failing, contact the registrar with reference: ' . $corr, 5];
     }
     if (str_contains($m, 'upload at least one')) {
-        return [
-            'You did not upload any entrance documents.',
-            'Please tick at least one document checkbox and upload the file for it.',
-            5,
-        ];
+        return ['You did not upload any entrance documents.',
+                'Please tick at least one document checkbox and upload the file for it.', 5];
     }
     if (str_contains($m, 'unsupported file type') || str_contains($m, 'not valid for')) {
-        return [
-            'One of your files is the wrong type for that document slot.',
-            'Photos accept only JPG/PNG. Certificates accept PDF, JPG, or PNG.',
-            5,
-        ];
+        return ['One of your files is the wrong type for that document slot.',
+                'Photos accept only JPG/PNG. Certificates accept PDF, JPG, or PNG.', 5];
     }
     if (str_contains($m, 'document verification failed') || str_contains($m, 'jhs')) {
-        return [
-            'Your JHS Certificate could not be verified.',
-            'Please re-upload a clearer copy of the Junior High School Certificate (Front).',
-            5,
-        ];
+        return ['Your JHS Certificate could not be verified.',
+                'Please re-upload a clearer copy of the Junior High School Certificate (Front).', 5];
     }
-
-    // ---- Personal info problems → step 1 ----
     if (str_contains($m, 'birth date')) {
-        return [
-            'Your birth date is missing or invalid.',
-            'Please return to Step 1 and enter a valid birth date.',
-            1,
-        ];
+        return ['Your birth date is missing or invalid.',
+                'Please return to Step 1 and enter a valid birth date.', 1];
     }
     if (str_contains($m, 'age must be')) {
-        return [
-            'Your age is outside the allowed range (14–25).',
-            'Check your birth date — the age field is calculated from it automatically.',
-            1,
-        ];
+        return ['Your age is outside the allowed range (14–25).',
+                'Check your birth date — the age field is calculated from it automatically.', 1];
     }
-
-    // ---- Student ID generation — system issue ----
     if (str_contains($m, 'student id') && str_contains($m, 'unique')) {
-        return [
-            'The system could not assign a unique Student ID.',
-            'Please try submitting again. If it keeps failing, contact the registrar with reference: ' . $corr,
-            1,
-        ];
+        return ['The system could not assign a unique Student ID.',
+                'Please try submitting again. If it keeps failing, contact the registrar with reference: ' . $corr, 1];
     }
-
-    // ---- SQL / DB layer — user cannot fix these ----
     if (str_contains($m, 'prepare failed') || str_contains($m, 'execute failed') || str_contains($m, 'column')) {
-        return [
-            'A system error occurred while saving your enrollment.',
-            'Please try submitting again in a moment. If the problem persists, contact the registrar with reference: ' . $corr,
-            1,
-        ];
+        return ['A system error occurred while saving your enrollment.',
+                'Please try submitting again in a moment. If the problem persists, contact the registrar with reference: ' . $corr, 1];
     }
 
-    // ---- Fallback ----
-    return [
-        'We could not complete your enrollment.',
-        'Please review your entries carefully and submit again. If it keeps failing, contact the registrar with reference: ' . $corr,
-        1,
-    ];
+    return ['We could not complete your enrollment.',
+            'Please review your entries carefully and submit again. If it keeps failing, contact the registrar with reference: ' . $corr, 5];
 }
 
 /* ══════════════════════════════════════════════════════════════════
    VERIFICATION MAPPING HELPERS
-   ─────────────────────────────────────────────────────────────────
-   Convert the in-session verification verdicts (produced by
-   document_content_verify.php and stored on the Review page) into the
-   exact shape that entrance_documents expects.
    ══════════════════════════════════════════════════════════════════ */
 
-/**
- * Route a document by its key to the appropriate verdict builder.
- * Returns null for documents that aren't content-verified.
- */
 function build_document_content_verdict(string $doc_key): ?array
 {
     if ($doc_key === 'jhs_certificate_front') {
@@ -226,15 +253,12 @@ function build_document_content_verdict(string $doc_key): ?array
     return null;
 }
 
-/**
- * JHS Certificate (Front) — OCR / pdftotext identity check.
- */
 function build_jhs_front_verdict(): ?array
 {
     $nv = $_SESSION['name_verify'] ?? null;
-    if (!is_array($nv) || empty($nv)) {
-        return null;
-    }
+    if (!is_array($nv) || empty($nv)) return null;
+
+    $name_parts = $nv['name']['parts'] ?? $nv['parts'] ?? [];
 
     $map = [
         'match'        => 'verified',
@@ -247,9 +271,9 @@ function build_jhs_front_verdict(): ?array
 
     $matched_payload = [
         'name_parts' => [
-            'first'  => $nv['parts']['first']  ?? null,
-            'middle' => $nv['parts']['middle'] ?? null,
-            'last'   => $nv['parts']['last']   ?? null,
+            'first'  => $name_parts['first']  ?? null,
+            'middle' => $name_parts['middle'] ?? null,
+            'last'   => $name_parts['last']   ?? null,
         ],
         'lrn' => [
             'expected' => $nv['lrn']['expected'] ?? null,
@@ -257,9 +281,9 @@ function build_jhs_front_verdict(): ?array
             'distance' => $nv['lrn']['distance'] ?? null,
         ],
         'ocr_rotation'   => (int)($nv['rotation'] ?? 0),
-        'ocr_psm'        => (int)($nv['psm']     ?? 6),
-        'ocr_score'      => (int)($nv['score']   ?? 0),
-        'detection_path' => $nv['source']        ?? null,
+        'ocr_psm'        => (int)($nv['psm']      ?? 6),
+        'ocr_score'      => (int)($nv['score']    ?? 0),
+        'detection_path' => $nv['source']         ?? null,
     ];
 
     $notes = [];
@@ -277,15 +301,10 @@ function build_jhs_front_verdict(): ?array
     ];
 }
 
-/**
- * 2×2 Picture — lightweight format check.
- */
 function build_photo_2x2_verdict(): ?array
 {
     $p2 = $_SESSION['photo_2x2_check'] ?? null;
-    if (!is_array($p2) || empty($p2)) {
-        return null;
-    }
+    if (!is_array($p2) || empty($p2)) return null;
 
     $map = [
         'match'        => 'verified',
@@ -309,13 +328,6 @@ function build_photo_2x2_verdict(): ?array
     ];
 }
 
-/**
- * Verify, encrypt, and store a staged file.
- *
- * The optional $precomputed_content parameter carries the verdict that
- * already ran on the Review page. When supplied, it replaces the internal
- * verify_document_content() call and is written verbatim to the DB.
- */
 function store_encrypted_file(
     string $staging_path,
     int $student_id,
@@ -323,28 +335,21 @@ function store_encrypted_file(
     ?array $precomputed_content = null
 ): array {
     if (!is_file($staging_path)) {
-        throw new Exception("Staged file missing.");
+        throw new Exception('[file:missing] Staged file missing.');
     }
 
     $verify = verify_document_file($staging_path, $doc_label);
-    if (!$verify['ok']) {
-        throw new Exception("File verification failed: " . ($verify['error'] ?? 'unknown'));
+    if (!is_array($verify) || empty($verify['ok'])) {
+        $reason = is_array($verify) ? ($verify['error'] ?? 'unknown') : 'checker returned non-array';
+        throw new Exception('[file:verify] File verification failed: ' . $reason);
     }
 
-    // ── Content check ──
     if ($precomputed_content !== null) {
         $content = $precomputed_content;
     } elseif (function_exists('verify_document_content')) {
         $content = verify_document_content($staging_path, $doc_label);
     } else {
-        error_log('store_encrypted_file: no precomputed content and no verify_document_content() — skipped.');
-        $content = [
-            'status'  => 'skipped',
-            'score'   => 0,
-            'engine'  => null,
-            'matched' => [],
-            'notes'   => ['No verification data available at save time.'],
-        ];
+        $content = ['status'=>'skipped','score'=>0,'engine'=>null,'matched'=>[],'notes'=>['No content verification available.']];
     }
 
     $content_status = $content['status'] ?? 'skipped';
@@ -364,7 +369,7 @@ function store_encrypted_file(
 
     $plain = file_get_contents($staging_path);
     if ($plain === false || $plain === '') {
-        throw new Exception("Empty file after verification.");
+        throw new Exception('[file:read] Empty file after verification.');
     }
 
     $blob = doc_encrypt($plain);
@@ -386,7 +391,7 @@ function store_encrypted_file(
     $abs_path = DOCUMENTS_DIR . $filename;
 
     if (file_put_contents($abs_path, $blob, LOCK_EX) === false) {
-        throw new Exception("Cannot write encrypted file.");
+        throw new Exception('[file:write] Cannot write encrypted file to ' . $abs_path);
     }
     @chmod($abs_path, 0600);
     @unlink($staging_path);
@@ -396,14 +401,17 @@ function store_encrypted_file(
         'mime'     => $verify['mime'],
         'size'     => strlen($plain),
         'hash'     => $verify['hash'],
-        'width'    => $verify['width'],
-        'height'   => $verify['height'],
+        'width'    => $verify['width']  ?? 0,
+        'height'   => $verify['height'] ?? 0,
         'notes'    => array_merge($verify['notes'] ?? [], $content['notes'] ?? []),
         'content'  => $content,
     ];
 }
 
-// Track files written to disk for cleanup on rollback
+/* ══════════════════════════════════════════════════════════════════
+   MAIN FLOW
+   ══════════════════════════════════════════════════════════════════ */
+
 $written_files = [];
 
 // ── Server-side age recompute ──
@@ -412,7 +420,7 @@ if (empty($_POST['birth_date'])) {
     header('Location: enroll_form.php');
     exit();
 }
-$birth = DateTime::createFromFormat('Y-m-d', $_POST['birth_date']);
+$birth = DateTime::createFromFormat('Y-m-d', (string)$_POST['birth_date']);
 if (!$birth) {
     $_SESSION['error'] = 'Invalid birth date.';
     header('Location: enroll_form.php');
@@ -453,6 +461,7 @@ if ($lock_res) {
     $lock_res->free();
 }
 if (!$got_lock) {
+    security_log('process_enroll.lock_timeout', ['ip' => $_SERVER['REMOTE_ADDR'] ?? '']);
     $_SESSION['error'] = 'System busy, please try again in a moment.';
     header('Location: enroll_form.php');
     exit();
@@ -461,34 +470,31 @@ if (!$got_lock) {
 $conn->begin_transaction();
 
 try {
-    // ============================================
-    // 1. INSERT INTO students_info
-    // ============================================
+    /* ── 1. students_info ── */
     $stmt = $conn->prepare("INSERT INTO students_info 
         (lrn, first_name, last_name, middle_name, nick_name, ext_name, sex, birth_date, age, 
          civil_status, nationality, religion, height, weight, email, phone, special_skills, photo) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    if (!$stmt) throw new Exception('[students_info:prepare] ' . $conn->error);
 
-    if (!$stmt) throw new Exception("Prepare failed for students_info: " . $conn->error);
-
-    $lrn = $_POST['lrn'] ?? '';
-    $first_name = $_POST['first_name'] ?? '';
-    $last_name = $_POST['last_name'] ?? '';
-    $middle_name = !empty($_POST['middle_name']) ? $_POST['middle_name'] : null;
-    $nick_name = !empty($_POST['nick_name']) ? $_POST['nick_name'] : null;
-    $ext_name = !empty($_POST['ext_name']) ? $_POST['ext_name'] : null;
-    $sex = $_POST['sex'] ?? '';
-    $birth_date = $_POST['birth_date'] ?? '';
-    $age = (int)($_POST['age'] ?? 0);
-    $civil_status = !empty($_POST['civil_status']) ? $_POST['civil_status'] : null;
-    $nationality = !empty($_POST['nationality']) ? $_POST['nationality'] : null;
-    $religion = !empty($_POST['religion']) ? $_POST['religion'] : null;
-    $height = !empty($_POST['height']) ? floatval($_POST['height']) : null;
-    $weight = !empty($_POST['weight']) ? floatval($_POST['weight']) : null;
-    $email = !empty($_POST['email']) ? $_POST['email'] : null;
-    $phone = !empty($_POST['phone']) ? $_POST['phone'] : null;
-    $special_skills = !empty($_POST['special_skills']) ? $_POST['special_skills'] : null;
-    $photo = null;
+    $lrn            = clean_string($_POST['lrn'] ?? '', 12);
+    $first_name     = clean_string($_POST['first_name'] ?? '', 100);
+    $last_name      = clean_string($_POST['last_name'] ?? '', 100);
+    $middle_name    = clean_string($_POST['middle_name'] ?? '', 100) ?: null;
+    $nick_name      = clean_string($_POST['nick_name'] ?? '', 50) ?: null;
+    $ext_name       = clean_string($_POST['ext_name'] ?? '', 20) ?: null;
+    $sex            = clean_string($_POST['sex'] ?? '', 10);
+    $birth_date     = clean_string($_POST['birth_date'] ?? '', 10);
+    $age            = (int)($_POST['age'] ?? 0);
+    $civil_status   = clean_string($_POST['civil_status'] ?? '', 30) ?: null;
+    $nationality    = clean_string($_POST['nationality'] ?? '', 50) ?: null;
+    $religion       = clean_string($_POST['religion'] ?? '', 100) ?: null;
+    $height         = ($_POST['height'] ?? '') !== '' ? (float)$_POST['height'] : null;
+    $weight         = ($_POST['weight'] ?? '') !== '' ? (float)$_POST['weight'] : null;
+    $email          = clean_string($_POST['email'] ?? '', 150) ?: null;
+    $phone          = clean_string($_POST['phone'] ?? '', 15) ?: null;
+    $special_skills = clean_string($_POST['special_skills'] ?? '', 500) ?: null;
+    $photo          = null;
 
     bind_params($stmt, [
         $lrn, $first_name, $last_name, $middle_name, $nick_name, $ext_name,
@@ -496,15 +502,13 @@ try {
         $height, $weight, $email, $phone, $special_skills, $photo,
     ]);
 
-    if (!$stmt->execute()) throw new Exception("Execute failed for students_info: " . $stmt->error);
+    if (!$stmt->execute()) throw new Exception('[students_info:execute] ' . $stmt->error);
 
     $student_info_id = $conn->insert_id;
     $stmt->close();
 
-    // ============================================
-    // 2. GENERATE STUDENT ID NUMBER
-    // ============================================
-    $school_year = $_POST['school_year'] ?? '';
+    /* ── 2. Student ID number ── */
+    $school_year = clean_string($_POST['school_year'] ?? '', 9);
     $sy_parts = explode('-', $school_year);
     $year_enrolled = (int)($sy_parts[0] ?? 0);
 
@@ -521,6 +525,7 @@ try {
         $student_id_number = "UCSCI-{$year_enrolled}-{$random6}";
 
         $check = $conn->prepare("SELECT 1 FROM students_info WHERE student_id_number = ? LIMIT 1");
+        if (!$check) throw new Exception('[student_id_number:prepare] ' . $conn->error);
         $check->bind_param("s", $student_id_number);
         $check->execute();
         $collision = $check->get_result()->num_rows > 0;
@@ -530,67 +535,61 @@ try {
     } while ($collision && $attempts < 10);
 
     if ($collision) {
-        throw new Exception("Could not generate a unique Student ID after 10 attempts.");
+        throw new Exception('[student_id_number:generate] Could not generate a unique Student ID after 10 attempts.');
     }
 
     $update_stmt = $conn->prepare("UPDATE students_info SET student_id_number = ? WHERE student_id = ?");
-    if (!$update_stmt) throw new Exception("Prepare failed for student_id_number update: " . $conn->error);
+    if (!$update_stmt) throw new Exception('[student_id_number:update_prepare] ' . $conn->error);
 
     bind_params($update_stmt, [$student_id_number, $student_info_id]);
 
     if (!$update_stmt->execute()) {
-        throw new Exception("Execute failed for student_id_number update: " . $update_stmt->error);
+        throw new Exception('[student_id_number:update_execute] ' . $update_stmt->error);
     }
     $update_stmt->close();
 
-    // ============================================
-    // 3. INSERT INTO addresses
-    // ============================================
+    /* ── 3. addresses ── */
     $stmt = $conn->prepare("INSERT INTO addresses 
         (student_id, purok_street, barangay, town_city, province, region, district, postal_code) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    if (!$stmt) throw new Exception('[addresses:prepare] ' . $conn->error);
 
-    if (!$stmt) throw new Exception("Prepare failed for addresses: " . $conn->error);
-
-    $purok_street = $_POST['purok_street'] ?? null;
-    $barangay = $_POST['barangay'] ?? null;
-    $town_city = $_POST['town_city'] ?? null;
-    $province = $_POST['province'] ?? null;
-    $region = $_POST['region'] ?? null;
-    $district = $_POST['district'] ?? null;
-    $postal_code = $_POST['postal_code'] ?? null;
+    $purok_street = clean_string($_POST['purok_street'] ?? '', 200) ?: null;
+    $barangay     = clean_string($_POST['barangay'] ?? '', 100)     ?: null;
+    $town_city    = clean_string($_POST['town_city'] ?? '', 100)    ?: null;
+    $province     = clean_string($_POST['province'] ?? '', 100)     ?: null;
+    $region       = clean_string($_POST['region'] ?? '', 100)       ?: null;
+    $district     = clean_string($_POST['district'] ?? '', 100)     ?: null;
+    $postal_code  = clean_string($_POST['postal_code'] ?? '', 10)   ?: null;
 
     bind_params($stmt, [
         $student_info_id, $purok_street, $barangay, $town_city,
         $province, $region, $district, $postal_code,
     ]);
 
-    if (!$stmt->execute()) throw new Exception("Execute failed for addresses: " . $stmt->error);
+    if (!$stmt->execute()) throw new Exception('[addresses:execute] ' . $stmt->error);
     $stmt->close();
 
-    // ============================================
-    // 4. INSERT INTO parents_info
-    // ============================================
+    /* ── 4. parents_info ── */
     $stmt = $conn->prepare("INSERT INTO parents_info 
-        (student_id, father_name, father_occupation, father_contact, mother_name,
+        (student_id, father_name, father_occupation, father_contact,
          mother_maiden_name, mother_occupation, mother_contact, ave_family_income, 
          is_4ps, guardian_fullname, guardian_relation, guardian_contact, household_id) 
-        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    if (!$stmt) throw new Exception('[parents_info:prepare] ' . $conn->error);
 
-    if (!$stmt) throw new Exception("Prepare failed for parents_info: " . $conn->error);
-
-    $father_name = $_POST['father_name'] ?? null;
-    $father_occupation = $_POST['father_occupation'] ?? null;
-    $father_contact = $_POST['father_contact'] ?? null;
-    $mother_maiden_name = $_POST['mother_maiden_name'] ?? null;
-    $mother_occupation = $_POST['mother_occupation'] ?? null;
-    $mother_contact = $_POST['mother_contact'] ?? null;
-    $ave_family_income = !empty($_POST['ave_family_income']) ? floatval($_POST['ave_family_income']) : null;
-    $is_4ps = isset($_POST['is_4ps']) ? intval($_POST['is_4ps']) : 0;
-    $guardian_fullname = $_POST['guardian_fullname'] ?? null;
-    $guardian_relation = $_POST['guardian_relation'] ?? null;
-    $guardian_contact = $_POST['guardian_contact'] ?? null;
-    $parent_household_id = $_POST['household_id'] ?? null;
+    $father_name         = clean_string($_POST['father_name'] ?? '', 150)         ?: null;
+    $father_occupation   = clean_string($_POST['father_occupation'] ?? '', 100)   ?: null;
+    $father_contact      = clean_string($_POST['father_contact'] ?? '', 15)       ?: null;
+    $mother_maiden_name  = clean_string($_POST['mother_maiden_name'] ?? '', 150)  ?: null;
+    $mother_occupation   = clean_string($_POST['mother_occupation'] ?? '', 100)   ?: null;
+    $mother_contact      = clean_string($_POST['mother_contact'] ?? '', 15)       ?: null;
+    $ave_family_income   = ($_POST['ave_family_income'] ?? '') !== '' ? (float)$_POST['ave_family_income'] : null;
+    $is_4ps              = isset($_POST['is_4ps']) ? (int)$_POST['is_4ps'] : 0;
+    $guardian_fullname   = clean_string($_POST['guardian_fullname'] ?? '', 150)   ?: null;
+    $guardian_relation   = clean_string($_POST['guardian_relation'] ?? '', 60)    ?: null;
+    $guardian_contact    = clean_string($_POST['guardian_contact'] ?? '', 15)     ?: null;
+    $parent_household_id = clean_string($_POST['household_id'] ?? '', 50)         ?: null;
 
     bind_params($stmt, [
         $student_info_id, $father_name, $father_occupation, $father_contact,
@@ -599,102 +598,87 @@ try {
         $guardian_contact, $parent_household_id,
     ]);
 
-    if (!$stmt->execute()) throw new Exception("Execute failed for parents_info: " . $stmt->error);
+    if (!$stmt->execute()) throw new Exception('[parents_info:execute] ' . $stmt->error);
     $stmt->close();
 
-    // ============================================
-    // 5. INSERT INTO educational_history
-    // ============================================
+    /* ── 5. educational_history ── */
     if (isset($_POST['edu_level']) && is_array($_POST['edu_level']) && count($_POST['edu_level']) > 0) {
         $stmt = $conn->prepare("INSERT INTO educational_history 
             (student_id, level, school_name, school_address, year_completed) 
             VALUES (?, ?, ?, ?, ?)");
-
-        if (!$stmt) throw new Exception("Prepare failed for educational_history: " . $conn->error);
+        if (!$stmt) throw new Exception('[educational_history:prepare] ' . $conn->error);
 
         foreach ($_POST['edu_level'] as $i => $level) {
-            if (empty($level)) continue;
+            $level = clean_string((string)$level, 60);
+            if ($level === '') continue;
 
-            $school_name = $_POST['school_name'][$i] ?? null;
-            $school_address = $_POST['school_address'][$i] ?? null;
-            $year_completed = $_POST['year_completed'][$i] ?? null;
+            $school_name    = clean_string($_POST['school_name'][$i]    ?? '', 200);
+            $school_address = clean_string($_POST['school_address'][$i] ?? '', 300);
+            $year_completed = clean_string($_POST['year_completed'][$i] ?? '', 20);
 
             bind_params($stmt, [
                 $student_info_id, $level, $school_name, $school_address, $year_completed,
             ]);
 
-            if (!$stmt->execute()) throw new Exception("Execute failed for educational_history entry $i: " . $stmt->error);
+            if (!$stmt->execute()) {
+                throw new Exception('[educational_history:execute] entry ' . $i . ': ' . $stmt->error);
+            }
         }
         $stmt->close();
     }
 
-    // ============================================
-    // 6. INSERT INTO enrollment_form (status = Pending)
-    // ============================================
+    /* ── 6. enrollment_form ── */
     $stmt = $conn->prepare("INSERT INTO enrollment_form 
         (student_id, school_year, grade_level, term, track, strand, program, section,
          household_id, is_transferred, previous_school_name, previous_school_address, 
          previous_track, previous_strand, previous_program, previous_year_completed, 
          voucher_status, cct_4ps, status) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')");
+    if (!$stmt) throw new Exception('[enrollment_form:prepare] ' . $conn->error);
 
-    if (!$stmt) throw new Exception("Prepare failed for enrollment_form: " . $conn->error);
-
-    $grade_level = $_POST['grade_level'] ?? '';
-    $term = $_POST['term'] ?? '';
-    $track = $_POST['track'] ?? 'TECHPRO ELECTIVES';
-    $strand = trim((string)($_POST['strand'] ?? ''));
-    if ($strand === '') $strand = trim((string)($_POST['program'] ?? ''));
+    $grade_level = clean_string($_POST['grade_level'] ?? '', 20);
+    $term        = clean_string($_POST['term'] ?? '', 20);
+    $track       = clean_string($_POST['track'] ?? 'TECHPRO ELECTIVES', 60);
+    $strand      = clean_string($_POST['strand'] ?? '', 150);
+    if ($strand === '') $strand = clean_string($_POST['program'] ?? '', 150);
     if ($strand === '') $strand = 'General';
-    $program = $_POST['program'] ?? '';
+    $program     = clean_string($_POST['program'] ?? '', 150);
 
     if (!empty($_POST['section'])) {
-        $section = trim($_POST['section']);
+        $section = clean_string($_POST['section'], 50);
     } else {
         $section = assignProvisionalSection($conn, $strand, $grade_level, $school_year, 35);
     }
 
-    $household_id = $_POST['household_id'] ?? null;
-    $is_transferred = isset($_POST['is_transferred']) ? 1 : 0;
-    $previous_school_name = $_POST['previous_school_name'] ?? null;
-    $previous_school_address = $_POST['previous_school_address'] ?? null;
-    $previous_track = $_POST['previous_track'] ?? null;
-    $previous_strand = $_POST['previous_strand'] ?? null;
-    $previous_program = $_POST['previous_program'] ?? null;
-    $previous_year_completed = !empty($_POST['previous_year_completed']) ? intval($_POST['previous_year_completed']) : null;
+    $household_id            = clean_string($_POST['household_id'] ?? '', 50)            ?: null;
+    $is_transferred          = isset($_POST['is_transferred']) ? 1 : 0;
+    $previous_school_name    = clean_string($_POST['previous_school_name'] ?? '', 200)    ?: null;
+    $previous_school_address = clean_string($_POST['previous_school_address'] ?? '', 300) ?: null;
+    $previous_track          = clean_string($_POST['previous_track'] ?? '', 60)           ?: null;
+    $previous_strand         = clean_string($_POST['previous_strand'] ?? '', 150)         ?: null;
+    $previous_program        = clean_string($_POST['previous_program'] ?? '', 150)        ?: null;
+    $previous_year_completed = !empty($_POST['previous_year_completed']) ? (int)$_POST['previous_year_completed'] : null;
     $voucher_status = null;
     if (isset($_POST['voucher_qualified'])) {
         $voucher_status = ($_POST['voucher_qualified'] == '1') ? 'Qualified' : 'Not Qualified';
     }
-    $cct_4ps = isset($_POST['is_4ps']) ? intval($_POST['is_4ps']) : 0;
+    $cct_4ps = isset($_POST['is_4ps']) ? (int)$_POST['is_4ps'] : 0;
 
     bind_params($stmt, [
-        $student_info_id,
-        $school_year,
-        $grade_level,
-        $term,
-        $track,
-        $strand,
-        $program,
-        $section,
-        $household_id,
-        $is_transferred,
-        $previous_school_name,
-        $previous_school_address,
-        $previous_track,
-        $previous_strand,
-        $previous_program,
-        $previous_year_completed,
-        $voucher_status,
-        $cct_4ps,
+        $student_info_id, $school_year, $grade_level, $term, $track, $strand, $program, $section,
+        $household_id, $is_transferred, $previous_school_name, $previous_school_address,
+        $previous_track, $previous_strand, $previous_program, $previous_year_completed,
+        $voucher_status, $cct_4ps,
     ]);
 
-    if (!$stmt->execute()) throw new Exception("Execute failed for enrollment_form: " . $stmt->error);
+    if (!$stmt->execute()) throw new Exception('[enrollment_form:execute] ' . $stmt->error);
     $stmt->close();
 
-    // ============================================
-    // 7. INSERT entrance document checkboxes (no file)
-    // ============================================
+    /* ── 7. entrance_documents — checkboxes without files ──
+       FIX: SQL now uses 3 placeholders so bind_params() gets a matching
+       value count. Previously the literal `0` in the SQL made mysqli
+       expect 2 placeholders while the call passed 3 values.
+    */
     $uploaded_labels = [];
     if (!empty($_SESSION['uploaded_files']) && is_array($_SESSION['uploaded_files'])) {
         foreach ($_SESSION['uploaded_files'] as $f) {
@@ -706,28 +690,27 @@ try {
     if (!empty($_POST['entrance_data']) && is_array($_POST['entrance_data'])) {
         $doc_stmt = $conn->prepare("INSERT INTO entrance_documents 
             (student_id, document_name, submitted) 
-            VALUES (?, ?, 0)");
+            VALUES (?, ?, ?)");
 
         if ($doc_stmt) {
             foreach ($_POST['entrance_data'] as $document) {
-                $document = trim((string)$document);
+                $document = clean_string((string)$document, 150);
                 if ($document === '') continue;
                 if (isset($uploaded_labels[$document])) continue;
 
-                bind_params($doc_stmt, [$student_info_id, $document, 0]);
+                $submitted = 0;
+                bind_params($doc_stmt, [$student_info_id, $document, $submitted]);
                 $doc_stmt->execute();
             }
             $doc_stmt->close();
         }
     }
 
-    // ============================================
-    // 8. SAVE STAGED FILES — ENCRYPTED AT REST
-    // ============================================
+    /* ── 8. entrance_documents — encrypted files ── */
     if (!empty($_SESSION['uploaded_files']) && is_array($_SESSION['uploaded_files'])) {
 
         if (count($_SESSION['uploaded_files']) > 10) {
-            throw new Exception("Too many files uploaded (max 10).");
+            throw new Exception('[files:count] Too many files uploaded (max 10).');
         }
 
         $uploaded_by = $_SESSION['admin_id'] ?? $_SESSION['user_id'] ?? null;
@@ -752,7 +735,7 @@ try {
                         ?, ?, ?, ?, ?, NOW())");
         }
 
-        if (!$file_stmt) throw new Exception("Prepare failed for file insert: " . $conn->error);
+        if (!$file_stmt) throw new Exception('[entrance_documents:prepare] ' . $conn->error);
 
         foreach ($_SESSION['uploaded_files'] as $doc_key => $info) {
             $label   = $info['label'] ?? $doc_key;
@@ -761,8 +744,6 @@ try {
 
             if ($staging === '' || !is_file($staging)) continue;
 
-            // ★ NEW: Pull the pre-computed verdict for this specific document.
-            // Returns null for docs that weren't content-verified.
             $precomputed = build_document_content_verdict($doc_key);
 
             $stored = store_encrypted_file($staging, $student_info_id, $label, $precomputed);
@@ -800,17 +781,17 @@ try {
             }
 
             if (!$file_stmt->execute()) {
-                throw new Exception("Execute failed for file insert: " . $file_stmt->error);
+                throw new Exception('[entrance_documents:execute] ' . $file_stmt->error);
             }
         }
         $file_stmt->close();
     }
 
-    // ============================================
-    // COMMIT
-    // ============================================
+    /* ── COMMIT ── */
     $conn->commit();
     $conn->query("SELECT RELEASE_LOCK('enroll_global')");
+
+    unset($_SESSION['__pending_count'], $_SESSION['__pending_count_at']);
 
     if (!empty($_SESSION['admin_id'])) {
         require_once __DIR__ . '/../config/audit.php';
@@ -824,20 +805,29 @@ try {
         ]);
     }
 
-    unset($_SESSION['csrf_token']);
-    unset($_SESSION['form_data'], $_SESSION['uploaded_files'], $_SESSION['enroll_error']);
-    unset($_SESSION['name_verify'], $_SESSION['photo_2x2_check']);
+    unset(
+        $_SESSION['csrf_token'],
+        $_SESSION['form_data'],
+        $_SESSION['uploaded_files'],
+        $_SESSION['enroll_error'],
+        $_SESSION['name_verify'],
+        $_SESSION['photo_2x2_check'],
+        $_SESSION['success_message']
+    );
 
+    // ── SUCCESS PAYLOAD ──
+    // Structured data (not pre-rendered HTML) so enroll_form.php can
+    // build the enhanced "Expected — Pending Review" confirmation popup.
     $_SESSION['success'] = true;
-    $_SESSION['success_message'] = "Your enrollment has been <strong>submitted for review</strong>.<br><br>
-        <strong>Student ID:</strong> " . htmlspecialchars($student_id_number) . "<br>
-        <strong>LRN:</strong> " . htmlspecialchars($lrn) . "<br>
-        <strong>Name:</strong> " . htmlspecialchars($first_name . ' ' . $last_name) . "<br>
-        <strong>School Year:</strong> " . htmlspecialchars($school_year) . "<br>
-        <strong>Grade Level:</strong> " . htmlspecialchars($grade_level) . "<br>
-        <strong>Strand:</strong> " . htmlspecialchars($strand) . "<br><br>
-        <em>The registrar will review your documents. You'll receive a confirmation email at 
-        <strong>" . htmlspecialchars($email ?: 'your registered email') . "</strong> once approved.</em>";
+    $_SESSION['success_data'] = [
+        'student_id_number' => $student_id_number,
+        'lrn'               => $lrn,
+        'full_name'         => trim($first_name . ' ' . $last_name),
+        'school_year'       => $school_year,
+        'grade_level'       => $grade_level,
+        'strand'            => $strand,
+        'email'             => $email ?: null,
+    ];
 
     header('Location: enroll_form.php');
     exit();
@@ -846,7 +836,6 @@ try {
     $conn->rollback();
     $conn->query("SELECT RELEASE_LOCK('enroll_global')");
 
-    // Clean up any encrypted files that were written before the failure
     foreach ($written_files as $abs) {
         if (file_exists($abs)) @unlink($abs);
     }
@@ -857,21 +846,31 @@ try {
     error_log("Enrollment Error [{$corr}]: " . $raw_msg);
     error_log("Error Trace [{$corr}]: " . $e->getTraceAsString());
 
-    @file_put_contents(
-        __DIR__ . '/../enroll_debug.log',
-        date('c') . " [{$corr}]\n"
-        . "MESSAGE: " . $raw_msg . "\n"
-        . "FILE:    " . $e->getFile() . ":" . $e->getLine() . "\n"
-        . "TRACE:\n" . $e->getTraceAsString() . "\n\n",
-        FILE_APPEND
-    );
+    $log_dir = dirname(__DIR__, 2) . '/logs';
+    if (!is_dir($log_dir)) {
+        @mkdir($log_dir, 0700, true);
+    }
+    if (is_dir($log_dir) && is_writable($log_dir)) {
+        @file_put_contents(
+            $log_dir . '/enroll_debug.log',
+            date('c') . " [{$corr}]\n"
+            . "MESSAGE: " . $raw_msg . "\n"
+            . "FILE:    " . $e->getFile() . ":" . $e->getLine() . "\n"
+            . "TRACE:\n" . $e->getTraceAsString() . "\n\n",
+            FILE_APPEND
+        );
+    }
 
-    // ---- Preserve the student's form data so they don't lose their work ----
+    security_log('process_enroll.failed', [
+        'ref'   => $corr,
+        'error' => $raw_msg,
+        'ip'    => $_SERVER['REMOTE_ADDR'] ?? '',
+    ]);
+
     if (!isset($_SESSION['form_data']) && !empty($_POST)) {
         $_SESSION['form_data'] = $_POST;
     }
 
-    // ---- Preserve staged files that still exist on disk ----
     if (!empty($_SESSION['uploaded_files']) && is_array($_SESSION['uploaded_files'])) {
         $survivors = [];
         foreach ($_SESSION['uploaded_files'] as $k => $f) {
@@ -883,7 +882,6 @@ try {
         $_SESSION['uploaded_files'] = $survivors;
     }
 
-    // ---- Classify the error into a user-readable message + step to return to ----
     [$user_msg, $user_action, $error_step] = classify_enrollment_error($raw_msg, $corr);
 
     $_SESSION['enroll_error'] = [

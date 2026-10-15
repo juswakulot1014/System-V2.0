@@ -3,41 +3,63 @@ require_once __DIR__ . '/../config/auth.php';
 
 $current_page = basename($_SERVER['PHP_SELF']);
 
-// ====================== FETCH DASHBOARD DATA ======================
-// NOTE: Graduated and Pending enrollments are excluded from every dashboard query.
-// Graduated students only appear in reports.php; Pending enrollments are reviewed
-// in pending_enrollments.php.
+// ────────────────────────────────────────────────
+// Cached pending-enrollment counter (30 s session cache)
+// Shared with student_profile.php — guarded by function_exists().
+// ────────────────────────────────────────────────
+if (!function_exists('get_pending_count')) {
+    function get_pending_count(mysqli $conn): int
+    {
+        if (isset($_SESSION['__pending_count'], $_SESSION['__pending_count_at'])
+            && (time() - (int)$_SESSION['__pending_count_at']) < 30) {
+            return (int)$_SESSION['__pending_count'];
+        }
+        $stmt = $conn->prepare("SELECT COUNT(*) AS c FROM enrollment_form WHERE status = ?");
+        $pending = 'Pending';
+        $stmt->bind_param('s', $pending);
+        $stmt->execute();
+        $n = (int)($stmt->get_result()->fetch_assoc()['c'] ?? 0);
+        $stmt->close();
+        $_SESSION['__pending_count']    = $n;
+        $_SESSION['__pending_count_at'] = time();
+        return $n;
+    }
+}
 
-// Total students — exclude anyone with a Graduated or Pending enrollment
-$total_students = $conn->query("
+// ====================== FETCH DASHBOARD DATA ======================
+// NOTE: Graduated, Promoted and Pending students are excluded from every dashboard query.
+// They only appear in pending_enrollments.php (Pending), promote.php / graduates.php,
+// and reports.php.
+
+// Total students — exclude anyone whose enrollment is Graduated, Promoted or Pending
+$total_students = (int)($conn->query("
     SELECT COUNT(*) as cnt FROM students_info s
     WHERE NOT EXISTS (
         SELECT 1 FROM enrollment_form e
-        WHERE e.student_id = s.student_id
-          AND e.status IN ('Graduated', 'Pending')
+        WHERE e.student_id = s.student_id AND e.status IN ('Graduated', 'Pending', 'Promoted')
     )
-")->fetch_assoc()['cnt'] ?? 0;
+")->fetch_assoc()['cnt'] ?? 0);
 
-// Total enrollments (distinct students who are not graduated or pending)
-$total_enrolled = $conn->query("
+// Total enrollments (distinct students who are not graduated/promoted/pending)
+$total_enrolled = (int)($conn->query("
     SELECT COUNT(DISTINCT student_id) as cnt FROM enrollment_form
-    WHERE status IS NULL OR status NOT IN ('Graduated', 'Pending')
-")->fetch_assoc()['cnt'] ?? 0;
+    WHERE COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')
+")->fetch_assoc()['cnt'] ?? 0);
 
-// Active enrollment (already filters to Active or NULL, so Pending is never included)
-$active_enrollment = $conn->query("
+// Active enrollment
+$active_enrollment = (int)($conn->query("
     SELECT COUNT(*) as cnt FROM enrollment_form
-    WHERE status='Active' OR status IS NULL
-")->fetch_assoc()['cnt'] ?? 0;
+    WHERE status = 'Active' OR status IS NULL
+")->fetch_assoc()['cnt'] ?? 0);
 
-// Sections — exclude graduated and pending
-$total_sections = $conn->query("
+// Sections — exclude graduated, promoted and pending
+$total_sections = (int)($conn->query("
     SELECT COUNT(DISTINCT section) as cnt FROM enrollment_form
     WHERE section IS NOT NULL AND section != ''
-      AND (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
-")->fetch_assoc()['cnt'] ?? 0;
+      AND COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')
+")->fetch_assoc()['cnt'] ?? 0);
 
-// Gender stats — exclude graduated and pending
+// Gender stats — exclude graduated, promoted and pending
 $gender = $conn->query("
     SELECT
         SUM(CASE WHEN s.sex='Male' THEN 1 ELSE 0 END) as boys,
@@ -45,28 +67,27 @@ $gender = $conn->query("
     FROM students_info s
     WHERE NOT EXISTS (
         SELECT 1 FROM enrollment_form e
-        WHERE e.student_id = s.student_id
-          AND e.status IN ('Graduated', 'Pending')
+        WHERE e.student_id = s.student_id AND e.status IN ('Graduated', 'Pending', 'Promoted')
     )
 ")->fetch_assoc();
 $boys  = (int)($gender['boys']  ?? 0);
 $girls = (int)($gender['girls'] ?? 0);
 
-// Recent enrollments — exclude graduated and pending
+// Recent enrollments — exclude graduated, promoted and pending
 $recent = $conn->query("
     SELECT s.student_id, s.first_name, s.last_name, s.lrn, s.student_id_number,
            e.grade_level, e.strand, e.section, e.enrolled_at
     FROM students_info s
     JOIN enrollment_form e ON s.student_id = e.student_id
-    WHERE (e.status IS NULL OR e.status NOT IN ('Graduated', 'Pending'))
+    WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')
     ORDER BY e.enrolled_at DESC
     LIMIT 8
 ");
 
-// Grade level distribution — exclude graduated and pending
+// Grade level distribution — exclude graduated, promoted and pending
 $grade_dist = $conn->query("
     SELECT grade_level, COUNT(*) as cnt FROM enrollment_form
-    WHERE (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
+    WHERE COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')
     GROUP BY grade_level
     ORDER BY grade_level
 ");
@@ -76,11 +97,11 @@ while($g = $grade_dist->fetch_assoc()) {
     $grade_data[]   = (int)$g['cnt'];
 }
 
-// Strand distribution — exclude graduated and pending
+// Strand distribution — exclude graduated, promoted and pending
 $strand_dist = $conn->query("
     SELECT COALESCE(strand,'Unassigned') as strand, COUNT(*) as cnt
     FROM enrollment_form
-    WHERE (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
+    WHERE COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')
     GROUP BY strand
     ORDER BY cnt DESC
 ");
@@ -94,36 +115,42 @@ while($s = $strand_dist->fetch_assoc()) {
     $ci++;
 }
 
-// Unassigned students — exclude graduated and pending
-$unassigned = $conn->query("
+// Unassigned students — exclude graduated, promoted and pending
+$unassigned = (int)($conn->query("
     SELECT COUNT(*) as cnt FROM enrollment_form
     WHERE (section IS NULL OR section = '')
-      AND (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
-")->fetch_assoc()['cnt'] ?? 0;
+      AND COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')
+")->fetch_assoc()['cnt'] ?? 0);
 
-// Recently added (this week) — exclude graduated and pending
+// Recently added (this week) — exclude graduated, promoted and pending
+// FIXED: $week_start is now bound as a parameter instead of interpolated.
 $week_start = date('Y-m-d', strtotime('monday this week'));
-$new_this_week = $conn->query("
-    SELECT COUNT(*) as cnt FROM students_info s
-    WHERE s.created_at >= '$week_start'
+$new_this_week_stmt = $conn->prepare("
+    SELECT COUNT(*) AS cnt
+    FROM students_info s
+    WHERE s.created_at >= ?
       AND NOT EXISTS (
           SELECT 1 FROM enrollment_form e
           WHERE e.student_id = s.student_id
-            AND e.status IN ('Graduated', 'Pending')
+            AND e.status IN ('Graduated', 'Pending', 'Promoted')
       )
-")->fetch_assoc()['cnt'] ?? 0;
+");
+$new_this_week_stmt->bind_param('s', $week_start);
+$new_this_week_stmt->execute();
+$new_this_week = (int)($new_this_week_stmt->get_result()->fetch_assoc()['cnt'] ?? 0);
+$new_this_week_stmt->close();
 
 // ====================== FILTERS ======================
-$search       = trim($_GET['search'] ?? '');
-$grade_filter = trim($_GET['grade_level'] ?? '');
-$sy_filter    = trim($_GET['school_year'] ?? '');
+$search       = trim((string)($_GET['search'] ?? ''));
+$grade_filter = trim((string)($_GET['grade_level'] ?? ''));
+$sy_filter    = trim((string)($_GET['school_year'] ?? ''));
 
 $where  = [];
 $params = [];
 $types  = "";
 
-// Always exclude graduated and pending enrollments from the directory
-$where[] = "(e.status IS NULL OR e.status NOT IN ('Graduated', 'Pending'))";
+// Always exclude graduated, promoted AND pending students from the directory
+$where[] = "COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
 
 if ($search !== '') {
     $where[] = "(s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)";
@@ -145,23 +172,22 @@ $students = $stmt->get_result();
 $filtered_count = $students->num_rows;
 $stmt->close();
 
-// Dropdowns — exclude graduated and pending options
+// Dropdowns — exclude graduated, promoted and pending
 $grade_levels = $conn->query("
     SELECT DISTINCT grade_level FROM enrollment_form
     WHERE grade_level IS NOT NULL
-      AND (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
+      AND COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')
     ORDER BY grade_level ASC
 ");
 $school_years = $conn->query("
     SELECT DISTINCT school_year FROM enrollment_form
     WHERE school_year IS NOT NULL
-      AND (status IS NULL OR status NOT IN ('Graduated', 'Pending'))
+      AND COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')
     ORDER BY school_year DESC
 ");
 
 $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 'dark' : 'light';
 ?>
-
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="<?= $theme ?>">
 <head>
@@ -169,25 +195,15 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard • USAT Admin</title>
 
-    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700;14..32,800&display=swap" rel="stylesheet">
-
-    <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-
-    <!-- Bootstrap Icons — served from cdnjs because CSP font-src allows it -->
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
-
-    <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
 
     <style>
-        /* ============================================================
-           Design tokens
-           ============================================================ */
         :root {
             --bg: #f4f6fb;
             --surface: #ffffff;
@@ -253,9 +269,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             -webkit-font-smoothing:antialiased;
         }
 
-        /* ============================================================
-           Sidebar
-           ============================================================ */
         .sidebar{
             position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);
             background:var(--surface);border-right:1px solid var(--border);
@@ -295,9 +308,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 
         .sidebar-footer{padding:.75rem;border-top:1px solid var(--border)}
 
-        /* ============================================================
-           Main content
-           ============================================================ */
         .main-content{
             margin-left:var(--sidebar-w);
             padding:1.5rem clamp(1rem,2.5vw,2rem) 2rem;
@@ -319,9 +329,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .menu-toggle:hover{background:var(--surface-2)}
 
-        /* ============================================================
-           Stat cards
-           ============================================================ */
         .stat-grid{
             display:grid;
             grid-template-columns:repeat(3, minmax(0, 1fr));
@@ -371,9 +378,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
             font-size:.72rem;color:var(--text-3);margin-top:.35rem;font-weight:500;
         }
 
-        /* ============================================================
-           Cards
-           ============================================================ */
         .card{
             background:var(--surface);border-radius:var(--radius-lg);
             border:1px solid var(--border);box-shadow:var(--shadow-sm);
@@ -393,15 +397,9 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .card-body{padding:1.25rem}
         .card-body.no-padding{padding:0}
 
-        /* ============================================================
-           Charts
-           ============================================================ */
         .chart-wrap{position:relative;height:260px}
         .chart-wrap canvas{max-height:100%}
 
-        /* ============================================================
-           Filter bar
-           ============================================================ */
         .filter-bar{
             display:grid;
             grid-template-columns:minmax(220px,1.4fr) minmax(150px,1fr) minmax(150px,1fr) auto;
@@ -426,9 +424,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .filter-bar .actions{display:flex;gap:.5rem;flex-wrap:nowrap}
 
-        /* ============================================================
-           Table
-           ============================================================ */
         .table-scroll{
             overflow:auto;
             max-height:600px;
@@ -456,9 +451,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .cell-accent{color:var(--accent);font-weight:600}
         .cell-num{color:var(--text-3);font-size:.78rem;font-variant-numeric:tabular-nums}
 
-        /* ============================================================
-           Status pills / badges
-           ============================================================ */
         .pill{
             display:inline-flex;align-items:center;gap:.4rem;
             padding:.25rem .65rem;border-radius:999px;
@@ -474,9 +466,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .pill.danger {background:var(--red-soft);  color:var(--red)}
         .pill.muted  {background:var(--surface-2); color:var(--text-2)}
 
-        /* ============================================================
-           Buttons
-           ============================================================ */
         .btn{font-weight:500;border-radius:9px;font-size:.82rem;transition:all .15s}
         .btn-primary{background:var(--accent);border-color:var(--accent)}
         .btn-primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
@@ -498,9 +487,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         }
         .theme-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
 
-        /* ============================================================
-           Empty state
-           ============================================================ */
         .empty{
             padding:3rem 1.5rem;text-align:center;color:var(--text-2);
         }
@@ -513,9 +499,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .empty .empty-title{font-weight:600;color:var(--text);margin-bottom:.25rem}
         .empty .empty-sub{font-size:.85rem;color:var(--text-2)}
 
-        /* ============================================================
-           Alerts
-           ============================================================ */
         .flash{
             display:flex;align-items:center;gap:.65rem;
             padding:.75rem 1rem;border-radius:var(--radius);
@@ -526,9 +509,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         .flash.error  {background:var(--red-soft);  color:var(--red);  border-color:color-mix(in srgb, var(--red) 25%, transparent)}
         .flash .btn-close{margin-left:auto;opacity:.6}
 
-        /* ============================================================
-           Responsive
-           ============================================================ */
         @media (min-width:1440px){
             .stat-grid{grid-template-columns:repeat(6, minmax(0, 1fr))}
         }
@@ -556,14 +536,22 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 <body>
 
 <?php
-    $__current = basename($_SERVER['PHP_SELF']);
-    $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
-    // Student sub-pages all highlight "Students"
-    $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
-    $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
-    $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
+/* ── Sidebar include: shared across all admin pages ── */
+$__current = basename($_SERVER['PHP_SELF']);
+$__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
+
+// Sub-pages that should keep "Students" highlighted
+$__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
+// Graduate and promote pages share the same highlight group
+$__promote_pages = ['promote.php','graduates.php'];
+
+$__act = $__current;
+if (in_array($__current, $__student_pages, true)) $__act = 'student_profile.php';
+
+$__a = fn($f) => $f === $__act ? ' class="active"' : '';
+
+$__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
 ?>
-<!-- ================= Sidebar ================= -->
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
         <img src="../assets/img/usat.jpg" alt="USAT" onerror="this.style.background='var(--accent)'">
@@ -576,18 +564,16 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         <div class="nav-label">Overview</div>
         <a href="dashboard.php"<?= $__a('dashboard.php') ?>><i class="bi bi-speedometer2"></i> Dashboard</a>
         <a href="student_profile.php"<?= $__a('student_profile.php') ?>><i class="bi bi-people-fill"></i> Students</a>
-        <?php
-    // Pending badge intentionally counts Pending records (this is the review queue)
-    $__pending_count = (int)($conn->query("SELECT COUNT(*) c FROM enrollment_form WHERE status='Pending'")->fetch_assoc()['c'] ?? 0);
-?>
-<a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
-    <i class="bi bi-hourglass-split"></i> Pending
-    <?php if ($__pending_count > 0): ?>
-        <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
-            <?= $__pending_count ?>
-        </span>
-    <?php endif; ?>
-</a>
+        <a href="pending_enrollments.php"<?= $__a('pending_enrollments.php') ?>>
+            <i class="bi bi-hourglass-split"></i> Pending
+            <?php if ($__pending_count > 0): ?>
+                <span style="margin-left:auto;background:#d97706;color:#fff;font-size:.68rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;line-height:1">
+                    <?= $__pending_count ?>
+                </span>
+            <?php endif; ?>
+        </a>
+        <a href="promote.php"<?= $__a('promote.php') ?>><i class="bi bi-rocket-takeoff"></i> Promote</a>
+        <a href="graduates.php"<?= $__a('graduates.php') ?>><i class="bi bi-mortarboard-fill"></i> Graduates</a>
         <a href="reports.php"<?= $__a('reports.php') ?>><i class="bi bi-file-earmark-bar-graph"></i> Reports</a>
 
         <?php if ($__super): ?>
@@ -607,7 +593,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 </aside>
 <div class="main-content" id="mainContent">
 
-    <!-- ================= Alerts ================= -->
     <?php if(isset($_SESSION['success'])): ?>
         <div class="flash success">
             <i class="bi bi-check-circle-fill"></i>
@@ -623,7 +608,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
         <?php unset($_SESSION['error']); endif; ?>
 
-    <!-- ================= Top Bar ================= -->
     <div class="topbar">
         <div class="d-flex align-items-center gap-3">
             <button class="menu-toggle" id="menuToggle"><i class="bi bi-list fs-5"></i></button>
@@ -642,7 +626,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
     </div>
 
-    <!-- ================= Stats ================= -->
     <div class="stat-grid">
         <div class="stat-card tone-blue">
             <div class="stat-icon"><i class="bi bi-people-fill"></i></div>
@@ -692,7 +675,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
     </div>
 
-    <!-- ================= Charts ================= -->
     <div class="row g-3">
         <div class="col-lg-7">
             <div class="card h-100">
@@ -718,7 +700,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
     </div>
 
-    <!-- ================= Student Directory ================= -->
     <div class="card mt-3">
         <div class="card-header">
             <h3>
@@ -818,7 +799,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
         </div>
     </div>
 
-    <!-- ================= Recent Enrollments ================= -->
     <div class="card mt-3">
         <div class="card-header">
             <h3><i class="bi bi-clock-history"></i> Recent Enrollments</h3>
@@ -865,7 +845,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
     </div>
 </div>
 
-<!-- ================= Mobile overlay ================= -->
 <div id="sidebarOverlay" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.5);backdrop-filter:blur(2px);z-index:199"
      onclick="document.getElementById('sidebar').classList.remove('open');this.style.display='none'"></div>
 
@@ -888,7 +867,6 @@ function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-// Re-apply dynamic CSS-var colors to charts on theme change
 function refreshChartColors() {
     if (window.__gradeChart) {
         const g = window.__gradeChart;

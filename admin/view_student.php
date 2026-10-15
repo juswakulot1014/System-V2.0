@@ -2,6 +2,17 @@
 require_once __DIR__ . '/../config/auth.php';
 require_once __DIR__ . '/../config/audit.php';
 require_once __DIR__ . '/../config/crypto.php';
+require_once __DIR__ . '/../config/security.php';
+
+/* ── Role gate ────────────────────────────────────────── */
+if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true)) {
+    http_response_code(403);
+    security_log('view_student.forbidden', [
+        'admin_id' => (int)($_SESSION['admin_id'] ?? 0),
+        'ip'       => client_ip(),
+    ]);
+    exit('Forbidden');
+}
 
 // ==================== REQUIRED DOCUMENTS CONFIG ====================
 $REQUIRED_DOCS = [
@@ -34,9 +45,6 @@ function docKey($s): string {
     return preg_replace('/\s+/', ' ', $s);
 }
 
-/**
- * Build display name: LastName, FirstName MiddleName Ext.
- */
 function formatStudentName(array $s): string {
     $mn  = !empty($s['middle_name']) ? ' ' . trim($s['middle_name']) : '';
     $ext = !empty($s['ext_name'])    ? ' ' . trim($s['ext_name']) : '';
@@ -50,45 +58,26 @@ function statSizeClass($val) {
     return '';
 }
 
-/**
- * Derive remarks from a numeric grade. 75 is the passing threshold.
- */
 function derive_remarks($grade): ?string {
     if ($grade === null || $grade === '') return null;
     if (!is_numeric($grade))          return null;
     return ((float)$grade >= 75) ? 'Passed' : 'Failed';
 }
 
-/**
- * Encrypt and store a document file.
- */
 function store_encrypted_document(string $tmp_path, int $student_id, int $entrance_id): array {
-    if (!is_file($tmp_path)) {
-        throw new Exception('Uploaded file missing.');
-    }
-    $size = filesize($tmp_path);
-    if ($size === false || $size === 0) throw new Exception('Empty file.');
-    if ($size > 5 * 1024 * 1024)        throw new Exception('File too large (max 5 MB).');
-
-    $fi = finfo_open(FILEINFO_MIME_TYPE);
-    $mime = finfo_file($fi, $tmp_path);
-    finfo_close($fi);
-
-    $allowed = [
-        'application/pdf' => 'pdf',
-        'image/jpeg'      => 'jpg',
-        'image/png'       => 'png',
-    ];
-    if (!isset($allowed[$mime])) {
-        throw new Exception('Unsupported file type. Allowed: PDF, JPG, PNG.');
-    }
+    $info = validate_upload($tmp_path, 'document', [
+        'max_bytes'   => 5 * 1024 * 1024,
+        'allowed'     => ['application/pdf', 'image/jpeg', 'image/png'],
+        'image_min_w' => 150,
+        'image_min_h' => 150,
+    ]);
 
     $plain = file_get_contents($tmp_path);
     if ($plain === false || $plain === '') throw new Exception('Cannot read file.');
 
     $blob  = doc_encrypt($plain);
     $token = bin2hex(random_bytes(16));
-    $stored_name = "doc_{$student_id}_{$entrance_id}_{$token}.{$allowed[$mime]}.enc";
+    $stored_name = "doc_{$student_id}_{$entrance_id}_{$token}.{$info['ext']}.enc";
     $abs = DOCUMENTS_DIR . $stored_name;
 
     if (file_put_contents($abs, $blob, LOCK_EX) === false) {
@@ -98,8 +87,8 @@ function store_encrypted_document(string $tmp_path, int $student_id, int $entran
 
     return [
         'filename' => $stored_name,
-        'mime'     => $mime,
-        'size'     => $size,
+        'mime'     => $info['mime'],
+        'size'     => $info['size'],
     ];
 }
 
@@ -185,7 +174,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_document'])) {
         header("Location: view_student.php?id=$sid"); exit();
     }
 
-    // Ownership check
     $chk = $conn->prepare("SELECT entrance_id, file_path FROM entrance_documents WHERE entrance_id = ? AND student_id = ? LIMIT 1");
     $chk->bind_param("ii", $eid, $sid);
     $chk->execute();
@@ -206,10 +194,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_document'])) {
     try {
         $stored = store_encrypted_document($f['tmp_name'], $sid, $eid);
 
-        // Delete previous encrypted file if any
         if (!empty($doc['file_path'])) {
-            $old = DOCUMENTS_DIR . basename($doc['file_path']);
-            if (is_file($old)) @unlink($old);
+            try {
+                $old = safe_path(DOCUMENTS_DIR, (string)$doc['file_path']);
+                if (is_file($old)) @unlink($old);
+            } catch (RuntimeException $e) {
+                security_log('view_student.old_file_containment', [
+                    'candidate' => (string)$doc['file_path'],
+                    'student'   => $sid,
+                ]);
+            }
         }
 
         $safe_name = preg_replace('/[^A-Za-z0-9._\- ]/', '_', basename((string)$f['name']));
@@ -257,11 +251,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_document'])) {
     $chk->close();
 
     if ($row && !empty($row['file_path'])) {
-        $abs  = DOCUMENTS_DIR . basename($row['file_path']);
-        $root = realpath(DOCUMENTS_DIR);
-        $real = realpath($abs);
-        if ($real && $root && str_starts_with($real, $root . DIRECTORY_SEPARATOR)) {
-            @unlink($real);
+        try {
+            $abs = safe_path(DOCUMENTS_DIR, (string)$row['file_path']);
+            if (is_file($abs)) @unlink($abs);
+        } catch (RuntimeException $e) {
+            security_log('view_student.delete_containment', [
+                'candidate' => (string)$row['file_path'],
+                'student'   => $sid,
+            ]);
         }
     }
 
@@ -292,48 +289,63 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_photo'])) {
     $sid = (int)$_POST['student_id'];
 
     if (isset($_FILES['student_photo']) && $_FILES['student_photo']['error'] === 0) {
-        $ext = strtolower(pathinfo($_FILES['student_photo']['name'], PATHINFO_EXTENSION));
-        $fi  = finfo_open(FILEINFO_MIME_TYPE);
-        $mime = finfo_file($fi, $_FILES['student_photo']['tmp_name']);
-        finfo_close($fi);
-
-        if (in_array($mime, ['image/jpeg', 'image/png'], true)
-            && $_FILES['student_photo']['size'] <= 2 * 1024 * 1024) {
+        try {
+            $info = validate_upload($_FILES['student_photo']['tmp_name'], $_FILES['student_photo']['name'], [
+                'max_bytes'   => 2 * 1024 * 1024,
+                'allowed'     => ['image/jpeg', 'image/png'],
+                'image_min_w' => 200,
+                'image_min_h' => 200,
+            ]);
 
             $dir = STUDENTS_PHOTO_DIR;
             if (!is_dir($dir)) mkdir($dir, 0750, true);
 
-            // Delete old photo
             $oq = $conn->prepare("SELECT photo FROM students_info WHERE student_id = ?");
             $oq->bind_param("i", $sid);
             $oq->execute();
             $old = $oq->get_result()->fetch_assoc();
             $oq->close();
             if (!empty($old['photo'])) {
-                $oabs = student_photo_abs_path($old['photo']);
-                if (is_file($oabs)) @unlink($oabs);
+                try {
+                    $oabs = safe_path(STUDENTS_PHOTO_DIR, (string)$old['photo']);
+                    if (is_file($oabs)) @unlink($oabs);
+                } catch (RuntimeException $e) {
+                    security_log('view_student.old_photo_containment', [
+                        'candidate' => (string)$old['photo'],
+                        'student'   => $sid,
+                    ]);
+                }
             }
 
-            $fn = "student_{$sid}_" . time() . ".{$ext}";
-            if (move_uploaded_file($_FILES['student_photo']['tmp_name'], $dir . $fn)) {
-                @chmod($dir . $fn, 0640);
-                $s = $conn->prepare("UPDATE students_info SET photo = ? WHERE student_id = ?");
-                $s->bind_param("si", $fn, $sid);
-                $s->execute();
-                $s->close();
+            $random_abs = move_upload_securely($_FILES['student_photo']['tmp_name'], $dir, $info['ext']);
+            $fn         = "student_{$sid}_" . bin2hex(random_bytes(8)) . ".{$info['ext']}";
+            $final      = rtrim($dir, '/\\') . DIRECTORY_SEPARATOR . $fn;
 
-                audit_log($conn, 'student.photo_update', [
-                    'type'       => 'student',
-                    'id'         => $sid,
-                    'filename'   => $fn,
-                ]);
-
-                $_SESSION['success'] = 'Photo updated.';
-            } else {
-                $_SESSION['error'] = 'Photo save failed.';
+            if (!@rename($random_abs, $final)) {
+                @unlink($random_abs);
+                throw new RuntimeException('Could not finalize photo.');
             }
-        } else {
-            $_SESSION['error'] = 'JPG/PNG under 2 MB only.';
+            @chmod($final, 0640);
+
+            $s = $conn->prepare("UPDATE students_info SET photo = ? WHERE student_id = ?");
+            $s->bind_param("si", $fn, $sid);
+            $s->execute();
+            $s->close();
+
+            audit_log($conn, 'student.photo_update', [
+                'type'       => 'student',
+                'id'         => $sid,
+                'filename'   => $fn,
+            ]);
+
+            $_SESSION['success'] = 'Photo updated.';
+        } catch (RuntimeException $e) {
+            security_log('view_student.photo_rejected', [
+                'student_id' => $sid,
+                'reason'     => $e->getMessage(),
+                'ip'         => client_ip(),
+            ]);
+            $_SESSION['error'] = $e->getMessage();
         }
     } else {
         $_SESSION['error'] = 'No file.';
@@ -371,11 +383,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_photo'])) {
     $u->close();
 
     if (!empty($old_photo)) {
-        $abs  = student_photo_abs_path($old_photo);
-        $root = realpath(STUDENTS_PHOTO_DIR);
-        $real = $abs ? realpath($abs) : false;
-        if ($real && $root && str_starts_with($real, $root . DIRECTORY_SEPARATOR)) {
-            @unlink($real);
+        try {
+            $abs = safe_path(STUDENTS_PHOTO_DIR, (string)$old_photo);
+            if (is_file($abs)) @unlink($abs);
+        } catch (RuntimeException $e) {
+            security_log('view_student.photo_delete_containment', [
+                'candidate' => (string)$old_photo,
+                'student'   => $sid,
+            ]);
         }
     }
 
@@ -395,7 +410,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_student'])) {
 
     $sid = (int)$_POST['student_id'];
 
-    // Collect file paths BEFORE deleting rows
     $files = [];
     $dq = $conn->prepare("SELECT file_path FROM entrance_documents WHERE student_id = ? AND file_path IS NOT NULL");
     $dq->bind_param("i", $sid);
@@ -403,23 +417,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_student'])) {
     $dres = $dq->get_result();
     while ($d = $dres->fetch_assoc()) {
         if (!empty($d['file_path'])) {
-            $files[] = DOCUMENTS_DIR . basename($d['file_path']);
+            try {
+                $files[] = safe_path(DOCUMENTS_DIR, (string)$d['file_path']);
+            } catch (RuntimeException $e) {
+                security_log('view_student.del_doc_containment', [
+                    'candidate' => (string)$d['file_path'],
+                    'student'   => $sid,
+                ]);
+            }
         }
     }
     $dq->close();
 
-    // Photo path
     $pq = $conn->prepare("SELECT photo FROM students_info WHERE student_id = ?");
     $pq->bind_param("i", $sid);
     $pq->execute();
     $prow = $pq->get_result()->fetch_assoc();
     $pq->close();
-    $photo_abs = !empty($prow['photo']) ? student_photo_abs_path($prow['photo']) : null;
+
+    $photo_abs = null;
+    if (!empty($prow['photo'])) {
+        try {
+            $photo_abs = safe_path(STUDENTS_PHOTO_DIR, (string)$prow['photo']);
+        } catch (RuntimeException $e) {
+            $photo_abs = null;
+        }
+    }
 
     $conn->begin_transaction();
     try {
-        foreach (['student_grades', 'entrance_documents', 'educational_history', 'addresses', 'parents_info', 'enrollment_form'] as $t) {
-            $s = $conn->prepare("DELETE FROM `$t` WHERE student_id = ?");
+        $child_tables = ['student_grades', 'entrance_documents', 'educational_history', 'addresses', 'parents_info', 'enrollment_form'];
+        foreach ($child_tables as $t) {
+            $safe_t = sql_identifier($t);
+            $s = $conn->prepare("DELETE FROM `{$safe_t}` WHERE student_id = ?");
             $s->bind_param("i", $sid);
             $s->execute();
             $s->close();
@@ -430,7 +460,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_student'])) {
         $s->close();
         $conn->commit();
 
-        // Only unlink after commit succeeds
         $root = realpath(DOCUMENTS_DIR);
         foreach ($files as $abs) {
             $real = realpath($abs);
@@ -461,7 +490,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_grade'])) {
     $gr   = ($_POST['grade'] ?? '') !== '' ? (float)$_POST['grade'] : null;
     $rem  = trim($_POST['remarks'] ?? '');
 
-    // Auto-derive remarks from the grade (75 = passing threshold).
     if ($gr !== null) {
         $rem = derive_remarks($gr);
     }
@@ -471,8 +499,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_grade'])) {
         header("Location: view_student.php?id=$sid"); exit();
     }
 
-    $es = $conn->prepare("SELECT enrollment_id, grade_level, school_year FROM enrollment_form WHERE student_id = ? ORDER BY enrollment_id DESC LIMIT 1");
-    $es->bind_param("i", $sid);
+    $enrollment_id_post = (int)($_POST['enrollment_id'] ?? 0);
+
+    if ($enrollment_id_post > 0) {
+        $es = $conn->prepare("
+            SELECT enrollment_id, grade_level, school_year
+            FROM enrollment_form
+            WHERE enrollment_id = ? AND student_id = ?
+            LIMIT 1
+        ");
+        $es->bind_param("ii", $enrollment_id_post, $sid);
+    } else {
+        $es = $conn->prepare("
+            SELECT enrollment_id, grade_level, school_year
+            FROM enrollment_form
+            WHERE student_id = ?
+            ORDER BY enrollment_id DESC
+            LIMIT 1
+        ");
+        $es->bind_param("i", $sid);
+    }
     $es->execute();
     $er = $es->get_result()->fetch_assoc();
     $es->close();
@@ -508,7 +554,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_grade'])) {
         }
         $s->close();
     }
-    header("Location: view_student.php?id=$sid"); exit();
+
+    $return_grade = trim((string)($_POST['return_grade'] ?? ''));
+    $url = "view_student.php?id=$sid";
+    if (in_array($return_grade, ['Grade 11', 'Grade 12'], true)) {
+        $url .= "&grade=" . urlencode($return_grade);
+    }
+    header("Location: $url"); exit();
 }
 
 // --- Edit grade ---
@@ -555,7 +607,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_grade'])) {
         $_SESSION['error'] = 'Failed to update.';
     }
     $s->close();
-    header("Location: view_student.php?id=$sid"); exit();
+
+    $return_grade = trim((string)($_POST['return_grade'] ?? ''));
+    $url = "view_student.php?id=$sid";
+    if (in_array($return_grade, ['Grade 11', 'Grade 12'], true)) {
+        $url .= "&grade=" . urlencode($return_grade);
+    }
+    header("Location: $url"); exit();
 }
 
 // --- Delete grade ---
@@ -588,7 +646,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_grade'])) {
         $_SESSION['error'] = 'Failed to delete.';
     }
     $s->close();
-    header("Location: view_student.php?id=$sid"); exit();
+
+    $return_grade = trim((string)($_POST['return_grade'] ?? ''));
+    $url = "view_student.php?id=$sid";
+    if (in_array($return_grade, ['Grade 11', 'Grade 12'], true)) {
+        $url .= "&grade=" . urlencode($return_grade);
+    }
+    header("Location: $url"); exit();
 }
 
 // --- Add education ---
@@ -699,12 +763,7 @@ if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
 }
 $student_id = (int)$_GET['id'];
 
-// ---------------------------------------------------------------------------
-// NOTE: `p.mother_name` was removed from this SELECT. It is never written by
-// edit_student.php or process_enroll.php — only `mother_maiden_name` is. If
-// your schema happens to define `mother_name`, no harm; if it doesn't, the
-// previous query threw a fatal error on this page.
-// ---------------------------------------------------------------------------
+/* ── Fetch base student info (no enrollment join — we handle that below) ── */
 $s = $conn->prepare("
     SELECT s.*,
            p.father_name, p.father_occupation, p.father_contact,
@@ -712,18 +771,12 @@ $s = $conn->prepare("
            p.guardian_fullname, p.guardian_relation, p.guardian_contact,
            p.ave_family_income, p.is_4ps, p.household_id as parent_household_id,
            a.purok_street, a.barangay, a.town_city, a.province,
-           a.region, a.district, a.postal_code,
-           e.enrollment_id, e.grade_level, e.track, e.strand, e.program,
-           e.section, e.school_year, e.term, e.status, e.voucher_status,
-           e.household_id, e.is_transferred, e.previous_school_name,
-           e.previous_school_address, e.previous_track, e.previous_strand,
-           e.previous_program, e.previous_year_completed, e.cct_4ps
+           a.region, a.district, a.postal_code
     FROM students_info s
     LEFT JOIN parents_info p ON s.student_id = p.student_id
     LEFT JOIN addresses a ON s.student_id = a.student_id
-    LEFT JOIN enrollment_form e ON s.student_id = e.student_id
     WHERE s.student_id = ?
-    ORDER BY e.enrollment_id DESC LIMIT 1
+    LIMIT 1
 ");
 $s->bind_param("i", $student_id);
 $s->execute();
@@ -735,9 +788,73 @@ if (!$student) {
     header("Location: student_profile.php"); exit();
 }
 
-$enrollment = !empty($student['enrollment_id']) ? $student : [];
+/* ── Fetch ALL enrollments for this student ── */
+$all_enrollments = [];
+$es = $conn->prepare("
+    SELECT e.enrollment_id, e.grade_level, e.track, e.strand, e.program,
+           e.section, e.school_year, e.term, e.status, e.voucher_status,
+           e.household_id, e.is_transferred, e.previous_school_name,
+           e.previous_school_address, e.previous_track, e.previous_strand,
+           e.previous_program, e.previous_year_completed, e.cct_4ps
+    FROM enrollment_form e
+    WHERE e.student_id = ?
+    ORDER BY e.school_year DESC, e.term DESC, e.enrollment_id DESC
+");
+$es->bind_param("i", $student_id);
+$es->execute();
+$enr_res = $es->get_result();
+while ($row = $enr_res->fetch_assoc()) {
+    $all_enrollments[(int)$row['enrollment_id']] = $row;
+}
+$es->close();
+
+/* ── Group by grade level ── */
+$enrollments_by_grade = ['Grade 11' => [], 'Grade 12' => []];
+foreach ($all_enrollments as $en) {
+    $gl = strtolower(trim((string)$en['grade_level']));
+    if (strpos($gl, '12') !== false)      $enrollments_by_grade['Grade 12'][] = $en;
+    elseif (strpos($gl, '11') !== false)  $enrollments_by_grade['Grade 11'][] = $en;
+}
+
+/* ── Determine active grade from ?grade=Grade+11 or ?grade=Grade+12 ── */
+$active_grade = trim((string)($_GET['grade'] ?? ''));
+
+if (!in_array($active_grade, ['Grade 11', 'Grade 12'], true) || empty($enrollments_by_grade[$active_grade])) {
+    $active_grade = '';
+    $first_en = reset($all_enrollments);
+    if ($first_en) {
+        $gl = strtolower(trim((string)$first_en['grade_level']));
+        if (strpos($gl, '12') !== false)      $active_grade = 'Grade 12';
+        elseif (strpos($gl, '11') !== false)  $active_grade = 'Grade 11';
+    }
+    if ($active_grade === '') {
+        foreach (['Grade 12', 'Grade 11'] as $candidate) {
+            if (!empty($enrollments_by_grade[$candidate])) { $active_grade = $candidate; break; }
+        }
+    }
+}
+
+/* ── The active enrollment = newest within that grade level ── */
+$enrollment = !empty($enrollments_by_grade[$active_grade])
+    ? $enrollments_by_grade[$active_grade][0]
+    : [];
+
+/* ── Merge so existing `$student['grade_level']` etc. keep working ── */
+if (!empty($enrollment)) {
+    $student = array_merge($student, $enrollment);
+}
+
 $parents = $student;
 $address = $student;
+
+/* ── Flags for the tab UI ── */
+$has_grade_11    = !empty($enrollments_by_grade['Grade 11']);
+$has_grade_12    = !empty($enrollments_by_grade['Grade 12']);
+$show_grade_tabs = $has_grade_11 && $has_grade_12;
+
+/* ── The other grade's label for the hint ── */
+$other_grade = ($active_grade === 'Grade 11') ? 'Grade 12' : 'Grade 11';
+$has_other   = !empty($enrollments_by_grade[$other_grade]);
 
 // Auto-seed required documents (idempotent)
 $check = $conn->prepare("SELECT entrance_id, document_name FROM entrance_documents WHERE student_id = ?");
@@ -826,7 +943,7 @@ foreach ($documents as $d) {
 
 // Grades
 $grades_stmt = $conn->prepare("
-    SELECT sg.grade_id, sg.term, sg.grade_level, sg.school_year,
+    SELECT sg.grade_id, sg.term, sg.grade_level, sg.school_year, sg.enrollment_id,
            sg.subject_code, sg.subject_name, sg.grade, sg.remarks
     FROM student_grades sg
     WHERE sg.student_id = ?
@@ -855,6 +972,22 @@ foreach ($all_grades_flat as $g) {
     }
 }
 $overall_gwa = $grade_count > 0 ? round($total_grade_points / $grade_count, 2) : null;
+
+/* ── GWA per grade level (respects active tab) ── */
+$active_grade_gwa = null;
+$active_grade_points = 0; $active_grade_count = 0;
+foreach ($all_grades_flat as $g) {
+    $gl = strtolower(trim((string)($g['grade_level'] ?? '')));
+    $matches = ($active_grade === 'Grade 11' && strpos($gl, '11') !== false)
+            || ($active_grade === 'Grade 12' && strpos($gl, '12') !== false);
+    if ($matches && $g['grade'] !== null && is_numeric($g['grade'])) {
+        $active_grade_points += (float)$g['grade'];
+        $active_grade_count++;
+    }
+}
+if ($active_grade_count > 0) {
+    $active_grade_gwa = round($active_grade_points / $active_grade_count, 2);
+}
 
 $gwa_per_year = [];
 foreach ($academic_record as $sy => $levels) {
@@ -888,6 +1021,19 @@ foreach ($academic_record as $sy => $levels) {
     }
 }
 
+/* ── Restrict the Academic Record card to the active grade ── */
+$filtered_academic_record = [];
+foreach ($academic_record as $sy => $levels) {
+    foreach ($levels as $gl => $terms) {
+        $gl_low = strtolower(trim((string)$gl));
+        $matches = ($active_grade === 'Grade 11' && strpos($gl_low, '11') !== false)
+                || ($active_grade === 'Grade 12' && strpos($gl_low, '12') !== false);
+        if ($matches) {
+            $filtered_academic_record[$sy][$gl] = $terms;
+        }
+    }
+}
+
 $stat_grade   = $enrollment['grade_level'] ?? '—';
 $stat_section = $enrollment['section']     ?? '—';
 $stat_strand  = $enrollment['strand']      ?? '—';
@@ -902,7 +1048,6 @@ $theme = isset($_COOKIE['admin_theme']) && $_COOKIE['admin_theme'] === 'dark' ? 
 $initials = strtoupper(substr($student['first_name'] ?? '', 0, 1) . substr($student['last_name'] ?? '', 0, 1));
 
 $photo_abs = !empty($student['photo']) ? student_photo_abs_path($student['photo']) : '';
-// mtime cache-buster so the browser picks up a new image after upload/removal.
 $photo = ($photo_abs && is_file($photo_abs))
     ? 'photo.php?id=' . (int)$student_id . '&v=' . filemtime($photo_abs)
     : '';
@@ -921,75 +1066,37 @@ $csrf_token  = csrf_token();
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= $fullName ?> • USAT Admin</title>
 
-    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700;14..32,800&display=swap" rel="stylesheet">
-
-    <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-
-    <!-- Bootstrap Icons — served from cdnjs because CSP font-src allows it -->
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
 
     <style>
-        /* ============================================================
-           Design tokens (matches dashboard.php / student_profile.php)
-           ============================================================ */
         :root {
-            --bg: #f4f6fb;
-            --surface: #ffffff;
-            --surface-2: #f8fafc;
-            --text: #0f172a;
-            --text-2: #64748b;
-            --text-3: #94a3b8;
-            --border: #e5e7eb;
-            --border-strong: #d1d5db;
-            --accent: #4f46e5;
-            --accent-2: #6366f1;
-            --accent-soft: #eef2ff;
-            --green: #059669;
-            --green-soft: #d1fae5;
-            --red: #dc2626;
-            --red-soft: #fee2e2;
-            --amber: #d97706;
-            --amber-soft: #fef3c7;
-            --purple: #7c3aed;
-            --purple-soft: #ede9fe;
-            --blue: #2563eb;
-            --pink: #ec4899;
-
+            --bg: #f4f6fb; --surface: #ffffff; --surface-2: #f8fafc;
+            --text: #0f172a; --text-2: #64748b; --text-3: #94a3b8;
+            --border: #e5e7eb; --border-strong: #d1d5db;
+            --accent: #4f46e5; --accent-2: #6366f1; --accent-soft: #eef2ff;
+            --green: #059669; --green-soft: #d1fae5;
+            --red: #dc2626; --red-soft: #fee2e2;
+            --amber: #d97706; --amber-soft: #fef3c7;
+            --purple: #7c3aed; --purple-soft: #ede9fe;
+            --blue: #2563eb; --pink: #ec4899;
             --shadow-xs: 0 1px 2px rgba(15,23,42,0.04);
             --shadow-sm: 0 1px 3px rgba(15,23,42,0.06), 0 1px 2px rgba(15,23,42,0.04);
             --shadow-md: 0 4px 12px rgba(15,23,42,0.06);
             --shadow-lg: 0 12px 32px rgba(15,23,42,0.10);
-
-            --radius-sm: 8px;
-            --radius: 12px;
-            --radius-lg: 16px;
-            --radius-xl: 20px;
-
+            --radius-sm: 8px; --radius: 12px; --radius-lg: 16px; --radius-xl: 20px;
             --sidebar-w: 264px;
         }
-
         [data-bs-theme="dark"] {
-            --bg: #0b1220;
-            --surface: #131c2e;
-            --surface-2: #1a2439;
-            --text: #f1f5f9;
-            --text-2: #94a3b8;
-            --text-3: #64748b;
-            --border: #1f2a44;
-            --border-strong: #2d3b57;
-            --accent: #818cf8;
-            --accent-2: #6366f1;
-            --accent-soft: #1e2140;
-            --green-soft: #052e24;
-            --red-soft: #3f1517;
-            --amber-soft: #3d2a08;
-            --purple-soft: #2e1a54;
-
+            --bg: #0b1220; --surface: #131c2e; --surface-2: #1a2439;
+            --text: #f1f5f9; --text-2: #94a3b8; --text-3: #64748b;
+            --border: #1f2a44; --border-strong: #2d3b57;
+            --accent: #818cf8; --accent-2: #6366f1; --accent-soft: #1e2140;
+            --green-soft: #052e24; --red-soft: #3f1517; --amber-soft: #3d2a08; --purple-soft: #2e1a54;
             --shadow-xs: 0 1px 2px rgba(0,0,0,0.3);
             --shadow-sm: 0 1px 3px rgba(0,0,0,0.35);
             --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
@@ -998,158 +1105,151 @@ $csrf_token  = csrf_token();
 
         *{margin:0;padding:0;box-sizing:border-box}
         html,body{height:100%}
-        body{
-            font-family:'Inter',system-ui,-apple-system,sans-serif;
-            background:var(--bg);color:var(--text);min-height:100vh;
-            -webkit-font-smoothing:antialiased;
-        }
+        body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
 
-        /* ============================================================
-           Sidebar
-           ============================================================ */
-        .sidebar{
-            position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);
-            background:var(--surface);border-right:1px solid var(--border);
-            z-index:200;display:flex;flex-direction:column;
-            transition:transform .28s cubic-bezier(.4,0,.2,1);
-        }
-        .sidebar-brand{
-            padding:1.25rem 1.5rem;border-bottom:1px solid var(--border);
-            display:flex;align-items:center;gap:.75rem;
-        }
-        .sidebar-brand img{
-            width:38px;height:38px;border-radius:10px;object-fit:cover;
-            box-shadow:0 0 0 3px var(--accent-soft);
-        }
+        .sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);background:var(--surface);border-right:1px solid var(--border);z-index:200;display:flex;flex-direction:column;transition:transform .28s cubic-bezier(.4,0,.2,1)}
+        .sidebar-brand{padding:1.25rem 1.5rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.75rem}
+        .sidebar-brand img{width:38px;height:38px;border-radius:10px;object-fit:cover;box-shadow:0 0 0 3px var(--accent-soft)}
         .sidebar-brand .brand-text{display:flex;flex-direction:column;line-height:1.15}
         .sidebar-brand .brand-name{font-weight:700;font-size:.95rem;color:var(--text)}
         .sidebar-brand .brand-sub{font-size:.68rem;color:var(--text-2);text-transform:uppercase;letter-spacing:.6px;font-weight:600}
-
         .sidebar-nav{flex:1;padding:.75rem .75rem 1rem;overflow-y:auto}
-        .sidebar-nav .nav-label{
-            font-size:.65rem;font-weight:700;color:var(--text-3);
-            text-transform:uppercase;letter-spacing:.8px;
-            padding:.75rem .75rem .35rem;
-        }
-        .sidebar-nav a{
-            display:flex;align-items:center;gap:.75rem;
-            padding:.6rem .75rem;border-radius:10px;
-            color:var(--text-2);text-decoration:none;
-            font-weight:500;font-size:.875rem;
-            transition:background .15s, color .15s;
-            margin-bottom:.1rem;
-        }
+        .sidebar-nav .nav-label{font-size:.65rem;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.8px;padding:.75rem .75rem .35rem}
+        .sidebar-nav a{display:flex;align-items:center;gap:.75rem;padding:.6rem .75rem;border-radius:10px;color:var(--text-2);text-decoration:none;font-weight:500;font-size:.875rem;transition:background .15s,color .15s;margin-bottom:.1rem}
         .sidebar-nav a:hover{background:var(--surface-2);color:var(--text)}
         .sidebar-nav a.active{background:var(--accent);color:#fff;box-shadow:0 4px 12px -4px rgba(79,70,229,.5)}
         .sidebar-nav a.active:hover{background:var(--accent)}
         .sidebar-nav a i{font-size:1.05rem;width:20px;text-align:center;flex-shrink:0}
         .sidebar-footer{padding:.75rem;border-top:1px solid var(--border)}
 
-        /* ============================================================
-           Main content
-           ============================================================ */
-        .main-content{
-            margin-left:var(--sidebar-w);
-            padding:1.5rem clamp(1rem,2.5vw,2rem) 2rem;
-            min-height:100vh;
-            max-width:1600px;
-        }
-        .topbar{
-            display:flex;align-items:center;justify-content:space-between;
-            margin-bottom:1.5rem;gap:1rem;flex-wrap:wrap;
-        }
+        .main-content{margin-left:var(--sidebar-w);padding:1.5rem clamp(1rem,2.5vw,2rem) 2rem;min-height:100vh;max-width:1600px}
+        .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;gap:1rem;flex-wrap:wrap}
         .topbar h2{font-size:1.35rem;font-weight:700;letter-spacing:-.02em;margin:0}
         .topbar .sub{font-size:.85rem;color:var(--text-2);margin:0}
-        .menu-toggle{
-            display:none;width:40px;height:40px;border-radius:10px;
-            border:1px solid var(--border);background:var(--surface);
-            color:var(--text);cursor:pointer;
-            align-items:center;justify-content:center;
-            transition:background .15s;
-        }
+        .menu-toggle{display:none;width:40px;height:40px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;align-items:center;justify-content:center;transition:background .15s}
         .menu-toggle:hover{background:var(--surface-2)}
-        .breadcrumb-nav{
-            display:flex;align-items:center;gap:.4rem;
-            font-size:.78rem;color:var(--text-2);
-            margin-bottom:.25rem;
-        }
+        .breadcrumb-nav{display:flex;align-items:center;gap:.4rem;font-size:.78rem;color:var(--text-2);margin-bottom:.25rem}
         .breadcrumb-nav a{color:var(--accent);text-decoration:none;font-weight:500}
         .breadcrumb-nav a:hover{text-decoration:underline}
 
-        /* ============================================================
-           Cards
-           ============================================================ */
-        .card{
-            background:var(--surface);border-radius:var(--radius-lg);
-            border:1px solid var(--border);box-shadow:var(--shadow-sm);
-            margin-bottom:1.25rem;overflow:hidden;
-        }
-        .card-header{
-            padding:.9rem 1.25rem;border-bottom:1px solid var(--border);
-            display:flex;align-items:center;justify-content:space-between;
-            gap:1rem;flex-wrap:wrap;background:var(--surface);
-        }
-        .card-header h3{
-            margin:0;font-size:.9rem;font-weight:600;
-            display:flex;align-items:center;gap:.5rem;color:var(--text);
-        }
+        .card{background:var(--surface);border-radius:var(--radius-lg);border:1px solid var(--border);box-shadow:var(--shadow-sm);margin-bottom:1.25rem;overflow:hidden}
+        .card-header{padding:.9rem 1.25rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;background:var(--surface)}
+        .card-header h3{margin:0;font-size:.9rem;font-weight:600;display:flex;align-items:center;gap:.5rem;color:var(--text)}
         .card-header h3 i{color:var(--accent);font-size:1rem}
         .card-header .hint{font-size:.75rem;color:var(--text-2);font-weight:500}
         .card-body{padding:1.25rem}
         .card-body.no-padding{padding:0}
 
-        /* ============================================================
-           Hero (student header)
-           ============================================================ */
-        .hero{
-            display:flex;gap:1.75rem;align-items:center;flex-wrap:wrap;
-            padding:1.5rem 1.75rem;
+        /* Grade tabs (inside card header) */
+        .grade-tabs { display:inline-flex; gap:.3rem; background:var(--surface-2); padding:.28rem; border-radius:11px; border:1px solid var(--border); }
+        .grade-tab { display:inline-flex; align-items:center; gap:.4rem; padding:.42rem .9rem; border-radius:8px; font-size:.78rem; font-weight:600; color:var(--text-2); text-decoration:none; transition:all .15s; white-space:nowrap; cursor:pointer; border:none; background:transparent; font-family:inherit; }
+        .grade-tab:hover { background:var(--surface); color:var(--text); }
+        .grade-tab.active { background:var(--accent); color:#fff; box-shadow:0 2px 8px -2px rgba(79,70,229,.5); }
+        .grade-tab.active:hover { background:var(--accent); color:#fff; }
+        .grade-tab i { font-size:.85rem; }
+        .grade-tab .tab-count { display:inline-block; margin-left:.2rem; padding:.05rem .4rem; border-radius:999px; font-size:.65rem; font-weight:700; background:rgba(255,255,255,.25); color:inherit; }
+        .grade-tab:not(.active) .tab-count { background:var(--surface); color:var(--text-2); border:1px solid var(--border); }
+
+        /* Grade record buttons (topbar) */
+        .grade-record-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: .4rem;
+            padding: .5rem .9rem;
+            border-radius: 9px;
+            font-size: .82rem;
+            font-weight: 600;
+            font-family: inherit;
+            text-decoration: none;
+            cursor: pointer;
+            transition: all .15s;
+            white-space: nowrap;
+            border: 1px solid;
+            position: relative;
         }
+        .grade-record-btn i { font-size: .95rem; }
+
+        .grade-record-btn.g11 {
+            background: var(--accent-soft);
+            color: var(--accent);
+            border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+        }
+        .grade-record-btn.g11:hover {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px -4px rgba(79,70,229,.5);
+        }
+        .grade-record-btn.g12 {
+            background: var(--purple-soft);
+            color: var(--purple);
+            border-color: color-mix(in srgb, var(--purple) 30%, transparent);
+        }
+        .grade-record-btn.g12:hover {
+            background: var(--purple);
+            color: #fff;
+            border-color: var(--purple);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px -4px rgba(124,58,237,.5);
+        }
+
+        .grade-record-btn.active {
+            color: #fff;
+            box-shadow: 0 4px 12px -4px rgba(0,0,0,.25);
+        }
+        .grade-record-btn.g11.active {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+        .grade-record-btn.g12.active {
+            background: var(--purple);
+            border-color: var(--purple);
+        }
+        .grade-record-btn.active::after {
+            content: '';
+            position: absolute;
+            top: -3px;
+            right: -3px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--green);
+            border: 2px solid var(--surface);
+        }
+
+        .grade-record-btn .rec-count {
+            display: inline-block;
+            padding: .05rem .4rem;
+            border-radius: 999px;
+            font-size: .65rem;
+            font-weight: 700;
+            background: rgba(255,255,255,.45);
+            margin-left: .15rem;
+        }
+        .grade-record-btn:not(.active) .rec-count {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text-2);
+        }
+
+        .stat-hint { font-size:.68rem; color:var(--text-3); margin-top:.35rem; font-weight:500; display:flex; align-items:center; gap:.25rem; }
+        .stat-hint i { color:var(--accent); }
+
+        .hero{display:flex;gap:1.75rem;align-items:center;flex-wrap:wrap;padding:1.5rem 1.75rem}
         .hero-avatar{position:relative;flex-shrink:0}
-        .hero-avatar img,
-        .hero-avatar .avatar-fallback{
-            width:104px;height:104px;border-radius:50%;object-fit:cover;
-            box-shadow:0 0 0 4px var(--surface), 0 0 0 6px var(--accent-soft);
-        }
-        .hero-avatar .avatar-fallback{
-            background:linear-gradient(135deg,var(--accent),var(--accent-2));
-            display:flex;align-items:center;justify-content:center;
-            color:#fff;font-size:2.3rem;font-weight:800;letter-spacing:-.03em;
-        }
-        .hero-avatar .camera-btn{
-            position:absolute;bottom:2px;right:2px;
-            width:32px;height:32px;border-radius:50%;
-            background:var(--surface);border:2px solid var(--border);
-            cursor:pointer;display:flex;align-items:center;justify-content:center;
-            color:var(--accent);transition:all .15s;
-        }
+        .hero-avatar img,.hero-avatar .avatar-fallback{width:104px;height:104px;border-radius:50%;object-fit:cover;box-shadow:0 0 0 4px var(--surface), 0 0 0 6px var(--accent-soft)}
+        .hero-avatar .avatar-fallback{background:linear-gradient(135deg,var(--accent),var(--accent-2));display:flex;align-items:center;justify-content:center;color:#fff;font-size:2.3rem;font-weight:800;letter-spacing:-.03em}
+        .hero-avatar .camera-btn{position:absolute;bottom:2px;right:2px;width:32px;height:32px;border-radius:50%;background:var(--surface);border:2px solid var(--border);cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--accent);transition:all .15s}
         .hero-avatar .camera-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
-        .hero-avatar .trash-btn{
-            position:absolute;bottom:2px;left:2px;
-            width:32px;height:32px;border-radius:50%;
-            background:var(--surface);border:2px solid var(--border);
-            cursor:pointer;display:flex;align-items:center;justify-content:center;
-            color:var(--red);transition:all .15s;
-        }
+        .hero-avatar .trash-btn{position:absolute;bottom:2px;left:2px;width:32px;height:32px;border-radius:50%;background:var(--surface);border:2px solid var(--border);cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--red);transition:all .15s}
         .hero-avatar .trash-btn:hover{background:var(--red);color:#fff;border-color:var(--red)}
 
         .hero-info{flex:1;min-width:0}
-        .hero-info h1{
-            font-size:1.5rem;font-weight:700;letter-spacing:-.02em;
-            margin:0 0 .6rem;word-break:break-word;
-        }
+        .hero-info h1{font-size:1.5rem;font-weight:700;letter-spacing:-.02em;margin:0 0 .6rem;word-break:break-word}
         .hero-badges{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.75rem}
 
-        /* ============================================================
-           Pills / Badges
-           ============================================================ */
-        .pill{
-            display:inline-flex;align-items:center;gap:.35rem;
-            padding:.25rem .65rem;border-radius:999px;
-            font-size:.72rem;font-weight:600;
-            border:1px solid transparent;
-            white-space:nowrap;
-        }
+        .pill{display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .65rem;border-radius:999px;font-size:.72rem;font-weight:600;border:1px solid transparent;white-space:nowrap}
         .pill i{font-size:.75rem}
         .pill.primary{background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb, var(--accent) 22%, transparent)}
         .pill.success{background:var(--green-soft);color:var(--green);border-color:color-mix(in srgb, var(--green) 22%, transparent)}
@@ -1159,209 +1259,81 @@ $csrf_token  = csrf_token();
         .pill.muted  {background:var(--surface-2);color:var(--text-2);border-color:var(--border)}
         [data-bs-theme="dark"] .pill.info{background:#1e3a5f;color:#93c5fd;border-color:rgba(147,197,253,.15)}
 
-        .status-dot{
-            display:inline-flex;align-items:center;gap:.4rem;
-            font-size:.75rem;font-weight:600;
-        }
-        .status-dot::before{
-            content:'';width:7px;height:7px;border-radius:50%;
-            flex-shrink:0;background:currentColor;opacity:.9;
-        }
+        .status-dot{display:inline-flex;align-items:center;gap:.4rem;font-size:.75rem;font-weight:600}
+        .status-dot::before{content:'';width:7px;height:7px;border-radius:50%;flex-shrink:0;background:currentColor;opacity:.9}
         .status-dot.success{color:var(--green)}
         .status-dot.danger {color:var(--red)}
         .status-dot.warning{color:var(--amber)}
 
-        /* ============================================================
-           Stat grid
-           ============================================================ */
-        .stat-grid{
-            display:grid;
-            grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
-            gap:.85rem;
-        }
-        .stat-card{
-            position:relative;
-            background:var(--surface);border-radius:var(--radius);
-            border:1px solid var(--border);box-shadow:var(--shadow-xs);
-            padding:.95rem 1rem .95rem 1.15rem;
-            overflow:hidden;
-            transition:transform .15s, box-shadow .15s;
-        }
-        .stat-card::before{
-            content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
-            background:var(--accent);
-        }
+        .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.85rem}
+        .stat-card{position:relative;background:var(--surface);border-radius:var(--radius);border:1px solid var(--border);box-shadow:var(--shadow-xs);padding:.95rem 1rem .95rem 1.15rem;overflow:hidden;transition:transform .15s, box-shadow .15s}
+        .stat-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent)}
         .stat-card.tone-green::before {background:var(--green)}
         .stat-card.tone-purple::before{background:var(--purple)}
         .stat-card.tone-amber::before {background:var(--amber)}
         .stat-card.tone-red::before   {background:var(--red)}
         .stat-card.tone-blue::before  {background:var(--accent)}
         .stat-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-md)}
-
-        .stat-value{
-            font-size:1.25rem;font-weight:700;line-height:1.15;
-            color:var(--text);letter-spacing:-.015em;
-            word-break:break-word;font-variant-numeric:tabular-nums;
-        }
+        .stat-value{font-size:1.25rem;font-weight:700;line-height:1.15;color:var(--text);letter-spacing:-.015em;word-break:break-word;font-variant-numeric:tabular-nums}
         .stat-value.sm{font-size:1rem}
         .stat-value.xs{font-size:.82rem;font-weight:600}
-        .stat-label{
-            font-size:.68rem;color:var(--text-2);text-transform:uppercase;
-            letter-spacing:.6px;margin-top:.25rem;font-weight:600;
-        }
+        .stat-label{font-size:.68rem;color:var(--text-2);text-transform:uppercase;letter-spacing:.6px;margin-top:.25rem;font-weight:600}
 
-        /* ============================================================
-           Info grid (key/value cells)
-           ============================================================ */
-        .info-grid{
-            display:grid;
-            grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
-            gap:0;
-            border-top:1px solid var(--border);
-            border-left:1px solid var(--border);
-        }
-        .info-cell{
-            padding:.7rem 1rem;
-            border-right:1px solid var(--border);
-            border-bottom:1px solid var(--border);
-            background:var(--surface);
-        }
-        .info-cell .label{
-            font-size:.66rem;font-weight:700;color:var(--text-2);
-            text-transform:uppercase;letter-spacing:.6px;
-            margin-bottom:.2rem;
-        }
-        .info-cell .value{
-            font-weight:500;font-size:.85rem;color:var(--text);
-            word-break:break-word;
-        }
+        .info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:0;border-top:1px solid var(--border);border-left:1px solid var(--border)}
+        .info-cell{padding:.7rem 1rem;border-right:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--surface)}
+        .info-cell .label{font-size:.66rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.6px;margin-bottom:.2rem}
+        .info-cell .value{font-weight:500;font-size:.85rem;color:var(--text);word-break:break-word}
         .info-cell .value.accent{color:var(--accent);font-weight:700}
         .info-cell.span-2{grid-column:span 2;background:var(--surface-2)}
         .info-cell.span-full{grid-column:1 / -1;background:var(--surface-2)}
 
-        /* ============================================================
-           Table
-           ============================================================ */
         .table-scroll{overflow-x:auto}
         .table-admin{width:100%;border-collapse:separate;border-spacing:0}
-        .table-admin thead th{
-            background:var(--surface-2);
-            font-size:.66rem;font-weight:700;color:var(--text-2);
-            text-transform:uppercase;letter-spacing:.6px;
-            padding:.65rem .9rem;text-align:left;
-            border-bottom:1px solid var(--border);
-            white-space:nowrap;
-        }
-        .table-admin tbody td{
-            padding:.65rem .9rem;border-bottom:1px solid var(--border);
-            font-size:.83rem;vertical-align:middle;
-            transition:background .12s;
-        }
+        .table-admin thead th{background:var(--surface-2);font-size:.66rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.6px;padding:.65rem .9rem;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+        .table-admin tbody td{padding:.65rem .9rem;border-bottom:1px solid var(--border);font-size:.83rem;vertical-align:middle;transition:background .12s}
         .table-admin tbody tr:hover td{background:color-mix(in srgb, var(--accent) 4%, transparent)}
         .table-admin tbody tr:last-child td{border-bottom:none}
         .cell-strong{font-weight:600;color:var(--text)}
         .cell-muted{color:var(--text-2);font-size:.82rem}
         .cell-accent{color:var(--accent);font-weight:600}
-        .cell-num{
-            font-variant-numeric:tabular-nums;font-weight:600;
-            color:var(--text);font-size:.85rem;
-        }
+        .cell-num{font-variant-numeric:tabular-nums;font-weight:600;color:var(--text);font-size:.85rem}
         .cell-right{text-align:right}
 
-        /* ============================================================
-           Document row — file metadata
-           ============================================================ */
-        .file-meta{
-            font-size:.72rem;color:var(--text-2);
-            display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;
-            margin-top:.2rem;
-        }
+        .file-meta{font-size:.72rem;color:var(--text-2);display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin-top:.2rem}
         .file-meta .dot{opacity:.5}
-        .file-name{
-            font-weight:600;font-size:.82rem;color:var(--text);
-            display:flex;align-items:center;gap:.35rem;
-            max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-        }
+        .file-name{font-weight:600;font-size:.82rem;color:var(--text);display:flex;align-items:center;gap:.35rem;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
         .file-name i{color:var(--accent);flex-shrink:0}
 
-        /* ============================================================
-           Academic record
-           ============================================================ */
-        .sy-header{
-            background:var(--surface-2);
-            padding:.75rem 1.25rem;
-            border-bottom:1px solid var(--border);
-            display:flex;align-items:center;justify-content:space-between;
-            flex-wrap:wrap;gap:.5rem;
-        }
-        .sy-header h6{
-            margin:0;font-size:.85rem;font-weight:700;
-            color:var(--accent);
-            display:flex;align-items:center;gap:.5rem;
-        }
-        .grade-level-band{
-            padding:.55rem 1.25rem;
-            background:color-mix(in srgb, var(--accent) 5%, transparent);
-            border-bottom:1px solid var(--border);
-        }
-        .grade-level-band h6{
-            margin:0;font-size:.78rem;font-weight:700;
-            color:var(--text);
-            display:flex;align-items:center;gap:.5rem;
-        }
+        .sy-header{background:var(--surface-2);padding:.75rem 1.25rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem}
+        .sy-header h6{margin:0;font-size:.85rem;font-weight:700;color:var(--accent);display:flex;align-items:center;gap:.5rem}
+        .grade-level-band{padding:.55rem 1.25rem;background:color-mix(in srgb, var(--accent) 5%, transparent);border-bottom:1px solid var(--border)}
+        .grade-level-band h6{margin:0;font-size:.78rem;font-weight:700;color:var(--text);display:flex;align-items:center;gap:.5rem}
         .grade-level-band i{color:var(--accent)}
 
-        .term-block{
-            margin:.75rem 1rem;
-            padding:.75rem .85rem;
-            border-radius:var(--radius);
-            border-left:4px solid var(--accent);
-            background:var(--accent-soft);
-        }
+        .term-block{margin:.75rem 1rem;padding:.75rem .85rem;border-radius:var(--radius);border-left:4px solid var(--accent);background:var(--accent-soft)}
         .term-block.term-1{background:var(--accent-soft);border-left-color:var(--accent)}
         .term-block.term-2{background:#dbeafe;border-left-color:#2563eb}
         .term-block.term-3{background:var(--purple-soft);border-left-color:var(--purple)}
         [data-bs-theme="dark"] .term-block.term-2{background:#1e3a5f}
         [data-bs-theme="dark"] .term-block.term-3{background:var(--purple-soft)}
 
-        .term-head{
-            display:flex;align-items:center;justify-content:space-between;
-            margin-bottom:.6rem;flex-wrap:wrap;gap:.5rem;
-        }
-        .term-title{
-            font-size:.78rem;font-weight:700;
-            display:flex;align-items:center;gap:.4rem;
-        }
+        .term-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.5rem}
+        .term-title{font-size:.78rem;font-weight:700;display:flex;align-items:center;gap:.4rem}
         .term-block.term-1 .term-title{color:var(--accent)}
         .term-block.term-2 .term-title{color:#1e40af}
         .term-block.term-3 .term-title{color:var(--purple)}
 
-        .term-gwa{
-            font-size:.68rem;font-weight:600;
-            background:var(--surface);
-            padding:.2rem .55rem;border-radius:999px;
-            border:1px solid var(--border);
-        }
+        .term-gwa{font-size:.68rem;font-weight:600;background:var(--surface);padding:.2rem .55rem;border-radius:999px;border:1px solid var(--border)}
         .term-block.term-1 .term-gwa{color:var(--accent)}
         .term-block.term-2 .term-gwa{color:#1e40af}
         .term-block.term-3 .term-gwa{color:var(--purple)}
 
-        .term-block .table-admin{
-            background:var(--surface);
-            border-radius:8px;overflow:hidden;
-        }
-        .term-block .table-admin th{
-            font-size:.62rem;padding:.5rem .7rem;
-        }
-        .term-block .table-admin td{
-            font-size:.78rem;padding:.5rem .7rem;
-        }
+        .term-block .table-admin{background:var(--surface);border-radius:8px;overflow:hidden}
+        .term-block .table-admin th{font-size:.62rem;padding:.5rem .7rem}
+        .term-block .table-admin td{font-size:.78rem;padding:.5rem .7rem}
         .grade-pass{color:var(--green);font-weight:700;font-variant-numeric:tabular-nums}
         .grade-fail{color:var(--red);font-weight:700;font-variant-numeric:tabular-nums}
 
-        /* ============================================================
-           Buttons
-           ============================================================ */
         .btn{font-weight:500;border-radius:9px;font-size:.82rem;transition:all .15s}
         .btn-primary{background:var(--accent);border-color:var(--accent)}
         .btn-primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
@@ -1375,193 +1347,61 @@ $csrf_token  = csrf_token();
         .btn-outline-warning:hover{background:var(--amber);color:#fff;border-color:var(--amber)}
         .btn-outline-danger{color:var(--red);border-color:color-mix(in srgb, var(--red) 35%, transparent)}
         .btn-outline-danger:hover{background:var(--red);color:#fff;border-color:var(--red)}
-        .btn-icon{
-            width:32px;height:32px;padding:0;
-            display:inline-flex;align-items:center;justify-content:center;
-            border-radius:9px;
-        }
+        .btn-icon{width:32px;height:32px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:9px}
         .btn-xs{padding:.25rem .6rem;font-size:.72rem;border-radius:8px}
-        .theme-btn{
-            width:38px;height:38px;border-radius:10px;
-            border:1px solid var(--border);background:var(--surface);
-            color:var(--text-2);cursor:pointer;
-            display:flex;align-items:center;justify-content:center;
-            transition:all .15s;
-        }
+        .theme-btn{width:38px;height:38px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
         .theme-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
         .btn-group-actions{display:flex;gap:.35rem;flex-wrap:wrap}
 
-        /* ============================================================
-           Modals
-           ============================================================ */
         .modal-content{border-radius:var(--radius-lg);border:none;box-shadow:var(--shadow-lg)}
-        .modal-header{
-            padding:1rem 1.25rem;border-bottom:1px solid var(--border);
-            border-top-left-radius:var(--radius-lg);border-top-right-radius:var(--radius-lg);
-        }
+        .modal-header{padding:1rem 1.25rem;border-bottom:1px solid var(--border);border-top-left-radius:var(--radius-lg);border-top-right-radius:var(--radius-lg)}
         .modal-header.bg-danger{background:var(--red) !important}
         .modal-header .modal-title{font-size:.92rem}
         .modal-body{padding:1.25rem}
         .modal-footer{padding:.85rem 1.25rem;border-top:1px solid var(--border)}
         .form-label{font-size:.78rem;font-weight:600;color:var(--text-2);margin-bottom:.35rem}
-        .form-control,.form-select{
-            background:var(--surface-2);border:1px solid var(--border);
-            border-radius:10px;padding:.5rem .8rem;font-size:.85rem;
-            color:var(--text);transition:border-color .15s, box-shadow .15s;
-        }
-        .form-control:focus,.form-select:focus{
-            border-color:var(--accent);background:var(--surface);
-            box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
-        }
+        .form-control,.form-select{background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:.5rem .8rem;font-size:.85rem;color:var(--text);transition:border-color .15s, box-shadow .15s}
+        .form-control:focus,.form-select:focus{border-color:var(--accent);background:var(--surface);box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent)}
         .form-text{font-size:.72rem;color:var(--text-3)}
+        .form-control[readonly]{background:var(--surface-2);color:var(--text-2);cursor:not-allowed}
 
-        /* Read-only auto-derived remarks field */
-        .form-control[readonly]{
-            background:var(--surface-2);
-            color:var(--text-2);
-            cursor:not-allowed;
-        }
-
-        /* ============================================================
-           Grade modal — enhanced form
-           ============================================================ */
-        .modal-subtitle{
-            font-size:.75rem;color:var(--text-2);font-weight:500;
-            margin-top:.15rem;
-        }
+        .modal-subtitle{font-size:.75rem;color:var(--text-2);font-weight:500;margin-top:.15rem}
         .form-label .req{color:var(--red);font-weight:700;margin-left:.1rem}
 
-        .grade-context{
-            display:flex;align-items:center;gap:.75rem;
-            padding:.65rem .85rem;
-            background:var(--accent-soft);
-            border:1px solid color-mix(in srgb, var(--accent) 18%, transparent);
-            border-radius:var(--radius);
-            margin-bottom:1rem;
-        }
-        .grade-context-icon{
-            width:38px;height:38px;border-radius:50%;
-            background:var(--surface);color:var(--accent);
-            display:flex;align-items:center;justify-content:center;
-            font-size:1.15rem;flex-shrink:0;
-        }
+        .grade-context{display:flex;align-items:center;gap:.75rem;padding:.65rem .85rem;background:var(--accent-soft);border:1px solid color-mix(in srgb, var(--accent) 18%, transparent);border-radius:var(--radius);margin-bottom:1rem}
+        .grade-context-icon{width:38px;height:38px;border-radius:50%;background:var(--surface);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:1.15rem;flex-shrink:0}
         .grade-context-body{min-width:0;flex:1}
-        .grade-context-name{
-            font-weight:700;font-size:.88rem;color:var(--text);
-            white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-        }
-        .grade-context-meta{
-            display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;
-            font-size:.72rem;color:var(--text-2);font-weight:500;
-            margin-top:.15rem;
-        }
+        .grade-context-name{font-weight:700;font-size:.88rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .grade-context-meta{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;font-size:.72rem;color:var(--text-2);font-weight:500;margin-top:.15rem}
         .grade-context-meta i{color:var(--accent);font-size:.75rem;margin-right:.2rem}
-        .grade-context-meta .dot{
-            width:3px;height:3px;border-radius:50%;
-            background:var(--text-3);opacity:.6;
-        }
+        .grade-context-meta .dot{width:3px;height:3px;border-radius:50%;background:var(--text-3);opacity:.6}
 
-        /* Segmented term control */
-        .term-segments{
-            display:grid;
-            grid-template-columns:repeat(3,1fr);
-            gap:.3rem;
-            background:var(--surface-2);
-            padding:.3rem;
-            border-radius:11px;
-            border:1px solid var(--border);
-        }
-        .term-segments input[type=radio]{
-            position:absolute;opacity:0;pointer-events:none;
-        }
-        .term-segments label{
-            display:flex;align-items:center;justify-content:center;
-            padding:.5rem .25rem;
-            font-size:.78rem;font-weight:600;
-            color:var(--text-2);
-            border-radius:8px;
-            cursor:pointer;
-            transition:background .15s, color .15s, box-shadow .15s;
-            user-select:none;text-align:center;
-            margin:0;
-        }
-        .term-segments label:hover{
-            color:var(--text);
-            background:color-mix(in srgb, var(--accent) 8%, transparent);
-        }
-        .term-segments input[type=radio]:checked + label{
-            background:var(--accent);color:#fff;
-            box-shadow:0 2px 8px -2px rgba(79,70,229,.5);
-        }
-        .term-segments input[type=radio]:focus-visible + label{
-            outline:2px solid var(--accent);outline-offset:2px;
-        }
+        .term-segments{display:grid;grid-template-columns:repeat(3,1fr);gap:.3rem;background:var(--surface-2);padding:.3rem;border-radius:11px;border:1px solid var(--border)}
+        .term-segments input[type=radio]{position:absolute;opacity:0;pointer-events:none}
+        .term-segments label{display:flex;align-items:center;justify-content:center;padding:.5rem .25rem;font-size:.78rem;font-weight:600;color:var(--text-2);border-radius:8px;cursor:pointer;transition:background .15s, color .15s, box-shadow .15s;user-select:none;text-align:center;margin:0}
+        .term-segments label:hover{color:var(--text);background:color-mix(in srgb, var(--accent) 8%, transparent)}
+        .term-segments input[type=radio]:checked + label{background:var(--accent);color:#fff;box-shadow:0 2px 8px -2px rgba(79,70,229,.5)}
+        .term-segments input[type=radio]:focus-visible + label{outline:2px solid var(--accent);outline-offset:2px}
 
-        /* Grade input with live pass/fail feedback */
         .grade-input-wrap{position:relative}
-        .grade-input-wrap .form-control{
-            padding-right:78px;
-            font-size:1.02rem;font-weight:700;
-            font-variant-numeric:tabular-nums;
-            letter-spacing:-.01em;
-            transition:border-color .15s, box-shadow .15s;
-        }
-        .grade-input-wrap .grade-badge{
-            position:absolute;right:8px;top:50%;
-            transform:translateY(-50%);
-            font-size:.68rem;font-weight:700;
-            padding:.2rem .55rem;border-radius:999px;
-            pointer-events:none;
-            display:none;
-            text-transform:uppercase;letter-spacing:.4px;
-        }
+        .grade-input-wrap .form-control{padding-right:78px;font-size:1.02rem;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em;transition:border-color .15s, box-shadow .15s}
+        .grade-input-wrap .grade-badge{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:.68rem;font-weight:700;padding:.2rem .55rem;border-radius:999px;pointer-events:none;display:none;text-transform:uppercase;letter-spacing:.4px}
         .grade-input-wrap.has-value .grade-badge{display:inline-block}
-        .grade-input-wrap.is-pass .form-control{
-            border-color:var(--green);
-            box-shadow:0 0 0 3px color-mix(in srgb, var(--green) 16%, transparent);
-        }
-        .grade-input-wrap.is-pass .grade-badge{
-            background:var(--green-soft);color:var(--green);
-        }
-        .grade-input-wrap.is-fail .form-control{
-            border-color:var(--red);
-            box-shadow:0 0 0 3px color-mix(in srgb, var(--red) 16%, transparent);
-        }
-        .grade-input-wrap.is-fail .grade-badge{
-            background:var(--red-soft);color:var(--red);
-        }
+        .grade-input-wrap.is-pass .form-control{border-color:var(--green);box-shadow:0 0 0 3px color-mix(in srgb, var(--green) 16%, transparent)}
+        .grade-input-wrap.is-pass .grade-badge{background:var(--green-soft);color:var(--green)}
+        .grade-input-wrap.is-fail .form-control{border-color:var(--red);box-shadow:0 0 0 3px color-mix(in srgb, var(--red) 16%, transparent)}
+        .grade-input-wrap.is-fail .grade-badge{background:var(--red-soft);color:var(--red)}
 
-        /* ============================================================
-           Empty state
-           ============================================================ */
-        .empty{
-            padding:2.5rem 1.5rem;text-align:center;color:var(--text-2);
-        }
-        .empty .empty-icon{
-            width:56px;height:56px;border-radius:50%;
-            background:var(--surface-2);color:var(--text-3);
-            display:inline-flex;align-items:center;justify-content:center;
-            font-size:1.4rem;margin-bottom:.85rem;
-        }
+        .empty{padding:2.5rem 1.5rem;text-align:center;color:var(--text-2)}
+        .empty .empty-icon{width:56px;height:56px;border-radius:50%;background:var(--surface-2);color:var(--text-3);display:inline-flex;align-items:center;justify-content:center;font-size:1.4rem;margin-bottom:.85rem}
         .empty .empty-title{font-weight:600;color:var(--text);margin-bottom:.2rem}
         .empty .empty-sub{font-size:.82rem;color:var(--text-2)}
 
-        /* ============================================================
-           Flash alerts
-           ============================================================ */
-        .flash{
-            display:flex;align-items:center;gap:.65rem;
-            padding:.75rem 1rem;border-radius:var(--radius);
-            margin-bottom:1rem;font-size:.88rem;font-weight:500;
-            border:1px solid transparent;
-        }
+        .flash{display:flex;align-items:center;gap:.65rem;padding:.75rem 1rem;border-radius:var(--radius);margin-bottom:1rem;font-size:.88rem;font-weight:500;border:1px solid transparent}
         .flash.success{background:var(--green-soft);color:var(--green);border-color:color-mix(in srgb, var(--green) 25%, transparent)}
         .flash.error  {background:var(--red-soft);  color:var(--red);  border-color:color-mix(in srgb, var(--red) 25%, transparent)}
         .flash .btn-close{margin-left:auto;opacity:.6}
 
-        /* ============================================================
-           Responsive
-           ============================================================ */
         @media (max-width:1024px){
             .sidebar{transform:translateX(-100%)}
             .sidebar.open{transform:translateX(0)}
@@ -1579,6 +1419,9 @@ $csrf_token  = csrf_token();
             .term-block{margin:.5rem .5rem}
             .grade-level-band{padding:.55rem .75rem}
             .sy-header{padding:.65rem .75rem}
+            .grade-tabs{width:100%;justify-content:center}
+            .grade-record-btn span.rec-label { display: none; }
+            .grade-record-btn { padding: .5rem .7rem; }
         }
     </style>
 </head>
@@ -1587,12 +1430,10 @@ $csrf_token  = csrf_token();
 <?php
     $__current = basename($_SERVER['PHP_SELF']);
     $__super   = (($_SESSION['admin_role'] ?? '') === 'superadmin');
-    // Student sub-pages all highlight "Students"
     $__student_pages = ['student_profile.php','view_student.php','edit_student.php','export_students.php','sections_list.php','sf10.php'];
     $__act = in_array($__current, $__student_pages, true) ? 'student_profile.php' : $__current;
     $__a   = fn($f) => $f === $__act ? ' class="active"' : '';
 ?>
-<!-- ================= Sidebar ================= -->
 <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
         <img src="../assets/img/usat.jpg" alt="USAT" onerror="this.style.background='var(--accent)'">
@@ -1636,7 +1477,6 @@ $csrf_token  = csrf_token();
 
 <div class="main-content" id="mainContent">
 
-    <!-- ================= Flash alerts ================= -->
     <?php if(isset($_SESSION['success'])): ?>
         <div class="flash success">
             <i class="bi bi-check-circle-fill"></i>
@@ -1652,7 +1492,7 @@ $csrf_token  = csrf_token();
         </div>
         <?php unset($_SESSION['error']); endif; ?>
 
-    <!-- ================= Topbar ================= -->
+    <!-- Topbar with grade record buttons -->
     <div class="topbar">
         <div class="d-flex align-items-center gap-3">
             <button class="menu-toggle" id="menuToggle"><i class="bi bi-list fs-5"></i></button>
@@ -1665,7 +1505,28 @@ $csrf_token  = csrf_token();
                 <h2>Student Profile</h2>
             </div>
         </div>
-        <div class="d-flex gap-2 flex-wrap">
+        <div class="d-flex gap-2 flex-wrap align-items-center">
+
+            <?php if ($has_grade_11): ?>
+                <a href="?id=<?= (int)$student_id ?>&grade=Grade+11"
+                   class="grade-record-btn g11 <?= $active_grade === 'Grade 11' ? 'active' : '' ?>"
+                   title="View Grade 11 records">
+                    <i class="bi bi-mortarboard-fill"></i>
+                    <span class="rec-label">Grade 11 Records</span>
+                    <span class="rec-count"><?= count($enrollments_by_grade['Grade 11']) ?></span>
+                </a>
+            <?php endif; ?>
+
+            <?php if ($has_grade_12): ?>
+                <a href="?id=<?= (int)$student_id ?>&grade=Grade+12"
+                   class="grade-record-btn g12 <?= $active_grade === 'Grade 12' ? 'active' : '' ?>"
+                   title="View Grade 12 records">
+                    <i class="bi bi-mortarboard-fill"></i>
+                    <span class="rec-label">Grade 12 Records</span>
+                    <span class="rec-count"><?= count($enrollments_by_grade['Grade 12']) ?></span>
+                </a>
+            <?php endif; ?>
+
             <a href="sf10.php?id=<?= (int)$student_id ?>" class="btn btn-outline-primary btn-sm" target="_blank">
                 <i class="bi bi-file-earmark-text me-1"></i> SF10
             </a>
@@ -1681,7 +1542,7 @@ $csrf_token  = csrf_token();
         </div>
     </div>
 
-    <!-- ================= Hero ================= -->
+    <!-- Hero -->
     <div class="card">
         <div class="hero">
             <div class="hero-avatar">
@@ -1708,10 +1569,10 @@ $csrf_token  = csrf_token();
                         <i class="bi bi-person-badge"></i>
                         <?= htmlspecialchars($student['student_id_number'] ?? 'No ID') ?>
                     </span>
-                    <?php if($overall_gwa !== null): ?>
+                    <?php if($active_grade_gwa !== null): ?>
                         <span class="pill success">
                             <i class="bi bi-star-fill"></i>
-                            GWA: <?= number_format($overall_gwa, 2) ?>
+                            <?= htmlspecialchars($active_grade) ?> GWA: <?= number_format($active_grade_gwa, 2) ?>
                         </span>
                     <?php endif; ?>
                     <span class="pill <?= ($enrollment['status'] ?? 'Active') === 'Active' ? 'success' : 'warning' ?>">
@@ -1730,11 +1591,14 @@ $csrf_token  = csrf_token();
         </div>
     </div>
 
-    <!-- ================= Stat grid ================= -->
+    <!-- Stat grid -->
     <div class="stat-grid">
         <div class="stat-card tone-blue">
             <div class="stat-value <?= statSizeClass($stat_grade) ?>" title="<?= htmlspecialchars($stat_grade) ?>"><?= htmlspecialchars($stat_grade) ?></div>
             <div class="stat-label">Grade</div>
+            <?php if ($show_grade_tabs): ?>
+                <div class="stat-hint"><i class="bi bi-info-circle"></i>Viewing <?= htmlspecialchars($active_grade) ?></div>
+            <?php endif; ?>
         </div>
         <div class="stat-card tone-purple">
             <div class="stat-value <?= statSizeClass($stat_section) ?>" title="<?= htmlspecialchars($stat_section) ?>"><?= htmlspecialchars($stat_section) ?></div>
@@ -1753,12 +1617,12 @@ $csrf_token  = csrf_token();
             <div class="stat-label">Sex</div>
         </div>
         <div class="stat-card tone-green">
-            <div class="stat-value"><?= $overall_gwa !== null ? number_format($overall_gwa, 2) : '—' ?></div>
-            <div class="stat-label">GWA</div>
+            <div class="stat-value"><?= $active_grade_gwa !== null ? number_format($active_grade_gwa, 2) : '—' ?></div>
+            <div class="stat-label"><?= htmlspecialchars($active_grade ?: 'GWA') ?> GWA</div>
         </div>
     </div>
 
-    <!-- ================= Personal + Enrollment + Address ================= -->
+    <!-- Personal + Enrollment + Address -->
     <div class="row g-3 mt-1">
         <div class="col-lg-6">
             <div class="card h-100">
@@ -1785,7 +1649,42 @@ $csrf_token  = csrf_token();
         <div class="col-lg-6">
             <div class="card">
                 <div class="card-header">
-                    <h3><i class="bi bi-mortarboard"></i> Enrollment Details</h3>
+                    <h3>
+                        <i class="bi bi-mortarboard"></i> Enrollment Details
+                        <?php if (!empty($enrollment)): ?>
+                            <span class="pill primary" style="margin-left:.5rem;text-transform:none;letter-spacing:0;">
+                                <?= htmlspecialchars($active_grade) ?>
+                            </span>
+                        <?php endif; ?>
+                    </h3>
+
+                    <?php if ($show_grade_tabs && $has_other): ?>
+                        <span class="hint" style="margin-left:auto;margin-right:.5rem;">
+                            <i class="bi bi-info-circle"></i>
+                            Also has <?= htmlspecialchars($other_grade) ?> record
+                        </span>
+                    <?php endif; ?>
+
+                    <?php if ($show_grade_tabs): ?>
+                        <div class="grade-tabs" role="tablist" aria-label="Switch grade level view">
+                            <a href="?id=<?= (int)$student_id ?>&grade=Grade+11"
+                               class="grade-tab <?= $active_grade === 'Grade 11' ? 'active' : '' ?>"
+                               role="tab"
+                               aria-selected="<?= $active_grade === 'Grade 11' ? 'true' : 'false' ?>">
+                                <i class="bi bi-mortarboard-fill"></i>
+                                Grade 11
+                                <span class="tab-count"><?= count($enrollments_by_grade['Grade 11']) ?></span>
+                            </a>
+                            <a href="?id=<?= (int)$student_id ?>&grade=Grade+12"
+                               class="grade-tab <?= $active_grade === 'Grade 12' ? 'active' : '' ?>"
+                               role="tab"
+                               aria-selected="<?= $active_grade === 'Grade 12' ? 'true' : 'false' ?>">
+                                <i class="bi bi-mortarboard-fill"></i>
+                                Grade 12
+                                <span class="tab-count"><?= count($enrollments_by_grade['Grade 12']) ?></span>
+                            </a>
+                        </div>
+                    <?php endif; ?>
                 </div>
                 <div class="card-body no-padding">
                     <?php if(!empty($enrollment)): ?>
@@ -1843,7 +1742,7 @@ $csrf_token  = csrf_token();
         </div>
     </div>
 
-    <!-- ================= Parents & Guardian ================= -->
+    <!-- Parents & Guardian -->
     <div class="card mt-3">
         <div class="card-header">
             <h3><i class="bi bi-people"></i> Parents &amp; Guardian</h3>
@@ -1889,7 +1788,7 @@ $csrf_token  = csrf_token();
         </div>
     </div>
 
-    <!-- ================= Required Documents ================= -->
+    <!-- Required Documents -->
     <div class="card mt-3" id="documents">
         <div class="card-header">
             <h3>
@@ -2007,7 +1906,7 @@ $csrf_token  = csrf_token();
         </div>
     </div>
 
-    <!-- ================= Educational History ================= -->
+    <!-- Educational History -->
     <div class="card mt-3">
         <div class="card-header">
             <h3><i class="bi bi-book"></i> Educational History</h3>
@@ -2070,14 +1969,22 @@ $csrf_token  = csrf_token();
         </div>
     </div>
 
-    <!-- ================= Academic Record & Grades ================= -->
+    <!-- Academic Record (filtered to active grade) -->
     <div class="card mt-3">
         <div class="card-header">
-            <h3><i class="bi bi-journal-text"></i> Academic Record &amp; Grades</h3>
+            <h3>
+                <i class="bi bi-journal-text"></i>
+                Academic Record &amp; Grades
+                <?php if ($active_grade): ?>
+                    <span class="pill primary" style="margin-left:.5rem;text-transform:none;letter-spacing:0;">
+                        <?= htmlspecialchars($active_grade) ?>
+                    </span>
+                <?php endif; ?>
+            </h3>
             <div class="d-flex gap-2 align-items-center flex-wrap">
-                <?php if($overall_gwa !== null): ?>
+                <?php if($active_grade_gwa !== null): ?>
                     <span class="pill primary">
-                        Overall GWA: <strong style="margin-left:.2rem"><?= number_format($overall_gwa, 2) ?></strong>
+                        <?= htmlspecialchars($active_grade) ?> GWA: <strong style="margin-left:.2rem"><?= number_format($active_grade_gwa, 2) ?></strong>
                     </span>
                 <?php endif; ?>
                 <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addGradeModal">
@@ -2086,7 +1993,7 @@ $csrf_token  = csrf_token();
             </div>
         </div>
         <div class="card-body no-padding">
-            <?php if(!empty($academic_record)): ?>
+            <?php if(!empty($filtered_academic_record)): ?>
                 <?php
                 $termClass = [
                     '1st Term'     => 'term-1',
@@ -2094,7 +2001,7 @@ $csrf_token  = csrf_token();
                     '3rd Term'     => 'term-3',
                     'Unknown Term' => '',
                 ];
-                foreach($academic_record as $school_year => $grade_levels): ?>
+                foreach($filtered_academic_record as $school_year => $grade_levels): ?>
                 <div>
                     <div class="sy-header">
                         <h6><i class="bi bi-calendar-range"></i> School Year <?= htmlspecialchars($school_year) ?></h6>
@@ -2341,6 +2248,8 @@ $csrf_token  = csrf_token();
                 <div class="modal-body">
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <input type="hidden" name="student_id" value="<?= (int)$student_id ?>">
+                    <input type="hidden" name="enrollment_id" value="<?= (int)($enrollment['enrollment_id'] ?? 0) ?>">
+                    <input type="hidden" name="return_grade" value="<?= htmlspecialchars($active_grade) ?>">
 
                     <div class="grade-context">
                         <div class="grade-context-icon"><i class="bi bi-person-circle"></i></div>
@@ -2433,6 +2342,7 @@ $csrf_token  = csrf_token();
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <input type="hidden" name="grade_id" id="eg_id">
                     <input type="hidden" name="student_id" value="<?= (int)$student_id ?>">
+                    <input type="hidden" name="return_grade" value="<?= htmlspecialchars($active_grade) ?>">
 
                     <div class="grade-context">
                         <div class="grade-context-icon"><i class="bi bi-person-circle"></i></div>
@@ -2516,6 +2426,7 @@ $csrf_token  = csrf_token();
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <input type="hidden" name="grade_id" id="dg_id">
                     <input type="hidden" name="student_id" value="<?= (int)$student_id ?>">
+                    <input type="hidden" name="return_grade" value="<?= htmlspecialchars($active_grade) ?>">
                     <button name="delete_grade" class="btn btn-danger btn-sm">Delete</button>
                 </form>
             </div>
@@ -2603,7 +2514,6 @@ $csrf_token  = csrf_token();
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script>
-// ---------- Sidebar ----------
 const sb = document.getElementById('sidebar');
 const ov = document.getElementById('sidebarOverlay');
 document.getElementById('menuToggle').addEventListener('click', () => {
@@ -2611,7 +2521,6 @@ document.getElementById('menuToggle').addEventListener('click', () => {
     ov.style.display = sb.classList.contains('open') ? 'block' : 'none';
 });
 
-// ---------- Theme ----------
 const tb = document.getElementById('themeToggle');
 const ti = document.getElementById('themeIcon');
 const h  = document.documentElement;
@@ -2626,7 +2535,6 @@ function st(t) {
 })();
 tb.addEventListener('click', () => st(h.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark'));
 
-// ---------- Document modals ----------
 $('.upload-doc-btn').click(function () {
     $('#m_eid').val($(this).data('eid'));
     $('#m_dname').text($(this).data('name'));
@@ -2661,10 +2569,8 @@ $('#btnUpDoc').click(function () {
     });
 });
 
-// ---------- Grade modals ----------
 const PASSING_GRADE = 75;
 
-// Live-derive remarks AND drive the pass/fail visual state on the input wrapper.
 function autoRemarks(gradeEl, remarksId, wrapperId) {
     const el = document.getElementById(remarksId);
     const wrap = wrapperId ? document.getElementById(wrapperId) : null;
@@ -2693,7 +2599,6 @@ function autoRemarks(gradeEl, remarksId, wrapperId) {
     if (badge) badge.textContent = passed ? 'Passed' : 'Failed';
 }
 
-// Edit grade: prefill fields, select the matching term radio, recompute remarks.
 $('.edit-grd-btn').click(function () {
     var b = $(this);
     $('#eg_id').val(b.data('id'));
@@ -2702,18 +2607,14 @@ $('.edit-grd-btn').click(function () {
     $('#eg_grd').val(b.data('grd'));
     $('#eg_rem').val(b.data('rem'));
 
-    // Select the correct term in the segmented control.
     var term = b.data('term');
     $('#eg_terms input[type=radio]').each(function () {
         $(this).prop('checked', $(this).val() === term);
     });
 
-    // Re-derive from the grade itself — never trust the stored remark.
     autoRemarks(document.getElementById('eg_grd'), 'eg_rem', 'eg_grp');
 });
 
-// Add grade: when the modal opens, sync the visual state to whatever
-// is currently in the grade field.
 $('#addGradeModal').on('shown.bs.modal', function () {
     const g = document.getElementById('ag_grd');
     if (g) autoRemarks(g, 'ag_rem', 'ag_grp');
@@ -2726,7 +2627,6 @@ $('.del-grd-btn').click(function () {
     $('#deleteGradeModal').modal('show');
 });
 
-// ---------- Education modals ----------
 $('.edit-edu-btn').click(function () {
     var b = $(this);
     $('#ee_id').val(b.data('id'));
