@@ -4,18 +4,11 @@ declare(strict_types=1);
 /**
  * process_enroll.php — Finalize a public enrollment submission.
  *
- * FIXES:
- *   - CSRF failure no longer rotates the token (retries stay valid).
- *   - Every exception carries a [context:stage] tag for classification.
- *   - parents_info INSERT no longer references the non-existent
- *     `mother_name` column (schema only has `mother_maiden_name`).
- *   - entrance_documents checkbox INSERT now uses 3 placeholders so
- *     bind_params() receives a matching value count (was 2 placeholders
- *     vs 3 values → ArgumentCountError).
- *   - bind_params() guards against placeholder/value count mismatch
- *     with a clear error before mysqli throws an opaque one.
- *   - Success payload is stored as structured data (`success_data`)
- *     instead of a pre-rendered HTML string.
+ * FIXES APPLIED:
+ *   - CSRF token is NOT unset on success (fixes multi-tab submission failure).
+ *   - LRN uniqueness re-checked INSIDE the transaction (race-safe).
+ *   - `content_status` safely mapped/guarded against truncation errors.
+ *   - Staged files are only deleted AFTER a successful commit (allows retry).
  */
 
 require_once __DIR__ . '/../config/bootstrap.php';
@@ -47,12 +40,13 @@ if (!$rl['allowed']) {
 /* ── CSRF ─────────────────────────────────────────────────────── */
 if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'] ?? '', (string)$_POST['csrf_token'])) {
     error_log(sprintf(
-        '[process_enroll] CSRF mismatch ip=%s posted_set=%s posted_len=%d session_set=%s session_len=%d',
+        '[process_enroll] CSRF mismatch ip=%s posted_set=%s posted_len=%d session_set=%s session_len=%d cookie_set=%s',
         $_SERVER['REMOTE_ADDR'] ?? '?',
         isset($_POST['csrf_token']) ? 'y' : 'n',
         strlen((string)($_POST['csrf_token'] ?? '')),
         isset($_SESSION['csrf_token']) ? 'y' : 'n',
-        strlen((string)($_SESSION['csrf_token'] ?? ''))
+        strlen((string)($_SESSION['csrf_token'] ?? '')),
+        isset($_COOKIE[session_name()]) ? 'y' : 'n'
     ));
 
     if (!isset($_SESSION['form_data']) && !empty($_POST)) {
@@ -61,7 +55,13 @@ if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'] ?? '', 
         $_SESSION['form_data'] = $restore;
     }
 
-    security_log('process_enroll.csrf_fail', ['ip' => $_SERVER['REMOTE_ADDR'] ?? '']);
+    security_log('process_enroll.csrf_fail', [
+        'ip'          => $_SERVER['REMOTE_ADDR'] ?? '',
+        'has_cookie'  => isset($_COOKIE[session_name()]),
+        'posted_set'  => !empty($_POST['csrf_token']),
+        'session_set' => !empty($_SESSION['csrf_token']),
+        'same_host'   => ($_SERVER['HTTP_HOST'] ?? '') === ($_SERVER['SERVER_NAME'] ?? ''),
+    ]);
 
     $_SESSION['error'] = 'Your session expired. Please review and submit again.';
     header('Location: enroll_form.php?edit=1');
@@ -70,7 +70,6 @@ if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'] ?? '', 
 
 /**
  * Auto-detect types and bind params safely.
- * Guards against placeholder/value count mismatch with a clear error.
  */
 function bind_params(mysqli_stmt $stmt, array $values): void
 {
@@ -154,6 +153,14 @@ function classify_enrollment_error(string $msg, string $corr): array
 {
     $m = strtolower($msg);
 
+    if (str_contains($m, 'data truncated')) {
+        return [
+            'The enrollment form could not save because of a data format issue.',
+            'Please try again in a moment. If it keeps failing, contact the registrar with reference: ' . $corr,
+            5,
+        ];
+    }
+
     if (preg_match('/\[([a-z_]+):([a-z_]+)\]/i', $msg, $tag)) {
         $table = strtolower($tag[1]);
 
@@ -228,6 +235,10 @@ function classify_enrollment_error(string $msg, string $corr): array
     if (str_contains($m, 'student id') && str_contains($m, 'unique')) {
         return ['The system could not assign a unique Student ID.',
                 'Please try submitting again. If it keeps failing, contact the registrar with reference: ' . $corr, 1];
+    }
+    if (str_contains($m, 'lrn already exists') || str_contains($m, 'lrn registered')) {
+        return ['This LRN has already been registered.',
+                'If you believe this is an error, contact the registrar with reference: ' . $corr, 1];
     }
     if (str_contains($m, 'prepare failed') || str_contains($m, 'execute failed') || str_contains($m, 'column')) {
         return ['A system error occurred while saving your enrollment.',
@@ -352,7 +363,17 @@ function store_encrypted_file(
         $content = ['status'=>'skipped','score'=>0,'engine'=>null,'matched'=>[],'notes'=>['No content verification available.']];
     }
 
+    // Normalize to known set: verified / needs_review / failed / skipped
+    $allowed_content_status = ['verified', 'needs_review', 'failed', 'skipped'];
     $content_status = $content['status'] ?? 'skipped';
+    if (!in_array($content_status, $allowed_content_status, true)) {
+        error_log(sprintf(
+            'store_encrypted_file: unknown content status "%s" for "%s" — defaulting to needs_review',
+            $content_status,
+            $doc_label
+        ));
+        $content_status = 'needs_review';
+    }
 
     if ($content_status === 'failed') {
         error_log(sprintf(
@@ -360,12 +381,14 @@ function store_encrypted_file(
             $doc_label,
             (int)($content['score'] ?? 0)
         ));
-        $content['status'] = 'needs_review';
-        $content['notes']  = array_merge(
+        $content_status = 'needs_review';
+        $content['notes'] = array_merge(
             (array)($content['notes'] ?? []),
             ['Auto-flagged by system: content did not match expected keywords.']
         );
     }
+
+    $content['status'] = $content_status;
 
     $plain = file_get_contents($staging_path);
     if ($plain === false || $plain === '') {
@@ -394,7 +417,9 @@ function store_encrypted_file(
         throw new Exception('[file:write] Cannot write encrypted file to ' . $abs_path);
     }
     @chmod($abs_path, 0600);
-    @unlink($staging_path);
+
+    // NOTE: staged file is unlinked by the caller AFTER commit succeeds.
+    // This lets the student re-submit on failure without re-uploading.
 
     return [
         'filename' => $filename,
@@ -413,6 +438,7 @@ function store_encrypted_file(
    ══════════════════════════════════════════════════════════════════ */
 
 $written_files = [];
+$staged_paths_to_cleanup = [];
 
 // ── Server-side age recompute ──
 if (empty($_POST['birth_date'])) {
@@ -470,6 +496,20 @@ if (!$got_lock) {
 $conn->begin_transaction();
 
 try {
+    /* ── 0. LRN uniqueness re-check INSIDE the transaction ── */
+    $lrn_final = clean_string($_POST['lrn'] ?? '', 12);
+    if ($lrn_final !== '') {
+        $dup = $conn->prepare("SELECT student_id, first_name, last_name FROM students_info WHERE lrn = ? LIMIT 1");
+        if (!$dup) throw new Exception('[lrn:prepare] ' . $conn->error);
+        $dup->bind_param('s', $lrn_final);
+        $dup->execute();
+        $dup_row = $dup->get_result()->fetch_assoc();
+        $dup->close();
+        if ($dup_row) {
+            throw new Exception('[lrn:duplicate] LRN already exists.');
+        }
+    }
+
     /* ── 1. students_info ── */
     $stmt = $conn->prepare("INSERT INTO students_info 
         (lrn, first_name, last_name, middle_name, nick_name, ext_name, sex, birth_date, age, 
@@ -674,11 +714,7 @@ try {
     if (!$stmt->execute()) throw new Exception('[enrollment_form:execute] ' . $stmt->error);
     $stmt->close();
 
-    /* ── 7. entrance_documents — checkboxes without files ──
-       FIX: SQL now uses 3 placeholders so bind_params() gets a matching
-       value count. Previously the literal `0` in the SQL made mysqli
-       expect 2 placeholders while the call passed 3 values.
-    */
+    /* ── 7. entrance_documents — checkboxes without files ── */
     $uploaded_labels = [];
     if (!empty($_SESSION['uploaded_files']) && is_array($_SESSION['uploaded_files'])) {
         foreach ($_SESSION['uploaded_files'] as $f) {
@@ -748,6 +784,7 @@ try {
 
             $stored = store_encrypted_file($staging, $student_info_id, $label, $precomputed);
             $written_files[] = DOCUMENTS_DIR . $stored['filename'];
+            $staged_paths_to_cleanup[] = $staging;
 
             $safe_name = preg_replace('/[^A-Za-z0-9._\- ]/', '_', $name);
             if ($safe_name === '' || $safe_name === null) $safe_name = $stored['filename'];
@@ -791,6 +828,11 @@ try {
     $conn->commit();
     $conn->query("SELECT RELEASE_LOCK('enroll_global')");
 
+    /* ── Cleanup staged files AFTER commit succeeds ── */
+    foreach ($staged_paths_to_cleanup as $p) {
+        if (is_file($p)) @unlink($p);
+    }
+
     unset($_SESSION['__pending_count'], $_SESSION['__pending_count_at']);
 
     if (!empty($_SESSION['admin_id'])) {
@@ -805,8 +847,11 @@ try {
         ]);
     }
 
+    // NOTE: We do NOT unset csrf_token — other open tabs with a rendered
+    // form need the SAME token to submit successfully. Rotating it on the
+    // next form load via csrf_token() is fine; forcibly clearing it here
+    // breaks multi-tab workflows.
     unset(
-        $_SESSION['csrf_token'],
         $_SESSION['form_data'],
         $_SESSION['uploaded_files'],
         $_SESSION['enroll_error'],
@@ -815,9 +860,6 @@ try {
         $_SESSION['success_message']
     );
 
-    // ── SUCCESS PAYLOAD ──
-    // Structured data (not pre-rendered HTML) so enroll_form.php can
-    // build the enhanced "Expected — Pending Review" confirmation popup.
     $_SESSION['success'] = true;
     $_SESSION['success_data'] = [
         'student_id_number' => $student_id_number,
@@ -836,9 +878,13 @@ try {
     $conn->rollback();
     $conn->query("SELECT RELEASE_LOCK('enroll_global')");
 
+    // Clean up encrypted files written during this failed attempt
     foreach ($written_files as $abs) {
         if (file_exists($abs)) @unlink($abs);
     }
+
+    // Staged files remain on disk (not unlinked) — student can re-submit
+    // without re-uploading. purge_old_staging cleans them if abandoned.
 
     $corr    = bin2hex(random_bytes(4));
     $raw_msg = $e->getMessage();
@@ -846,7 +892,7 @@ try {
     error_log("Enrollment Error [{$corr}]: " . $raw_msg);
     error_log("Error Trace [{$corr}]: " . $e->getTraceAsString());
 
-    $log_dir = dirname(__DIR__, 2) . '/logs';
+    $log_dir = dirname(__DIR__) . '/logs';
     if (!is_dir($log_dir)) {
         @mkdir($log_dir, 0700, true);
     }

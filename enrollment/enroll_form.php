@@ -4,21 +4,24 @@ declare(strict_types=1);
 /**
  * enroll_form.php — Public student enrollment wizard.
  *
- * FIXES applied:
- *   - Name pattern accepts periods and Latin-1 accents (Ma., José, Sta.)
- *   - LRN is normalized before validation (strips hidden characters).
- *   - Wizard uses explicit checks (no reliance on native checkValidity()).
- *   - bfcache guard forces a fresh reload after POST → redirect.
- *   - Stale error / enroll_error cleared when arriving via ?edit=1 or ?review=1.
- *   - Enhanced confirmation popup reads $_SESSION['success_data'] and
- *     clearly marks the applicant as EXPECTED (not yet enrolled).
+ * FIXES APPLIED:
+ *   - secure_session_start() used instead of raw session_start() (fixes CSRF loss).
+ *   - Cache headers and 413 checks moved AFTER secure session start.
+ *   - Review mode strictly disables the submit button if JHS or 2x2 docs mismatch.
+ *   - JS interceptor added to disabled button to explain the mismatch.
  */
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_name('USAT_SESSID');
-    session_start();
-}
+/* ── 1. Load configs FIRST (no output yet) ── */
+require_once __DIR__ . '/../config/security.php';
+require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../config/paths.php';
+require_once __DIR__ . '/../config/file_verify.php';
+require_once __DIR__ . '/../config/document_content_verify.php';
 
+/* ── 2. Start session with proper cookie flags ── */
+secure_session_start();
+
+/* ── 3. Cache headers ── */
 if (!headers_sent()) {
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     header('Pragma: no-cache');
@@ -26,6 +29,7 @@ if (!headers_sent()) {
     header('Vary: Cookie');
 }
 
+/* ── 4. Reject oversized POST before any parsing ── */
 if ($_SERVER['REQUEST_METHOD'] === 'POST'
     && empty($_POST) && empty($_FILES)
     && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
@@ -35,14 +39,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'
                   . 'Please reduce the size of your uploaded files and try again.',
     ];
     header('Location: ' . basename(__FILE__));
-    exit;
+    exit();
 }
-
-include_once __DIR__ . '/../config/db.php';
-require_once __DIR__ . '/../config/paths.php';
-require_once __DIR__ . '/../config/security.php';
-require_once __DIR__ . '/../config/file_verify.php';
-require_once __DIR__ . '/../config/document_content_verify.php';
 
 send_public_security_headers();
 
@@ -751,7 +749,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         else {
             $age = (new DateTime())->diff($birth)->y;
             if ($age < 14 || $age > 25) $errors['birth_date'] = $t[$lang]['invalid_age'];
-            $_POST['age'] = $age;
+            $_POST['age'] = (string)$age;
         }
     }
 
@@ -895,7 +893,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_SESSION['form_data'] = $form_data;
         $_SESSION['uploaded_files'] = $uploaded_files;
         header('Location: ' . basename(__FILE__) . '?review=1');
-        exit;
+        exit();
     } else {
         if (isset($errors['name_duplicate'])) $_SESSION['name_dup_pending'] = true;
         $_SESSION['errors'] = $errors;
@@ -904,7 +902,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_SESSION['old'] = $old;
         $_SESSION['uploaded_files'] = $uploaded_files;
         header('Location: ' . basename(__FILE__));
-        exit;
+        exit();
     }
 }
 
@@ -1361,9 +1359,6 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
             *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
         }
 
-        /* ============================================================
-           ENHANCED ENROLLMENT CONFIRMATION POPUP
-           ============================================================ */
         .swal2-popup.swal-enroll-popup {
             border-radius: 24px !important;
             padding: 0 !important;
@@ -1774,7 +1769,7 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
             <input type="hidden" name="acknowledge_duplicate_name" id="acknowledgeDuplicateName" value="">
 
             <!-- ============ STEP 1 ============ -->
-            <div class="wizard-step-content active" data-step-content="1">
+            <div class="wizard-step-content<?= $initial_step === 1 ? ' active' : '' ?>" data-step-content="1">
                 <section class="section-card" aria-labelledby="sectionStudentHeading">
                     <div class="section-header"><i class="fas fa-user-graduate" aria-hidden="true"></i><h2 id="sectionStudentHeading"><?= htmlspecialchars($t[$lang]['student'], ENT_QUOTES, 'UTF-8') ?></h2></div>
                     <div class="row g-3">
@@ -1902,7 +1897,7 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
             </div>
 
             <!-- ============ STEP 2 ============ -->
-            <div class="wizard-step-content" data-step-content="2">
+            <div class="wizard-step-content<?= $initial_step === 2 ? ' active' : '' ?>" data-step-content="2">
                 <section class="section-card" aria-labelledby="sectionParentsHeading">
                     <div class="section-header"><i class="fas fa-users" aria-hidden="true"></i><h2 id="sectionParentsHeading"><?= htmlspecialchars($t[$lang]['parents'], ENT_QUOTES, 'UTF-8') ?></h2></div>
                     <div class="row g-3">
@@ -1976,7 +1971,7 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
             </div>
 
             <!-- ============ STEP 3 ============ -->
-            <div class="wizard-step-content" data-step-content="3">
+            <div class="wizard-step-content<?= $initial_step === 3 ? ' active' : '' ?>" data-step-content="3">
                 <section class="section-card" aria-labelledby="sectionAddressHeading">
                     <div class="section-header"><i class="fas fa-map-marker-alt" aria-hidden="true"></i><h2 id="sectionAddressHeading"><?= htmlspecialchars($t[$lang]['address'], ENT_QUOTES, 'UTF-8') ?></h2></div>
                     <div class="row g-3">
@@ -2019,7 +2014,7 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
             </div>
 
             <!-- ============ STEP 4 ============ -->
-            <div class="wizard-step-content" data-step-content="4">
+            <div class="wizard-step-content<?= $initial_step === 4 ? ' active' : '' ?>" data-step-content="4">
                 <section class="section-card" aria-labelledby="sectionEducationHeading">
                     <div class="section-header"><i class="fas fa-graduation-cap" aria-hidden="true"></i><h2 id="sectionEducationHeading"><?= htmlspecialchars($t[$lang]['education'], ENT_QUOTES, 'UTF-8') ?></h2></div>
                     <div id="edu-container">
@@ -2059,7 +2054,7 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
             </div>
 
             <!-- ============ STEP 5 ============ -->
-            <div class="wizard-step-content" data-step-content="5">
+            <div class="wizard-step-content<?= $initial_step === 5 ? ' active' : '' ?>" data-step-content="5">
                 <?php if (!empty($errors['document_mismatch']) && is_array($_SESSION['name_verify'] ?? null)): ?>
                     <?php
                         $nv       = $_SESSION['name_verify'];
@@ -2707,6 +2702,19 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
                 } else { alert('Documents must be verified before submitting.'); }
                 return false;
             }, true);
+
+            // Also intercept clicks on the disabled button
+            btn.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (typeof Swal !== 'undefined' && Swal.fire) {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Verification Failed',
+                        html: 'The uploaded documents do not match your information.<br><br>Please click <strong>Edit</strong> below and re-upload the correct files.',
+                        confirmButtonColor: '#dc3545'
+                    });
+                }
+            });
         })();
         </script>
     <?php endif; ?>
@@ -2971,14 +2979,11 @@ document.addEventListener('DOMContentLoaded', syncReligion);
         ss.value = cs;
         ss.dispatchEvent(new Event('change'));
         if (cp) {
-            const chk = () => {
-                if (ps.options.length > 1) {
-                    ps.value = cp;
-                    if (ps.value) ps.parentElement.classList.add('filled');
-                    if (typeof renderStrandRecommendation === 'function') renderStrandRecommendation();
-                } else setTimeout(chk, 10);
-            };
-            chk();
+            // Options are filled synchronously by the change handler above,
+            // so no polling is needed (the old loop could run forever).
+            ps.value = cp;
+            if (ps.value) ps.parentElement.classList.add('filled');
+            if (typeof renderStrandRecommendation === 'function') renderStrandRecommendation();
         }
     }
 })();
@@ -3483,15 +3488,10 @@ document.addEventListener('DOMContentLoaded',()=>{
     <?php endif; ?>
 })();
 
-/* ============================================================
-   SUCCESS / ERROR POPUPS
-   ============================================================ */
 document.addEventListener('DOMContentLoaded', function () {
-
     <?php if (isset($_SESSION['success']) && $_SESSION['success'] === true): ?>
         <?php
             $sd = $_SESSION['success_data'] ?? [];
-
             $sd_safe = [
                 'student_id_number' => (string)($sd['student_id_number'] ?? '—'),
                 'lrn'               => (string)($sd['lrn']               ?? '—'),
@@ -3501,9 +3501,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 'strand'            => (string)($sd['strand']            ?? '—'),
                 'email'             => (string)($sd['email']             ?? ''),
             ];
-
             $esc = static fn(string $v): string => htmlspecialchars($v, ENT_QUOTES, 'UTF-8');
-
             $popup_html =
                   '<div class="ec-hero">'
                 .   '<div class="ec-hero-icon"><i class="fas fa-file-circle-check"></i></div>'
@@ -3511,9 +3509,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 .   '<p class="ec-hero-subtitle">Your enrollment application is now in the review queue. A registrar will verify your information and uploaded documents.</p>'
                 .   '<div class="ec-status-badge"><span class="ec-status-dot"></span>Expected &mdash; Pending Review</div>'
                 . '</div>'
-
                 . '<div class="ec-body">'
-
                 .   '<div class="ec-section-title"><i class="fas fa-clipboard-list"></i>Application Summary</div>'
                 .   '<div class="ec-details"><div class="ec-details-grid">'
                 .     '<div class="ec-detail-item is-wide"><div class="ec-detail-label">Full Name</div><div class="ec-detail-value">' . $esc($sd_safe['full_name']) . '</div></div>'
@@ -3522,121 +3518,54 @@ document.addEventListener('DOMContentLoaded', function () {
                 .     '<div class="ec-detail-item"><div class="ec-detail-label">Grade Level</div><div class="ec-detail-value">' . $esc($sd_safe['grade_level']) . '</div></div>'
                 .     '<div class="ec-detail-item"><div class="ec-detail-label">School Year</div><div class="ec-detail-value">' . $esc($sd_safe['school_year']) . '</div></div>'
                 .     '<div class="ec-detail-item is-wide"><div class="ec-detail-label">Strand</div><div class="ec-detail-value">' . $esc($sd_safe['strand']) . '</div></div>'
-                .     ($sd_safe['email'] !== ''
-                            ? '<div class="ec-detail-item is-wide"><div class="ec-detail-label">Notification Email</div><div class="ec-detail-value">' . $esc($sd_safe['email']) . '</div></div>'
-                            : '')
+                .     ($sd_safe['email'] !== '' ? '<div class="ec-detail-item is-wide"><div class="ec-detail-label">Notification Email</div><div class="ec-detail-value">' . $esc($sd_safe['email']) . '</div></div>' : '')
                 .   '</div></div>'
-
                 .   '<div class="ec-section-title"><i class="fas fa-hourglass-half"></i>Enrollment Status</div>'
                 .   '<div class="ec-expected-panel">'
                 .     '<div class="ec-expected-icon"><i class="fas fa-triangle-exclamation"></i></div>'
                 .     '<div class="ec-expected-body">'
                 .       '<p class="ec-expected-title"><span class="expected-word">Expected</span>Not yet officially enrolled</p>'
-                .       '<p class="ec-expected-text">You are <strong>expected</strong> to be enrolled once a registrar approves this application. '
-                .         'Your record is <strong>pending review</strong> and will remain in the queue until the verification is completed. '
-                .         'Do not consider yourself enrolled until you receive a confirmation.</p>'
+                .       '<p class="ec-expected-text">You are <strong>expected</strong> to be enrolled once a registrar approves this application. Your record is <strong>pending review</strong> and will remain in the queue until the verification is completed. Do not consider yourself enrolled until you receive a confirmation.</p>'
                 .     '</div>'
                 .   '</div>'
-
                 .   '<div class="ec-section-title"><i class="fas fa-route"></i>What Happens Next</div>'
                 .   '<div class="ec-timeline-list">'
-
-                .     '<div class="ec-timeline-item is-done">'
-                .       '<div class="ec-timeline-icon"><i class="fas fa-check"></i></div>'
-                .       '<div class="ec-timeline-body">'
-                .         '<p class="ec-timeline-title">Application received</p>'
-                .         '<p class="ec-timeline-desc">Your form and uploaded documents were submitted successfully.</p>'
-                .       '</div>'
-                .     '</div>'
-
-                .     '<div class="ec-timeline-item is-active">'
-                .       '<div class="ec-timeline-icon"><i class="fas fa-clock"></i></div>'
-                .       '<div class="ec-timeline-body">'
-                .         '<p class="ec-timeline-title">Registrar review &mdash; in progress</p>'
-                .         '<p class="ec-timeline-desc">Our registrar is verifying your information and uploaded documents.</p>'
-                .       '</div>'
-                .     '</div>'
-
-                .     '<div class="ec-timeline-item">'
-                .       '<div class="ec-timeline-icon"><i class="fas fa-envelope"></i></div>'
-                .       '<div class="ec-timeline-body">'
-                .         '<p class="ec-timeline-title">Email notification</p>'
-                .         '<p class="ec-timeline-desc">'
-                .           ($sd_safe['email'] !== ''
-                                ? 'You&rsquo;ll be notified at <strong>' . $esc($sd_safe['email']) . '</strong> once a decision is made.'
-                                : 'You&rsquo;ll receive a confirmation once a decision is made.')
-                .         '</p>'
-                .       '</div>'
-                .     '</div>'
-
-                .     '<div class="ec-timeline-item">'
-                .       '<div class="ec-timeline-icon"><i class="fas fa-graduation-cap"></i></div>'
-                .       '<div class="ec-timeline-body">'
-                .         '<p class="ec-timeline-title">Officially enrolled</p>'
-                .         '<p class="ec-timeline-desc">After approval, you may log in to view your section and schedule.</p>'
-                .       '</div>'
-                .     '</div>'
-
+                .     '<div class="ec-timeline-item is-done"><div class="ec-timeline-icon"><i class="fas fa-check"></i></div><div class="ec-timeline-body"><p class="ec-timeline-title">Application received</p><p class="ec-timeline-desc">Your form and uploaded documents were submitted successfully.</p></div></div>'
+                .     '<div class="ec-timeline-item is-active"><div class="ec-timeline-icon"><i class="fas fa-clock"></i></div><div class="ec-timeline-body"><p class="ec-timeline-title">Registrar review &mdash; in progress</p><p class="ec-timeline-desc">Our registrar is verifying your information and uploaded documents.</p></div></div>'
+                .     '<div class="ec-timeline-item"><div class="ec-timeline-icon"><i class="fas fa-envelope"></i></div><div class="ec-timeline-body"><p class="ec-timeline-title">Email notification</p><p class="ec-timeline-desc">' . ($sd_safe['email'] !== '' ? 'You&rsquo;ll be notified at <strong>' . $esc($sd_safe['email']) . '</strong> once a decision is made.' : 'You&rsquo;ll receive a confirmation once a decision is made.') . '</p></div></div>'
+                .     '<div class="ec-timeline-item"><div class="ec-timeline-icon"><i class="fas fa-graduation-cap"></i></div><div class="ec-timeline-body"><p class="ec-timeline-title">Officially enrolled</p><p class="ec-timeline-desc">After approval, you may log in to view your section and schedule.</p></div></div>'
                 .   '</div>'
-
-                .   '<div class="ec-note">'
-                .     '<i class="fas fa-info-circle"></i>'
-                .     '<span>Keep your Student ID <strong>' . $esc($sd_safe['student_id_number']) . '</strong> for reference. '
-                .       'Your status will remain <strong>Expected &mdash; Pending Review</strong> until the registrar completes the verification.</span>'
-                .   '</div>'
-
+                .   '<div class="ec-note"><i class="fas fa-info-circle"></i><span>Keep your Student ID <strong>' . $esc($sd_safe['student_id_number']) . '</strong> for reference. Your status will remain <strong>Expected &mdash; Pending Review</strong> until the registrar completes the verification.</span></div>'
                 . '</div>';
         ?>
         Swal.fire({
             html: <?= json_encode($popup_html, $JSON_FLAGS) ?>,
-            width: 580,
-            padding: 0,
-            showConfirmButton: true,
+            width: 580, padding: 0, showConfirmButton: true,
             confirmButtonText: '<i class="fas fa-check"></i> Got it, thank you!',
-            allowOutsideClick: false,
-            allowEscapeKey: false,
-            showCloseButton: false,
-            customClass: {
-                popup:         'swal-enroll-popup',
-                confirmButton: 'swal-enroll-confirm'
-            },
+            allowOutsideClick: false, allowEscapeKey: false, showCloseButton: false,
+            customClass: { popup: 'swal-enroll-popup', confirmButton: 'swal-enroll-confirm' },
             buttonsStyling: false
-        }).then(function () {
-            window.location.href = 'enroll_form.php';
-        });
+        }).then(function () { window.location.href = 'enroll_form.php'; });
         <?php unset($_SESSION['success'], $_SESSION['success_data'], $_SESSION['success_message']); ?>
 
     <?php elseif (!empty($enroll_error)): ?>
         <?php
         $swal_html = '<div style="text-align:left;padding:.5rem 0">'
-            . '<p style="margin:0 0 .85rem;font-size:1rem;font-weight:600;color:#0f172a;line-height:1.45">'
-            . htmlspecialchars((string)$enroll_error['message'], ENT_QUOTES, 'UTF-8')
-            . '</p>'
-            . '<div style="background:#fef2f2;border-left:4px solid #dc3545;padding:.85rem 1rem;border-radius:8px;font-size:.9rem;color:#7f1d1d;line-height:1.55">'
-            . htmlspecialchars((string)$enroll_error['action'], ENT_QUOTES, 'UTF-8')
-            . '</div>'
-            . '<p style="margin:1rem 0 0;font-size:.7rem;color:#94a3b8;text-align:center;font-family:ui-monospace,monospace">'
-            . 'Reference: ' . htmlspecialchars((string)$enroll_error['ref'], ENT_QUOTES, 'UTF-8')
-            . '</p>'
+            . '<p style="margin:0 0 .85rem;font-size:1rem;font-weight:600;color:#0f172a;line-height:1.45">' . htmlspecialchars((string)$enroll_error['message'], ENT_QUOTES, 'UTF-8') . '</p>'
+            . '<div style="background:#fef2f2;border-left:4px solid #dc3545;padding:.85rem 1rem;border-radius:8px;font-size:.9rem;color:#7f1d1d;line-height:1.55">' . htmlspecialchars((string)$enroll_error['action'], ENT_QUOTES, 'UTF-8') . '</div>'
+            . '<p style="margin:1rem 0 0;font-size:.7rem;color:#94a3b8;text-align:center;font-family:ui-monospace,monospace">Reference: ' . htmlspecialchars((string)$enroll_error['ref'], ENT_QUOTES, 'UTF-8') . '</p>'
             . '</div>';
         ?>
         Swal.fire({
-            icon: 'error',
-            title: 'Enrollment could not be completed',
-            html: <?= json_encode($swal_html, $JSON_FLAGS) ?>,
-            confirmButtonColor: '#dc3545',
-            confirmButtonText: 'Fix and Retry',
-            allowOutsideClick: false,
-            width: 520
+            icon: 'error', title: 'Enrollment could not be completed', html: <?= json_encode($swal_html, $JSON_FLAGS) ?>,
+            confirmButtonColor: '#dc3545', confirmButtonText: 'Fix and Retry', allowOutsideClick: false, width: 520
         }).then(function () { setTimeout(ensurePageUnfrozen, 350); });
 
     <?php elseif (isset($_SESSION['error'])): ?>
         Swal.fire({
-            icon: 'error',
-            title: 'Enrollment Failed',
+            icon: 'error', title: 'Enrollment Failed',
             html: '<div style="text-align:left;padding:0.5rem 0"><p style="margin-bottom:0.75rem">We couldn\'t complete the enrollment.</p><div style="background:#fef2f2;border-left:4px solid #dc3545;padding:0.75rem 1rem;border-radius:8px;font-size:0.9rem;color:#991b1b">' + <?= json_encode($_SESSION['error'], $JSON_FLAGS) ?> + '</div></div>',
-            confirmButtonColor: '#dc3545',
-            confirmButtonText: 'Try Again'
+            confirmButtonColor: '#dc3545', confirmButtonText: 'Try Again'
         }).then(function () { setTimeout(ensurePageUnfrozen, 350); });
         <?php unset($_SESSION['error']); ?>
     <?php endif; ?>

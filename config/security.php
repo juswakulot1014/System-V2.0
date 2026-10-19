@@ -245,12 +245,10 @@ if (!function_exists('require_role')) {
     {
         // ── 1. Must be logged in ──
         if (!is_logged_in()) {
-            $script    = str_replace('\\', '/', (string)($_SERVER['SCRIPT_NAME'] ?? ''));
-            $login_url = (strpos($script, '/admin/') !== false)
-                ? 'admin_login.php'
-                : 'admin/admin_login.php';
-
             $_SESSION['__redirect_after_login'] = $_SERVER['REQUEST_URI'] ?? '';
+
+            $login_url = defined('LOGIN_URL') ? LOGIN_URL : '/admin/admin_login.php';
+
             header('Location: ' . $login_url);
             exit;
         }

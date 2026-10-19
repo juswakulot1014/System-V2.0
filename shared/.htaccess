@@ -1,0 +1,6 @@
+# shared/.htaccess
+# Deny direct web access to shared internals.
+# Even if the project is deployed with webroot at the app root,
+# this blocks /shared/auth/login_page.php and /shared/pages/*.php
+# from being hit directly.
+Require all denied
