@@ -1,50 +1,29 @@
 # ═════════════════════════════════════════════════════════════════
-# USAT Enrollment System — Apache hardening
-# Only .htaccess-safe directives. Nothing from <Directory>/<VirtualHost>.
+# USAT Enrollment System — Apache Configuration
 # ═════════════════════════════════════════════════════════════════
 
 # ── Turn off directory listing ──
 Options -Indexes
 
-# ── Block direct access to sensitive file extensions ──
-<FilesMatch "\.(log|env|ini|sql|md|bak|old|swp|json|lock|yml|yaml)$">
-    Require all denied
-</FilesMatch>
+# ── Set the default file to load ──
+DirectoryIndex index.php index.html
 
-# ── Block dotfiles (.git, .env, .htaccess itself) ──
+# ── Block direct access to sensitive directories ──
+RedirectMatch 404 ^/(config|logs|vendor|staging)(/.*)?$
+
+# ── Block dotfiles (.env, .git, etc.) ──
 <FilesMatch "^\.">
     Require all denied
 </FilesMatch>
 
-# ── Block direct access to config / logs / vendor / staging dirs ──
-RedirectMatch 404 ^/(config|logs|vendor|staging|uploads)(/.*)?$
+# ── Friendly Error Pages ──
+ErrorDocument 403 /enrollment_profiling/errors/403.php
+ErrorDocument 404 /enrollment_profiling/errors/404.php
 
-# ── Force HTTPS (enable once you have a valid certificate) ──
-# <IfModule mod_rewrite.c>
-#     RewriteEngine On
-#     RewriteCond %{HTTPS} off
-#     RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
-# </IfModule>
-
-# ── Global security headers (backup layer; PHP also sets these) ──
+# ── Global security headers ──
 <IfModule mod_headers.c>
     Header always set X-Content-Type-Options "nosniff"
     Header always set X-Frame-Options "DENY"
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
     Header always unset X-Powered-By
 </IfModule>
-
-# ── Disable PHP error display (log only) ──
-# NOTE: php_flag / php_value only work if PHP runs as an Apache module
-# (mod_php). On PHP-FPM / CGI, these will error. Comment them out if the
-# server uses FPM.
-# <IfModule mod_php7.c>
-#     php_flag expose_php off
-#     php_flag display_errors off
-#     php_flag log_errors on
-# </IfModule>
-# <IfModule mod_php8.c>
-#     php_flag expose_php off
-#     php_flag display_errors off
-#     php_flag log_errors on
-# </IfModule>

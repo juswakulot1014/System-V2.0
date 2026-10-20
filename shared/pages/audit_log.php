@@ -4,6 +4,17 @@ require_once __DIR__ . '/../../config/auth.php';
 
 $__nav_section = 'system';
 
+/* ═══════════════════════════════════════════════════════════
+   AUTO-CLEANUP: Delete logs older than 30 days
+   ═══════════════════════════════════════════════════════════ */
+if (mt_rand(1, 50) === 1) {
+    try {
+        $conn->query("DELETE FROM audit_log WHERE created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)");
+    } catch (Throwable $e) {
+        error_log("Audit log auto-cleanup failed: " . $e->getMessage());
+    }
+}
+
 $limit         = max(10, min(1000, (int)($_GET['limit'] ?? 100)));
 $action_filter = trim($_GET['action'] ?? '');
 $admin_filter  = (int)($_GET['admin_id'] ?? 0);
@@ -228,61 +239,6 @@ if (!empty($ids_by_type['enrollment'])) {
     $stmt->close();
 }
 
-/* sections (type: section) */
-if (!empty($ids_by_type['section'])) {
-    $ids = array_values(array_unique($ids_by_type['section']));
-    $ph  = implode(',', array_fill(0, count($ids), '?'));
-
-    $check = $conn->query("SHOW TABLES LIKE 'sections'");
-    if ($check && $check->num_rows > 0) {
-        $stmt = $conn->prepare("
-            SELECT section_id, section_name, strand, grade_level, school_year
-            FROM sections
-            WHERE section_id IN ($ph)
-        ");
-        if ($stmt) {
-            $stmt->bind_param(str_repeat('i', count($ids)), ...$ids);
-            $stmt->execute();
-            $res = $stmt->get_result();
-            while ($s = $res->fetch_assoc()) {
-                $lookup['section'][(int)$s['section_id']] = [
-                    'name'        => $s['section_name'] ?? 'Section',
-                    'strand'      => $s['strand'] ?? '',
-                    'grade_level' => $s['grade_level'] ?? '',
-                    'school_year' => $s['school_year'] ?? '',
-                ];
-            }
-            $stmt->close();
-        }
-    }
-}
-
-/* subjects (type: subject) */
-if (!empty($ids_by_type['subject'])) {
-    $check = $conn->query("SHOW TABLES LIKE 'subjects'");
-    if ($check && $check->num_rows > 0) {
-        $ids = array_values(array_unique($ids_by_type['subject']));
-        $ph  = implode(',', array_fill(0, count($ids), '?'));
-        $stmt = $conn->prepare("
-            SELECT subject_id, subject_code, subject_name
-            FROM subjects
-            WHERE subject_id IN ($ph)
-        ");
-        if ($stmt) {
-            $stmt->bind_param(str_repeat('i', count($ids)), ...$ids);
-            $stmt->execute();
-            $res = $stmt->get_result();
-            while ($s = $res->fetch_assoc()) {
-                $lookup['subject'][(int)$s['subject_id']] = [
-                    'code' => $s['subject_code'] ?? '',
-                    'name' => $s['subject_name'] ?? '',
-                ];
-            }
-            $stmt->close();
-        }
-    }
-}
-
 /* ═══ Filter dropdown data ═══ */
 $action_list = $conn->query("
     SELECT DISTINCT action FROM audit_log ORDER BY action ASC
@@ -295,6 +251,7 @@ $admin_list = $conn->query("
     ORDER BY adm.fullname ASC
 ")->fetch_all(MYSQLI_ASSOC) ?: [];
 
+/* ═══ Stats ═══ */
 $stats = $conn->query("
     SELECT
         COUNT(*) AS total,
@@ -302,7 +259,7 @@ $stats = $conn->query("
         SUM(CASE WHEN action LIKE '%.create' THEN 1 ELSE 0 END) AS creates,
         SUM(CASE WHEN action LIKE '%.update' THEN 1 ELSE 0 END) AS updates,
         SUM(CASE WHEN action LIKE '%.delete' THEN 1 ELSE 0 END) AS deletes,
-        COUNT(DISTINCT admin_id) AS unique_admins
+        COUNT(DISTINCT CASE WHEN admin_id > 0 THEN admin_id END) AS unique_admins
     FROM audit_log
     WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
 ")->fetch_assoc() ?: [];
@@ -339,7 +296,35 @@ if (!function_exists('action_icon')) {
 
 if (!function_exists('pretty_action')) {
     function pretty_action(string $action): string {
-        return str_replace(['.', '_'], [' · ', ' '], $action);
+        $map = [
+            'admin.login' => 'Admin Login',
+            'admin.logout' => 'Admin Logout',
+            'admin.login_failed' => 'Login Failed',
+            'student.enroll' => 'Student Enrolled',
+            'student.walk_in_enroll' => 'Walk-in Enrollment',
+            'student.update' => 'Student Updated',
+            'student.delete' => 'Student Deleted',
+            'student.promote' => 'Student Promoted',
+            'student.promote_all' => 'Bulk Promotion',
+            'student.status_change' => 'Status Changed',
+            'grade.create' => 'Grade Added',
+            'grade.update' => 'Grade Updated',
+            'grade.delete' => 'Grade Deleted',
+            'education.create' => 'Education Added',
+            'education.update' => 'Education Updated',
+            'education.delete' => 'Education Deleted',
+            'document.upload' => 'Document Uploaded',
+            'document.delete' => 'Document Deleted',
+            'password.self_change' => 'Password Changed',
+            'password.change' => 'Password Reset',
+            'password.change_denied' => 'Password Change Denied',
+            'enrollment.approve' => 'Enrollment Approved',
+            'enrollment.reject' => 'Enrollment Rejected',
+            'section.auto_assign' => 'Sections Auto-Assigned',
+            'export.csv' => 'CSV Exported',
+            'export.word' => 'Word Exported',
+        ];
+        return $map[$action] ?? ucwords(str_replace(['.', '_'], ' ', $action));
     }
 }
 
@@ -357,11 +342,11 @@ if (!function_exists('friendly_label')) {
     function friendly_label(string $key): string {
         static $map = [
             'page'          => 'Page',
-            'username'      => 'Username attempted',
+            'username'      => 'Username',
             'lrn'           => 'LRN',
             'student_id'    => 'Student ID',
             'student_id_no' => 'Student ID',
-            'student_name'  => 'Student',
+            'student_name'  => 'Student Name',
             'sy'            => 'School Year',
             'school_year'   => 'School Year',
             'grade'         => 'Grade',
@@ -369,30 +354,36 @@ if (!function_exists('friendly_label')) {
             'term'          => 'Term',
             'mode'          => 'Mode',
             'scope'         => 'Scope',
-            'students'      => 'Students exported',
+            'students'      => 'Students Count',
             'from_sy'       => 'From SY',
             'to_sy'         => 'To SY',
             'from'          => 'From',
             'to'            => 'To',
-            'affected'      => 'Affected rows',
-            'promoted'      => 'Promoted to Grade 12',
+            'affected'      => 'Affected Rows',
+            'promoted'      => 'Promoted to Gr 12',
             'graduated'     => 'Graduated',
-            'assigned'      => 'Assigned',
-            'sections'      => 'Sections created',
-            'filename'      => 'File',
+            'skipped'       => 'Skipped',
+            'assigned'      => 'Assigned Students',
+            'sections'      => 'Sections Created',
+            'filename'      => 'File Name',
             'level'         => 'Level',
             'school'        => 'School',
             'subject'       => 'Subject',
             'name'          => 'Name',
-            'fullname'      => 'Full name',
+            'fullname'      => 'Full Name',
             'role'          => 'Role',
-            'type_of'       => 'Promotion type',
-            'count'         => 'Selected',
+            'type_of'       => 'Promotion Type',
+            'count'         => 'Selected Count',
             'section'       => 'Section',
             'strand'        => 'Strand',
             'program'       => 'Program',
             'status'        => 'Status',
             'email'         => 'Email',
+            'reason'        => 'Reason',
+            'ip'            => 'IP Address',
+            'reason'        => 'Reason',
+            'logout_others' => 'Logout Others',
+            'email_sent'    => 'Email Sent',
         ];
         return $map[$key] ?? ucwords(str_replace('_', ' ', $key));
     }
@@ -587,23 +578,25 @@ if (!function_exists('render_audit_details')) {
             return '<span class="meta-empty">—</span>';
         }
 
+        // If it's a diff (update action)
         if (isset($meta['changes']) && is_array($meta['changes'])) {
-            $html = '<div class="meta-label">Changes:</div>';
+            $html = '<div class="meta-label" style="margin-bottom:.5rem;color:var(--text-3);">Changes Made:</div>';
             foreach ($meta['changes'] as $field => $diff) {
                 $from = friendly_value($diff['from'] ?? null);
                 $to   = friendly_value($diff['to']   ?? null);
                 $html .= '<div class="change-row">'
                       .    '<span class="key">' . htmlspecialchars(friendly_label((string)$field)) . ':</span>'
                       .    '<span class="from">' . htmlspecialchars($from) . '</span>'
-                      .    '<span class="arrow">→</span>'
+                      .    '<span class="arrow"><i class="bi bi-arrow-right"></i></span>'
                       .    '<span class="to">'   . htmlspecialchars($to)   . '</span>'
                       .  '</div>';
             }
             $rest = $meta;
             unset($rest['changes']);
             if (!empty($rest)) {
-                $html .= '<div class="kv-list" style="margin-top:.4rem">';
+                $html .= '<div class="kv-list" style="margin-top:.5rem">';
                 foreach ($rest as $k => $v) {
+                    if ($v === null || $v === '') continue;
                     $html .= '<div class="kv"><span class="kv-k">' . htmlspecialchars(friendly_label((string)$k)) . ':</span> '
                            .      '<span class="kv-v">' . htmlspecialchars(friendly_value($v)) . '</span></div>';
                 }
@@ -612,11 +605,17 @@ if (!function_exists('render_audit_details')) {
             return $html;
         }
 
+        // Standard details
         $html = '<div class="kv-list">';
         foreach ($meta as $k => $v) {
-            if ($k === 'page') continue;
+            if ($k === 'page' || $v === null || $v === '') continue;
+            
+            // Highlight specific important fields
+            $is_important = in_array($k, ['name', 'student_name', 'role', 'reason', 'status', 'filename']);
+            $val_class = $is_important ? 'kv-v highlight' : 'kv-v';
+            
             $html .= '<div class="kv"><span class="kv-k">' . htmlspecialchars(friendly_label((string)$k)) . ':</span> '
-                   .      '<span class="kv-v">' . htmlspecialchars(friendly_value($v)) . '</span></div>';
+                   .      '<span class="' . $val_class . '">' . htmlspecialchars(friendly_value($v)) . '</span></div>';
         }
         $html .= '</div>';
 
@@ -631,7 +630,7 @@ $page_css = <<<'CSS'
 
     .table-scroll{max-height:70vh}
 
-    .action-badge{display:inline-flex;align-items:center;gap:.35rem;padding:.3rem .7rem;border-radius:999px;font-size:.72rem;font-weight:700;font-family:ui-monospace,'SF Mono',monospace;white-space:nowrap;border:1px solid transparent}
+    .action-badge{display:inline-flex;align-items:center;gap:.35rem;padding:.3rem .7rem;border-radius:999px;font-size:.72rem;font-weight:700;white-space:nowrap;border:1px solid transparent}
     .action-badge i{font-size:.75rem}
     .action-badge.danger   {background:var(--red-soft);color:var(--red);border-color:color-mix(in srgb, var(--red) 22%, transparent)}
     .action-badge.success  {background:var(--green-soft);color:var(--green);border-color:color-mix(in srgb, var(--green) 22%, transparent)}
@@ -658,19 +657,19 @@ $page_css = <<<'CSS'
     .meta-empty{color:var(--text-2);font-style:italic;font-size:.78rem}
     .meta-label{font-size:.66rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:.35rem}
 
-    .kv-list{display:flex;flex-direction:column;gap:.2rem}
+    .kv-list{display:flex;flex-direction:column;gap:.25rem}
     .kv{display:flex;gap:.4rem;align-items:baseline;font-size:.78rem;line-height:1.4}
-    .kv-k{color:var(--text-2);font-weight:500;flex-shrink:0}
-    .kv-v{color:var(--text);font-weight:600;word-break:break-word;font-family:ui-monospace,'SF Mono',monospace;font-size:.74rem;background:var(--surface-2);padding:.05rem .35rem;border-radius:5px;border:1px solid var(--border)}
+    .kv-k{color:var(--text-2);font-weight:500;flex-shrink:0;min-width:100px}
+    .kv-v{color:var(--text);font-weight:600;word-break:break-word;font-size:.76rem;background:var(--surface-2);padding:.1rem .4rem;border-radius:6px;border:1px solid var(--border)}
+    .kv-v.highlight { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); background: var(--accent-soft); }
 
-    .change-row{display:flex;gap:.4rem;align-items:baseline;font-size:.78rem;padding:.2rem 0;border-bottom:1px dashed var(--border);line-height:1.4}
+    .change-row{display:flex;gap:.5rem;align-items:baseline;font-size:.78rem;padding:.3rem 0;border-bottom:1px dashed var(--border);line-height:1.4}
     .change-row:last-child{border-bottom:none}
-    .change-row .key{font-weight:600;color:var(--text-2);flex-shrink:0}
-    .change-row .from{color:var(--red);text-decoration:line-through;opacity:.75;font-family:ui-monospace,monospace;font-size:.74rem}
-    .change-row .to{color:var(--green);font-weight:600;font-family:ui-monospace,monospace;font-size:.74rem}
-    .change-row .arrow{color:var(--text-3)}
+    .change-row .key{font-weight:600;color:var(--text-2);flex-shrink:0;min-width:90px;}
+    .change-row .from{color:var(--red);text-decoration:line-through;opacity:.75;font-size:.74rem; background:var(--red-soft); padding:.1rem .3rem; border-radius:4px;}
+    .change-row .to{color:var(--green);font-weight:600;font-size:.74rem; background:var(--green-soft); padding:.1rem .3rem; border-radius:4px;}
+    .change-row .arrow{color:var(--text-3); font-size:.7rem;}
 
-    .ip{font-family:ui-monospace,'SF Mono',monospace;font-size:.75rem;color:var(--text-2)}
     .time-cell{white-space:nowrap}
     .time-cell .d{font-size:.78rem;font-weight:600;color:var(--text)}
     .time-cell .t{font-size:.72rem;color:var(--text-2);font-variant-numeric:tabular-nums}
@@ -779,7 +778,7 @@ require __DIR__ . '/../partials/sidebar.php';
                         <option value="">All actions</option>
                         <?php foreach ($action_list as $a): ?>
                             <option value="<?= htmlspecialchars($a['action']) ?>" <?= $action_filter === $a['action'] ? 'selected' : '' ?>>
-                                <?= htmlspecialchars($a['action']) ?>
+                                <?= htmlspecialchars(pretty_action($a['action'])) ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
@@ -830,9 +829,8 @@ require __DIR__ . '/../partials/sidebar.php';
                         <tr>
                             <th style="width:130px">When</th>
                             <th style="width:200px">Admin</th>
-                            <th style="width:210px">Action</th>
-                            <th style="width:250px">Target</th>
-                            <th style="width:120px">IP</th>
+                            <th style="width:200px">Action</th>
+                            <th style="width:260px">Target</th>
                             <th>Details</th>
                         </tr>
                     </thead>
@@ -856,7 +854,7 @@ require __DIR__ . '/../partials/sidebar.php';
                                 <div class="admin-cell">
                                     <div class="admin-avatar"><?= htmlspecialchars($initials) ?></div>
                                     <div class="admin-info">
-                                        <div class="nm"><?= htmlspecialchars($r['admin_name'] ?? '(anonymous)') ?></div>
+                                        <div class="nm"><?= htmlspecialchars($r['admin_name'] ?? 'System / Public') ?></div>
                                         <?php if (!empty($r['admin_username'])): ?>
                                             <div class="un">@<?= htmlspecialchars($r['admin_username']) ?></div>
                                         <?php endif; ?>
@@ -870,7 +868,6 @@ require __DIR__ . '/../partials/sidebar.php';
                                 </span>
                             </td>
                             <td><?= render_target($r, $lookup) ?></td>
-                            <td class="ip"><?= htmlspecialchars($r['ip_address'] ?? '—') ?></td>
                             <td class="meta-cell"><?= render_audit_details($r['action'], $meta) ?></td>
                         </tr>
                     <?php endforeach; ?>

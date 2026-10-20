@@ -7,8 +7,8 @@ require_once __DIR__ . '/../../config/security.php';
 
 $__nav_section = 'students';
 
-/* ── Role gate (defensive; auth.php already enforces via require_role) ── */
-if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true)) {
+/* ── Role gate (Allows teacher) ── */
+if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin', 'teacher'], true)) {
     http_response_code(403);
     security_log('view_student.forbidden', [
         'admin_id' => (int)($_SESSION['admin_id'] ?? 0),
@@ -16,6 +16,8 @@ if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true))
     ]);
     exit('Forbidden');
 }
+
+$is_teacher = ($_SESSION['admin_role'] ?? '') === 'teacher';
 
 /* ═══════════════════════════════════════════════════════════
    REQUIRED DOCUMENTS CONFIG
@@ -84,8 +86,8 @@ if (!function_exists('derive_remarks')) {
 }
 
 if (!function_exists('store_encrypted_document')) {
-    function store_encrypted_document(string $tmp_path, int $student_id, int $entrance_id): array {
-        $info = validate_upload($tmp_path, 'document', [
+    function store_encrypted_document(string $tmp_path, string $orig_name, int $student_id, int $entrance_id): array {
+        $info = validate_upload($tmp_path, $orig_name, [
             'max_bytes'   => 5 * 1024 * 1024,
             'allowed'     => ['application/pdf', 'image/jpeg', 'image/png'],
             'image_min_w' => 150,
@@ -98,7 +100,9 @@ if (!function_exists('store_encrypted_document')) {
         $blob  = doc_encrypt($plain);
         $token = bin2hex(random_bytes(16));
         $stored_name = "doc_{$student_id}_{$entrance_id}_{$token}.{$info['ext']}.enc";
-        $abs = DOCUMENTS_DIR . $stored_name;
+        
+        // FIXED: Safe directory separator
+        $abs = rtrim(DOCUMENTS_DIR, '/\\') . DIRECTORY_SEPARATOR . $stored_name;
 
         if (file_put_contents($abs, $blob, LOCK_EX) === false) {
             throw new Exception('Storage write failed.');
@@ -183,6 +187,7 @@ if ($export_word) {
    POST HANDLER — Upload document (encrypted)
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_document'])) {
+    if ($is_teacher) { $_SESSION['error'] = 'Teachers cannot upload documents.'; header("Location: " . URL_PREFIX . "/view_student.php?id=" . (int)$_POST['student_id']); exit(); }
     verify_csrf();
 
     $eid = (int)($_POST['entrance_id'] ?? 0);
@@ -211,7 +216,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_document'])) {
     }
 
     try {
-        $stored = store_encrypted_document($f['tmp_name'], $sid, $eid);
+        $stored = store_encrypted_document($f['tmp_name'], $f['name'], $sid, $eid);
 
         if (!empty($doc['file_path'])) {
             try {
@@ -260,6 +265,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_document'])) {
    POST HANDLER — Delete document
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_document'])) {
+    if ($is_teacher) { $_SESSION['error'] = 'Teachers cannot delete documents.'; header("Location: " . URL_PREFIX . "/view_student.php?id=" . (int)$_POST['student_id']); exit(); }
     verify_csrf();
 
     $eid = (int)($_POST['entrance_id'] ?? 0);
@@ -307,6 +313,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_document'])) {
    POST HANDLER — Upload student photo
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_photo'])) {
+    if ($is_teacher) { $_SESSION['error'] = 'Teachers cannot upload photos.'; header("Location: " . URL_PREFIX . "/view_student.php?id=" . (int)$_POST['student_id']); exit(); }
     verify_csrf();
 
     $sid = (int)$_POST['student_id'];
@@ -380,6 +387,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_photo'])) {
    POST HANDLER — Delete student photo
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_photo'])) {
+    if ($is_teacher) { $_SESSION['error'] = 'Teachers cannot delete photos.'; header("Location: " . URL_PREFIX . "/view_student.php?id=" . (int)$_POST['student_id']); exit(); }
     verify_csrf();
 
     $sid = (int)($_POST['student_id'] ?? 0);
@@ -433,6 +441,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_photo'])) {
    POST HANDLER — Delete student (with file cleanup)
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_student'])) {
+    if ($is_teacher) { $_SESSION['error'] = 'Teachers cannot delete students.'; header("Location: " . URL_PREFIX . "/view_student.php?id=" . (int)$_POST['student_id']); exit(); }
     verify_csrf();
 
     $sid = (int)$_POST['student_id'];
@@ -507,187 +516,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_student'])) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   POST HANDLER — Add grade
-   ═══════════════════════════════════════════════════════════ */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_grade'])) {
-    verify_csrf();
-
-    $sid  = (int)$_POST['student_id'];
-    $term = trim($_POST['term'] ?? '');
-    $sc   = trim($_POST['subject_code'] ?? '');
-    $sn   = trim($_POST['subject_name'] ?? '');
-    $gr   = ($_POST['grade'] ?? '') !== '' ? (float)$_POST['grade'] : null;
-    $rem  = trim($_POST['remarks'] ?? '');
-
-    if ($gr !== null) $rem = derive_remarks($gr);
-
-    if (!in_array($term, getTerms(), true)) {
-        $_SESSION['error'] = 'Invalid term selected.';
-        header("Location: " . URL_PREFIX . "/view_student.php?id=$sid"); exit();
-    }
-
-    $enrollment_id_post = (int)($_POST['enrollment_id'] ?? 0);
-
-    if ($enrollment_id_post > 0) {
-        $es = $conn->prepare("
-            SELECT enrollment_id, grade_level, school_year
-            FROM enrollment_form
-            WHERE enrollment_id = ? AND student_id = ?
-            LIMIT 1
-        ");
-        $es->bind_param("ii", $enrollment_id_post, $sid);
-    } else {
-        $es = $conn->prepare("
-            SELECT enrollment_id, grade_level, school_year
-            FROM enrollment_form
-            WHERE student_id = ?
-            ORDER BY enrollment_id DESC
-            LIMIT 1
-        ");
-        $es->bind_param("i", $sid);
-    }
-    $es->execute();
-    $er = $es->get_result()->fetch_assoc();
-    $es->close();
-
-    if (!$er) {
-        $_SESSION['error'] = 'No enrollment record — enroll the student first.';
-        header("Location: " . URL_PREFIX . "/view_student.php?id=$sid"); exit();
-    }
-
-    if ($term === '' || $sc === '' || $sn === '') {
-        $_SESSION['error'] = 'Fill required fields.';
-    } else {
-        $s = $conn->prepare("INSERT INTO student_grades
-            (student_id, enrollment_id, term, grade_level, school_year, subject_code, subject_name, grade, remarks)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        $s->bind_param("iisssssds",
-            $sid, $er['enrollment_id'], $term,
-            $er['grade_level'], $er['school_year'],
-            $sc, $sn, $gr, $rem);
-
-        if ($s->execute()) {
-            audit_log($conn, 'grade.create', [
-                'type'       => 'grade',
-                'id'         => $conn->insert_id,
-                'student_id' => $sid,
-                'term'       => $term,
-                'subject'    => $sc,
-                'grade'      => $gr,
-            ]);
-            $_SESSION['success'] = 'Grade added.';
-        } else {
-            $_SESSION['error'] = 'Failed to add grade.';
-        }
-        $s->close();
-    }
-
-    $return_grade = trim((string)($_POST['return_grade'] ?? ''));
-    $url = URL_PREFIX . "/view_student.php?id=$sid";
-    if (in_array($return_grade, ['Grade 11', 'Grade 12'], true)) {
-        $url .= "&grade=" . urlencode($return_grade);
-    }
-    header("Location: $url"); exit();
-}
-
-/* ═══════════════════════════════════════════════════════════
-   POST HANDLER — Edit grade
-   ═══════════════════════════════════════════════════════════ */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_grade'])) {
-    verify_csrf();
-
-    $gid  = (int)$_POST['grade_id'];
-    $sid  = (int)$_POST['student_id'];
-    $term = trim($_POST['term'] ?? '');
-    $sc   = trim($_POST['subject_code'] ?? '');
-    $sn   = trim($_POST['subject_name'] ?? '');
-    $gr   = ($_POST['grade'] ?? '') !== '' ? (float)$_POST['grade'] : null;
-    $rem  = trim($_POST['remarks'] ?? '');
-
-    if ($gr !== null) $rem = derive_remarks($gr);
-
-    if (!in_array($term, getTerms(), true)) {
-        $_SESSION['error'] = 'Invalid term selected.';
-        header("Location: " . URL_PREFIX . "/view_student.php?id=$sid"); exit();
-    }
-
-    $old_stmt = $conn->prepare("SELECT term, subject_code, subject_name, grade, remarks
-                                FROM student_grades WHERE grade_id = ? AND student_id = ?");
-    $old_stmt->bind_param("ii", $gid, $sid);
-    $old_stmt->execute();
-    $old_grade = $old_stmt->get_result()->fetch_assoc() ?: [];
-    $old_stmt->close();
-
-    $s = $conn->prepare("UPDATE student_grades SET term=?, subject_code=?, subject_name=?, grade=?, remarks=? WHERE grade_id=? AND student_id=?");
-    $s->bind_param("sssdsii", $term, $sc, $sn, $gr, $rem, $gid, $sid);
-
-    if ($s->execute()) {
-        audit_diff($conn, 'grade.update', $old_grade, [
-            'term'         => $term,
-            'subject_code' => $sc,
-            'subject_name' => $sn,
-            'grade'        => $gr,
-            'remarks'      => $rem,
-        ], 'grade', $gid);
-        $_SESSION['success'] = 'Grade updated.';
-    } else {
-        $_SESSION['error'] = 'Failed to update.';
-    }
-    $s->close();
-
-    $return_grade = trim((string)($_POST['return_grade'] ?? ''));
-    $url = URL_PREFIX . "/view_student.php?id=$sid";
-    if (in_array($return_grade, ['Grade 11', 'Grade 12'], true)) {
-        $url .= "&grade=" . urlencode($return_grade);
-    }
-    header("Location: $url"); exit();
-}
-
-/* ═══════════════════════════════════════════════════════════
-   POST HANDLER — Delete grade
-   ═══════════════════════════════════════════════════════════ */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_grade'])) {
-    verify_csrf();
-
-    $gid = (int)$_POST['grade_id'];
-    $sid = (int)$_POST['student_id'];
-
-    $lookup = $conn->prepare("SELECT subject_code, subject_name, grade FROM student_grades WHERE grade_id = ? AND student_id = ?");
-    $lookup->bind_param("ii", $gid, $sid);
-    $lookup->execute();
-    $deleted = $lookup->get_result()->fetch_assoc() ?: [];
-    $lookup->close();
-
-    $s = $conn->prepare("DELETE FROM student_grades WHERE grade_id = ? AND student_id = ?");
-    $s->bind_param("ii", $gid, $sid);
-
-    if ($s->execute()) {
-        audit_log($conn, 'grade.delete', [
-            'type'       => 'grade',
-            'id'         => $gid,
-            'student_id' => $sid,
-            'subject'    => $deleted['subject_code'] ?? null,
-            'name'       => $deleted['subject_name'] ?? null,
-            'grade'      => $deleted['grade'] ?? null,
-        ]);
-        $_SESSION['success'] = 'Grade deleted.';
-    } else {
-        $_SESSION['error'] = 'Failed to delete.';
-    }
-    $s->close();
-
-    $return_grade = trim((string)($_POST['return_grade'] ?? ''));
-    $url = URL_PREFIX . "/view_student.php?id=$sid";
-    if (in_array($return_grade, ['Grade 11', 'Grade 12'], true)) {
-        $url .= "&grade=" . urlencode($return_grade);
-    }
-    header("Location: $url"); exit();
-}
-
-/* ═══════════════════════════════════════════════════════════
    POST HANDLER — Add education
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_education'])) {
+    if ($is_teacher) { $_SESSION['error'] = 'Teachers cannot add education.'; header("Location: " . URL_PREFIX . "/view_student.php?id=" . (int)$_POST['student_id']); exit(); }
     verify_csrf();
 
     $sid  = (int)$_POST['student_id'];
@@ -705,7 +537,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_education'])) {
         if ($s->execute()) {
             audit_log($conn, 'education.create', [
                 'type'       => 'education',
-                'id'         => $conn->insert_id,
+                'id'         => $s->insert_id,
                 'student_id' => $sid,
                 'level'      => $lvl,
                 'school'     => $schn,
@@ -723,6 +555,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_education'])) {
    POST HANDLER — Edit education
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_education'])) {
+    if ($is_teacher) { $_SESSION['error'] = 'Teachers cannot edit education.'; header("Location: " . URL_PREFIX . "/view_student.php?id=" . (int)$_POST['student_id']); exit(); }
     verify_csrf();
 
     $eid  = (int)$_POST['edu_id'];
@@ -761,6 +594,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_education'])) {
    POST HANDLER — Delete education
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_education'])) {
+    if ($is_teacher) { $_SESSION['error'] = 'Teachers cannot delete education.'; header("Location: " . URL_PREFIX . "/view_student.php?id=" . (int)$_POST['student_id']); exit(); }
     verify_csrf();
 
     $eid = (int)$_POST['edu_id'];
@@ -1225,30 +1059,6 @@ $page_css = <<<'CSS'
     .modal-subtitle{font-size:.75rem;color:var(--text-2);font-weight:500;margin-top:.15rem}
     .form-label .req{color:var(--red);font-weight:700;margin-left:.1rem}
 
-    .grade-context{display:flex;align-items:center;gap:.75rem;padding:.65rem .85rem;background:var(--accent-soft);border:1px solid color-mix(in srgb, var(--accent) 18%, transparent);border-radius:var(--radius);margin-bottom:1rem}
-    .grade-context-icon{width:38px;height:38px;border-radius:50%;background:var(--surface);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:1.15rem;flex-shrink:0}
-    .grade-context-body{min-width:0;flex:1}
-    .grade-context-name{font-weight:700;font-size:.88rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .grade-context-meta{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;font-size:.72rem;color:var(--text-2);font-weight:500;margin-top:.15rem}
-    .grade-context-meta i{color:var(--accent);font-size:.75rem;margin-right:.2rem}
-    .grade-context-meta .dot{width:3px;height:3px;border-radius:50%;background:var(--text-3);opacity:.6}
-
-    .term-segments{display:grid;grid-template-columns:repeat(3,1fr);gap:.3rem;background:var(--surface-2);padding:.3rem;border-radius:11px;border:1px solid var(--border)}
-    .term-segments input[type=radio]{position:absolute;opacity:0;pointer-events:none}
-    .term-segments label{display:flex;align-items:center;justify-content:center;padding:.5rem .25rem;font-size:.78rem;font-weight:600;color:var(--text-2);border-radius:8px;cursor:pointer;transition:background .15s, color .15s, box-shadow .15s;user-select:none;text-align:center;margin:0}
-    .term-segments label:hover{color:var(--text);background:color-mix(in srgb, var(--accent) 8%, transparent)}
-    .term-segments input[type=radio]:checked + label{background:var(--accent);color:#fff;box-shadow:0 2px 8px -2px rgba(79,70,229,.5)}
-    .term-segments input[type=radio]:focus-visible + label{outline:2px solid var(--accent);outline-offset:2px}
-
-    .grade-input-wrap{position:relative}
-    .grade-input-wrap .form-control{padding-right:78px;font-size:1.02rem;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.01em;transition:border-color .15s, box-shadow .15s}
-    .grade-input-wrap .grade-badge{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:.68rem;font-weight:700;padding:.2rem .55rem;border-radius:999px;pointer-events:none;display:none;text-transform:uppercase;letter-spacing:.4px}
-    .grade-input-wrap.has-value .grade-badge{display:inline-block}
-    .grade-input-wrap.is-pass .form-control{border-color:var(--green);box-shadow:0 0 0 3px color-mix(in srgb, var(--green) 16%, transparent)}
-    .grade-input-wrap.is-pass .grade-badge{background:var(--green-soft);color:var(--green)}
-    .grade-input-wrap.is-fail .form-control{border-color:var(--red);box-shadow:0 0 0 3px color-mix(in srgb, var(--red) 16%, transparent)}
-    .grade-input-wrap.is-fail .grade-badge{background:var(--red-soft);color:var(--red)}
-
     @media (max-width:1024px){
         .hero{flex-direction:column;text-align:center;padding:1.5rem 1rem}
         .hero-badges{justify-content:center}
@@ -1322,12 +1132,19 @@ require __DIR__ . '/../partials/sidebar.php';
                 </a>
             <?php endif; ?>
 
-            <a href="<?= URL_PREFIX ?>/sf10.php?id=<?= (int)$student_id ?>" class="btn btn-outline-primary btn-sm" target="_blank">
-                <i class="bi bi-file-earmark-text me-1"></i> SF10
+            <a href="<?= URL_PREFIX ?>/add_grades.php?student_id=<?= (int)$student_id ?>&grade=<?= urlencode($active_grade) ?>" class="btn btn-primary btn-sm">
+                <i class="bi bi-journal-plus me-1"></i> Add / Edit Grades
             </a>
-            <a href="<?= URL_PREFIX ?>/export_students.php?student_id=<?= (int)$student_id ?>" class="btn btn-outline-success btn-sm">
-                <i class="bi bi-download me-1"></i> Export
-            </a>
+
+            <?php if (!$is_teacher): ?>
+                <a href="<?= URL_PREFIX ?>/sf10.php?id=<?= (int)$student_id ?>" class="btn btn-outline-primary btn-sm" target="_blank">
+                    <i class="bi bi-file-earmark-text me-1"></i> SF10
+                </a>
+                <a href="<?= URL_PREFIX ?>/export_students.php?student_id=<?= (int)$student_id ?>" class="btn btn-outline-success btn-sm">
+                    <i class="bi bi-download me-1"></i> Export
+                </a>
+            <?php endif; ?>
+
             <button class="btn btn-outline-secondary btn-sm" onclick="window.print()">
                 <i class="bi bi-printer me-1"></i> Print
             </button>
@@ -1343,15 +1160,19 @@ require __DIR__ . '/../partials/sidebar.php';
             <div class="hero-avatar">
                 <?php if($photo): ?>
                     <img src="<?= htmlspecialchars($photo, ENT_QUOTES, 'UTF-8') ?>" alt="Photo">
-                    <button class="trash-btn" data-bs-toggle="modal" data-bs-target="#deletePhotoModal" title="Remove photo">
-                        <i class="bi bi-trash3-fill" style="font-size:.72rem"></i>
-                    </button>
+                    <?php if (!$is_teacher): ?>
+                        <button class="trash-btn" data-bs-toggle="modal" data-bs-target="#deletePhotoModal" title="Remove photo">
+                            <i class="bi bi-trash3-fill" style="font-size:.72rem"></i>
+                        </button>
+                    <?php endif; ?>
                 <?php else: ?>
                     <div class="avatar-fallback"><?= htmlspecialchars($initials) ?></div>
                 <?php endif; ?>
-                <button class="camera-btn" data-bs-toggle="modal" data-bs-target="#uploadPhotoModal" title="Change photo">
-                    <i class="bi bi-camera-fill" style="font-size:.75rem"></i>
-                </button>
+                <?php if (!$is_teacher): ?>
+                    <button class="camera-btn" data-bs-toggle="modal" data-bs-target="#uploadPhotoModal" title="Change photo">
+                        <i class="bi bi-camera-fill" style="font-size:.75rem"></i>
+                    </button>
+                <?php endif; ?>
             </div>
             <div class="hero-info">
                 <h1><?= $fullName ?></h1>
@@ -1374,14 +1195,17 @@ require __DIR__ . '/../partials/sidebar.php';
                         <?= htmlspecialchars($enrollment['status'] ?? 'Active') ?>
                     </span>
                 </div>
+                
+                <?php if (!$is_teacher): ?>
                 <div class="btn-group-actions">
                     <a href="<?= URL_PREFIX ?>/edit_student.php?id=<?= (int)$student_id ?>" class="btn btn-outline-primary btn-sm">
-                        <i class="bi bi-pencil-square me-1"></i> Edit
+                        <i class="bi bi-pencil-square me-1"></i> Edit Student Info
                     </a>
                     <button class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteStudentModal">
-                        <i class="bi bi-trash3 me-1"></i> Delete
+                        <i class="bi bi-trash3 me-1"></i> Delete Student
                     </button>
                 </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -1671,19 +1495,23 @@ require __DIR__ . '/../partials/sidebar.php';
                                                class="btn btn-icon btn-outline-secondary" title="Download">
                                                 <i class="bi bi-download"></i>
                                             </a>
-                                            <button class="btn btn-icon btn-outline-danger delete-doc-btn"
-                                                    data-eid="<?= (int)$d['entrance_id'] ?>"
-                                                    data-name="<?= htmlspecialchars($d['document_name']) ?>"
-                                                    title="Delete">
-                                                <i class="bi bi-trash3"></i>
-                                            </button>
+                                            <?php if (!$is_teacher): ?>
+                                                <button class="btn btn-icon btn-outline-danger delete-doc-btn"
+                                                        data-eid="<?= (int)$d['entrance_id'] ?>"
+                                                        data-name="<?= htmlspecialchars($d['document_name']) ?>"
+                                                        title="Delete">
+                                                    <i class="bi bi-trash3"></i>
+                                                </button>
+                                            <?php endif; ?>
                                         </div>
                                     <?php else: ?>
-                                        <button class="btn btn-primary btn-xs upload-doc-btn"
-                                                data-eid="<?= (int)$d['entrance_id'] ?>"
-                                                data-name="<?= htmlspecialchars($d['document_name']) ?>">
-                                            <i class="bi bi-upload me-1"></i> Upload
-                                        </button>
+                                        <?php if (!$is_teacher): ?>
+                                            <button class="btn btn-primary btn-xs upload-doc-btn"
+                                                    data-eid="<?= (int)$d['entrance_id'] ?>"
+                                                    data-name="<?= htmlspecialchars($d['document_name']) ?>">
+                                                <i class="bi bi-upload me-1"></i> Upload
+                                            </button>
+                                        <?php endif; ?>
                                     <?php endif; ?>
                                 </td>
                             </tr>
@@ -1705,9 +1533,11 @@ require __DIR__ . '/../partials/sidebar.php';
     <div class="card mt-3">
         <div class="card-header">
             <h3><i class="bi bi-book"></i> Educational History</h3>
-            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEducationModal">
-                <i class="bi bi-plus-lg me-1"></i> Add
-            </button>
+            <?php if (!$is_teacher): ?>
+                <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEducationModal">
+                    <i class="bi bi-plus-lg me-1"></i> Add
+                </button>
+            <?php endif; ?>
         </div>
         <div class="card-body no-padding">
             <?php if(!empty($education)): ?>
@@ -1719,7 +1549,9 @@ require __DIR__ . '/../partials/sidebar.php';
                                 <th>School Name</th>
                                 <th>Address</th>
                                 <th style="width:90px">Year</th>
-                                <th style="width:100px;text-align:right">Action</th>
+                                <?php if (!$is_teacher): ?>
+                                    <th style="width:100px;text-align:right">Action</th>
+                                <?php endif; ?>
                             </tr>
                         </thead>
                         <tbody>
@@ -1729,6 +1561,7 @@ require __DIR__ . '/../partials/sidebar.php';
                                 <td><?= htmlspecialchars($e['school_name']) ?></td>
                                 <td class="cell-muted"><?= htmlspecialchars($e['school_address'] ?? '—') ?></td>
                                 <td class="cell-muted"><?= htmlspecialchars($e['year_completed'] ?? '—') ?></td>
+                                <?php if (!$is_teacher): ?>
                                 <td style="text-align:right">
                                     <div class="btn-group-actions" style="justify-content:flex-end">
                                         <button class="btn btn-icon btn-outline-warning edit-edu-btn"
@@ -1749,6 +1582,7 @@ require __DIR__ . '/../partials/sidebar.php';
                                         </button>
                                     </div>
                                 </td>
+                                <?php endif; ?>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>
@@ -1782,9 +1616,9 @@ require __DIR__ . '/../partials/sidebar.php';
                         <?= htmlspecialchars($active_grade) ?> GWA: <strong style="margin-left:.2rem"><?= number_format($active_grade_gwa, 2) ?></strong>
                     </span>
                 <?php endif; ?>
-                <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addGradeModal">
-                    <i class="bi bi-plus-lg me-1"></i> Add Grade
-                </button>
+                <a href="<?= URL_PREFIX ?>/add_grades.php?student_id=<?= (int)$student_id ?>&grade=<?= urlencode($active_grade) ?>" class="btn btn-primary btn-sm">
+                    <i class="bi bi-plus-lg me-1"></i> Manage Grades
+                </a>
             </div>
         </div>
         <div class="card-body no-padding">
@@ -1835,7 +1669,6 @@ require __DIR__ . '/../partials/sidebar.php';
                                             <th>Subject</th>
                                             <th style="width:80px">Grade</th>
                                             <th style="width:120px">Remarks</th>
-                                            <th style="width:90px;text-align:right">Action</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -1847,27 +1680,6 @@ require __DIR__ . '/../partials/sidebar.php';
                                                 <?= $g['grade'] !== null ? number_format($g['grade'], 2) : '—' ?>
                                             </td>
                                             <td class="cell-muted"><?= htmlspecialchars($g['remarks'] ?? '—') ?></td>
-                                            <td style="text-align:right">
-                                                <div class="btn-group-actions" style="justify-content:flex-end">
-                                                    <button class="btn btn-icon btn-outline-warning edit-grd-btn"
-                                                            data-bs-toggle="modal" data-bs-target="#editGradeModal"
-                                                            data-id="<?= (int)$g['grade_id'] ?>"
-                                                            data-term="<?= htmlspecialchars($g['term']) ?>"
-                                                            data-code="<?= htmlspecialchars($g['subject_code']) ?>"
-                                                            data-name="<?= htmlspecialchars($g['subject_name']) ?>"
-                                                            data-grd="<?= $g['grade'] ?? '' ?>"
-                                                            data-rem="<?= htmlspecialchars($g['remarks'] ?? '') ?>"
-                                                            title="Edit">
-                                                        <i class="bi bi-pencil"></i>
-                                                    </button>
-                                                    <button class="btn btn-icon btn-outline-danger del-grd-btn"
-                                                            data-id="<?= (int)$g['grade_id'] ?>"
-                                                            data-name="<?= htmlspecialchars($g['subject_name']) ?>"
-                                                            title="Delete">
-                                                        <i class="bi bi-trash3"></i>
-                                                    </button>
-                                                </div>
-                                            </td>
                                         </tr>
                                     <?php endforeach; ?>
                                     </tbody>
@@ -1882,7 +1694,7 @@ require __DIR__ . '/../partials/sidebar.php';
                 <div class="empty">
                     <div class="empty-icon"><i class="bi bi-journal-text"></i></div>
                     <div class="empty-title">No grades recorded yet</div>
-                    <div class="empty-sub">Add the student's first grade to begin tracking.</div>
+                    <div class="empty-sub">Click "Manage Grades" to begin tracking academic performance.</div>
                 </div>
             <?php endif; ?>
         </div>
@@ -1890,11 +1702,8 @@ require __DIR__ . '/../partials/sidebar.php';
 
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════
-     MODALS
-     ═══════════════════════════════════════════════════════════ -->
-
-<!-- Upload photo -->
+<?php if (!$is_teacher): ?>
+<!-- ALL MODALS FOR ADMIN/REGISTRAR ONLY -->
 <div class="modal fade" id="uploadPhotoModal" tabindex="-1">
     <div class="modal-dialog modal-sm modal-dialog-centered">
         <div class="modal-content">
@@ -1919,7 +1728,6 @@ require __DIR__ . '/../partials/sidebar.php';
     </div>
 </div>
 
-<!-- Remove photo -->
 <div class="modal fade" id="deletePhotoModal" tabindex="-1">
     <div class="modal-dialog modal-sm modal-dialog-centered">
         <div class="modal-content">
@@ -1943,7 +1751,6 @@ require __DIR__ . '/../partials/sidebar.php';
     </div>
 </div>
 
-<!-- Upload document (AJAX) -->
 <div class="modal fade" id="uploadDocumentModal" tabindex="-1">
     <div class="modal-dialog modal-sm modal-dialog-centered">
         <div class="modal-content">
@@ -1971,7 +1778,6 @@ require __DIR__ . '/../partials/sidebar.php';
     </div>
 </div>
 
-<!-- Delete document -->
 <div class="modal fade" id="deleteDocModal" tabindex="-1">
     <div class="modal-dialog modal-sm modal-dialog-centered">
         <div class="modal-content">
@@ -1996,7 +1802,6 @@ require __DIR__ . '/../partials/sidebar.php';
     </div>
 </div>
 
-<!-- Delete student -->
 <div class="modal fade" id="deleteStudentModal" tabindex="-1">
     <div class="modal-dialog modal-sm modal-dialog-centered">
         <div class="modal-content">
@@ -2020,202 +1825,6 @@ require __DIR__ . '/../partials/sidebar.php';
     </div>
 </div>
 
-<!-- Add grade -->
-<div class="modal fade" id="addGradeModal" tabindex="-1">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
-                <div>
-                    <h6 class="modal-title fw-bold"><i class="bi bi-plus-circle me-2"></i>Add Grade</h6>
-                    <div class="modal-subtitle">Record a new subject grade for this student</div>
-                </div>
-                <button class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <form method="POST" id="addGradeForm">
-                <div class="modal-body">
-                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
-                    <input type="hidden" name="student_id" value="<?= (int)$student_id ?>">
-                    <input type="hidden" name="enrollment_id" value="<?= (int)($enrollment['enrollment_id'] ?? 0) ?>">
-                    <input type="hidden" name="return_grade" value="<?= htmlspecialchars($active_grade) ?>">
-
-                    <div class="grade-context">
-                        <div class="grade-context-icon"><i class="bi bi-person-circle"></i></div>
-                        <div class="grade-context-body">
-                            <div class="grade-context-name"><?= $fullName ?></div>
-                            <div class="grade-context-meta">
-                                <span><i class="bi bi-mortarboard"></i><?= htmlspecialchars($enrollment['grade_level'] ?? '—') ?></span>
-                                <span class="dot"></span>
-                                <span><i class="bi bi-calendar3"></i><?= htmlspecialchars($enrollment['school_year'] ?? '—') ?></span>
-                                <span class="dot"></span>
-                                <span><i class="bi bi-upc-scan"></i><?= htmlspecialchars($student['lrn'] ?? 'N/A') ?></span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <label class="form-label">Term <span class="req">*</span></label>
-                    <div class="term-segments">
-                        <?php foreach($terms as $i => $term): ?>
-                            <input type="radio" name="term" id="ag_term_<?= $i ?>"
-                                   value="<?= htmlspecialchars($term) ?>"
-                                   <?= $currentTerm === $term ? 'checked' : '' ?> required>
-                            <label for="ag_term_<?= $i ?>"><?= htmlspecialchars($term) ?></label>
-                        <?php endforeach; ?>
-                    </div>
-
-                    <div class="row g-2 mt-1">
-                        <div class="col-sm-4">
-                            <label class="form-label">Subject Code <span class="req">*</span></label>
-                            <input name="subject_code" class="form-control form-control-sm"
-                                   placeholder="e.g. GEN-MATH" required maxlength="20" autocomplete="off">
-                        </div>
-                        <div class="col-sm-8">
-                            <label class="form-label">Subject Name <span class="req">*</span></label>
-                            <input name="subject_name" class="form-control form-control-sm"
-                                   placeholder="e.g. General Mathematics" required maxlength="100" autocomplete="off">
-                        </div>
-                    </div>
-
-                    <div class="row g-2 mt-1">
-                        <div class="col-sm-5">
-                            <label class="form-label">Grade <span class="req">*</span></label>
-                            <div class="grade-input-wrap" id="ag_grp">
-                                <input type="number" step="0.01" min="0" max="100"
-                                       name="grade" id="ag_grd"
-                                       class="form-control form-control-sm"
-                                       placeholder="0 – 100"
-                                       oninput="autoRemarks(this, 'ag_rem', 'ag_grp')" required>
-                                <span class="grade-badge" id="ag_badge"></span>
-                            </div>
-                        </div>
-                        <div class="col-sm-7">
-                            <label class="form-label">Remarks</label>
-                            <input name="remarks" id="ag_rem" class="form-control form-control-sm"
-                                   placeholder="Auto-derived from grade" readonly>
-                        </div>
-                    </div>
-
-                    <div class="form-text mt-2 d-flex align-items-center gap-1">
-                        <i class="bi bi-info-circle"></i>
-                        <span>Passing mark is <strong>75</strong>. Remarks are set automatically.</span>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-                    <button name="add_grade" class="btn btn-primary btn-sm">
-                        <i class="bi bi-check2 me-1"></i> Save Grade
-                    </button>
-                </div>
-            </form>
-        </div>
-    </div>
-</div>
-
-<!-- Edit grade -->
-<div class="modal fade" id="editGradeModal" tabindex="-1">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
-                <div>
-                    <h6 class="modal-title fw-bold"><i class="bi bi-pencil me-2"></i>Edit Grade</h6>
-                    <div class="modal-subtitle">Update this subject's details</div>
-                </div>
-                <button class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <form method="POST" id="editGradeForm">
-                <div class="modal-body">
-                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
-                    <input type="hidden" name="grade_id" id="eg_id">
-                    <input type="hidden" name="student_id" value="<?= (int)$student_id ?>">
-                    <input type="hidden" name="return_grade" value="<?= htmlspecialchars($active_grade) ?>">
-
-                    <div class="grade-context">
-                        <div class="grade-context-icon"><i class="bi bi-person-circle"></i></div>
-                        <div class="grade-context-body">
-                            <div class="grade-context-name"><?= $fullName ?></div>
-                            <div class="grade-context-meta">
-                                <span><i class="bi bi-mortarboard"></i><?= htmlspecialchars($enrollment['grade_level'] ?? '—') ?></span>
-                                <span class="dot"></span>
-                                <span><i class="bi bi-calendar3"></i><?= htmlspecialchars($enrollment['school_year'] ?? '—') ?></span>
-                                <span class="dot"></span>
-                                <span><i class="bi bi-upc-scan"></i><?= htmlspecialchars($student['lrn'] ?? 'N/A') ?></span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <label class="form-label">Term <span class="req">*</span></label>
-                    <div class="term-segments" id="eg_terms">
-                        <?php foreach($terms as $i => $term): ?>
-                            <input type="radio" name="term" id="eg_term_<?= $i ?>"
-                                   value="<?= htmlspecialchars($term) ?>" required>
-                            <label for="eg_term_<?= $i ?>"><?= htmlspecialchars($term) ?></label>
-                        <?php endforeach; ?>
-                    </div>
-
-                    <div class="row g-2 mt-1">
-                        <div class="col-sm-4">
-                            <label class="form-label">Subject Code <span class="req">*</span></label>
-                            <input name="subject_code" id="eg_code" class="form-control form-control-sm" required maxlength="20">
-                        </div>
-                        <div class="col-sm-8">
-                            <label class="form-label">Subject Name <span class="req">*</span></label>
-                            <input name="subject_name" id="eg_name" class="form-control form-control-sm" required maxlength="100">
-                        </div>
-                    </div>
-
-                    <div class="row g-2 mt-1">
-                        <div class="col-sm-5">
-                            <label class="form-label">Grade <span class="req">*</span></label>
-                            <div class="grade-input-wrap" id="eg_grp">
-                                <input type="number" step="0.01" min="0" max="100"
-                                       name="grade" id="eg_grd"
-                                       class="form-control form-control-sm"
-                                       oninput="autoRemarks(this, 'eg_rem', 'eg_grp')" required>
-                                <span class="grade-badge" id="eg_badge"></span>
-                            </div>
-                        </div>
-                        <div class="col-sm-7">
-                            <label class="form-label">Remarks</label>
-                            <input name="remarks" id="eg_rem" class="form-control form-control-sm" readonly>
-                        </div>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-                    <button name="edit_grade" class="btn btn-primary btn-sm">
-                        <i class="bi bi-check2 me-1"></i> Update Grade
-                    </button>
-                </div>
-            </form>
-        </div>
-    </div>
-</div>
-
-<!-- Delete grade -->
-<div class="modal fade" id="deleteGradeModal" tabindex="-1">
-    <div class="modal-dialog modal-sm modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header bg-danger text-white">
-                <h6 class="modal-title fw-bold"><i class="bi bi-trash3 me-2"></i>Delete Grade</h6>
-                <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <p>Delete <strong id="dg_name"></strong>?</p>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-                <form method="POST" class="m-0">
-                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
-                    <input type="hidden" name="grade_id" id="dg_id">
-                    <input type="hidden" name="student_id" value="<?= (int)$student_id ?>">
-                    <input type="hidden" name="return_grade" value="<?= htmlspecialchars($active_grade) ?>">
-                    <button name="delete_grade" class="btn btn-danger btn-sm">Delete</button>
-                </form>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Add education -->
 <div class="modal fade" id="addEducationModal" tabindex="-1">
     <div class="modal-dialog modal-sm modal-dialog-centered">
         <div class="modal-content">
@@ -2241,7 +1850,6 @@ require __DIR__ . '/../partials/sidebar.php';
     </div>
 </div>
 
-<!-- Edit education -->
 <div class="modal fade" id="editEducationModal" tabindex="-1">
     <div class="modal-dialog modal-sm modal-dialog-centered">
         <div class="modal-content">
@@ -2268,7 +1876,6 @@ require __DIR__ . '/../partials/sidebar.php';
     </div>
 </div>
 
-<!-- Delete education -->
 <div class="modal fade" id="deleteEducationModal" tabindex="-1">
     <div class="modal-dialog modal-sm modal-dialog-centered">
         <div class="modal-content">
@@ -2294,36 +1901,6 @@ require __DIR__ . '/../partials/sidebar.php';
 
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script>
-const PASSING_GRADE = 75;
-
-function autoRemarks(gradeEl, remarksId, wrapperId) {
-    const el = document.getElementById(remarksId);
-    const wrap = wrapperId ? document.getElementById(wrapperId) : null;
-    const badge = wrap ? wrap.querySelector('.grade-badge') : null;
-    if (!el) return;
-
-    const v = (gradeEl.value || '').trim();
-    const clear = () => {
-        el.value = '';
-        if (wrap) wrap.classList.remove('has-value', 'is-pass', 'is-fail');
-        if (badge) badge.textContent = '';
-    };
-
-    if (v === '') return clear();
-    const g = parseFloat(v);
-    if (isNaN(g)) return clear();
-
-    const passed = g >= PASSING_GRADE;
-    el.value = passed ? 'Passed' : 'Failed';
-
-    if (wrap) {
-        wrap.classList.add('has-value');
-        wrap.classList.toggle('is-pass', passed);
-        wrap.classList.toggle('is-fail', !passed);
-    }
-    if (badge) badge.textContent = passed ? 'Passed' : 'Failed';
-}
-
 $('.upload-doc-btn').click(function () {
     $('#m_eid').val($(this).data('eid'));
     $('#m_dname').text($(this).data('name'));
@@ -2358,34 +1935,6 @@ $('#btnUpDoc').click(function () {
     });
 });
 
-$('.edit-grd-btn').click(function () {
-    var b = $(this);
-    $('#eg_id').val(b.data('id'));
-    $('#eg_code').val(b.data('code'));
-    $('#eg_name').val(b.data('name'));
-    $('#eg_grd').val(b.data('grd'));
-    $('#eg_rem').val(b.data('rem'));
-
-    var term = b.data('term');
-    $('#eg_terms input[type=radio]').each(function () {
-        $(this).prop('checked', $(this).val() === term);
-    });
-
-    autoRemarks(document.getElementById('eg_grd'), 'eg_rem', 'eg_grp');
-});
-
-$('#addGradeModal').on('shown.bs.modal', function () {
-    const g = document.getElementById('ag_grd');
-    if (g) autoRemarks(g, 'ag_rem', 'ag_grp');
-});
-
-$('.del-grd-btn').click(function () {
-    var b = $(this);
-    $('#dg_id').val(b.data('id'));
-    $('#dg_name').text(b.data('name'));
-    $('#deleteGradeModal').modal('show');
-});
-
 $('.edit-edu-btn').click(function () {
     var b = $(this);
     $('#ee_id').val(b.data('id'));
@@ -2402,5 +1951,6 @@ $('.del-edu-btn').click(function () {
     $('#deleteEducationModal').modal('show');
 });
 </script>
+<?php endif; ?>
 
 <?php require __DIR__ . '/../partials/footer.php'; ?>

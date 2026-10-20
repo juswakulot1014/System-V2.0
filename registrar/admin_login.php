@@ -1,7 +1,9 @@
 <?php
 // registrar/admin_login.php — registrar login.
-// Real logic: shared/auth/login_page.php
-// (superadmin may also log in here — allowed by login_allowed_roles())
-$LOGIN_ROLE     = 'registrar';
+// Real logic is handled by shared/auth/login_page.php
+
+// FIXED: Allow registrar, superadmin, and teacher to log in here.
+$LOGIN_ROLE     = ['registrar', 'superadmin', 'teacher'];
 $LOGIN_REDIRECT = 'dashboard.php';
+
 require __DIR__ . '/../shared/auth/login_page.php';

@@ -3,13 +3,6 @@ declare(strict_types=1);
 
 /**
  * shared/auth/login_page.php
- *
- * Requires these variables set by the wrapper BEFORE the require:
- *   $LOGIN_ROLE      string|array  — role(s) allowed to log in here
- *   $LOGIN_REDIRECT  string        — relative path e.g. 'dashboard.php'
- *
- * Constants used (defined in config/bootstrap.php):
- *   URL_PREFIX, ASSET_BASE, LOGIN_URL.
  */
 
 if (!isset($LOGIN_ROLE, $LOGIN_REDIRECT)) {
@@ -22,15 +15,38 @@ require_once __DIR__ . '/../../config/audit.php';
 
 /**
  * Roles allowed at the current endpoint.
- * Superadmin is implicitly allowed at /registrar/ (cross-view for support).
  */
 function login_allowed_roles($base_roles): array
 {
     $allowed = is_array($base_roles) ? $base_roles : [$base_roles];
-    if (str_contains(URL_PREFIX, '/registrar') && !in_array('superadmin', $allowed, true)) {
-        $allowed[] = 'superadmin';
+    
+    if (str_contains(URL_PREFIX, '/admin')) {
+        if (!in_array('teacher', $allowed, true)) $allowed[] = 'teacher';
+        if (!in_array('superadmin', $allowed, true)) $allowed[] = 'superadmin';
     }
+    if (str_contains(URL_PREFIX, '/registrar')) {
+        if (!in_array('teacher', $allowed, true)) $allowed[] = 'teacher';
+        if (!in_array('superadmin', $allowed, true)) $allowed[] = 'superadmin';
+    }
+    if (str_contains(URL_PREFIX, '/teacher')) {
+        if (!in_array('superadmin', $allowed, true)) $allowed[] = 'superadmin';
+        if (!in_array('registrar', $allowed, true)) $allowed[] = 'registrar';
+    }
+    
     return $allowed;
+}
+
+/**
+ * Determine where to send a user based on their role.
+ */
+function get_dashboard_url(string $role): string
+{
+    return match ($role) {
+        'superadmin' => ASSET_BASE . '/admin/dashboard.php',
+        'registrar'  => ASSET_BASE . '/registrar/dashboard.php',
+        'teacher'    => ASSET_BASE . '/teacher/dashboard.php',
+        default      => ASSET_BASE . '/admin/dashboard.php',
+    };
 }
 
 $error = '';
@@ -108,9 +124,7 @@ if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && e
                     'endpoint' => URL_PREFIX,
                     'ip'       => $_SERVER['REMOTE_ADDR'] ?? '',
                 ]);
-                $redirect = ($admin['role'] === 'superadmin')
-                    ? ASSET_BASE . '/admin/admin_login.php'
-                    : ASSET_BASE . '/registrar/admin_login.php';
+                $redirect = get_dashboard_url($admin['role']);
                 header('Location: ' . $redirect);
                 exit;
             }
@@ -137,7 +151,8 @@ if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && e
             setcookie($remember_cookie_name, $new_token, $remember_cookie_opts(time() + $remember_duration_secs));
 
             audit_log($conn, 'admin.login_auto', ['type' => 'admin', 'id' => $admin['id']]);
-            header('Location: ' . $LOGIN_REDIRECT);
+            
+            header('Location: ' . get_dashboard_url($admin['role']));
             exit;
         }
 
@@ -164,14 +179,11 @@ if (isset($_SESSION['admin_id'])) {
     $allowed_roles = login_allowed_roles($LOGIN_ROLE);
 
     if (!in_array($current_role, $allowed_roles, true)) {
-        $redirect = ($current_role === 'superadmin')
-            ? ASSET_BASE . '/admin/dashboard.php'
-            : ASSET_BASE . '/registrar/dashboard.php';
-        header('Location: ' . $redirect);
+        header('Location: ' . get_dashboard_url($current_role));
         exit;
     }
 
-    header('Location: ' . $LOGIN_REDIRECT);
+    header('Location: ' . get_dashboard_url($current_role));
     exit;
 }
 
@@ -264,7 +276,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
 
                         audit_log($conn, 'admin.login', ['type' => 'admin', 'id' => $admin['id']]);
                         $stmt->close();
-                        header('Location: ' . $LOGIN_REDIRECT);
+                        
+                        header('Location: ' . get_dashboard_url($admin['role']));
                         exit;
                     }
                 } else {
@@ -295,14 +308,20 @@ if (isset($_GET['timeout'])) {
     $error = 'Your session has expired. Please login again.';
 }
 
+$__is_admin_endpoint     = str_contains(URL_PREFIX, '/admin');
 $__is_registrar_endpoint = str_contains(URL_PREFIX, '/registrar');
+$__is_teacher_endpoint   = str_contains(URL_PREFIX, '/teacher');
+
+$__portal_name = 'Admin';
+if ($__is_registrar_endpoint) $__portal_name = 'Registrar';
+if ($__is_teacher_endpoint)   $__portal_name = 'Teacher';
 ?>
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= $__is_registrar_endpoint ? 'Registrar Login' : 'Admin Login' ?> • USAT College Sagay City</title>
+    <title><?= $__portal_name ?> Login • USAT College Sagay City</title>
 
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="robots" content="noindex, nofollow">
@@ -486,14 +505,16 @@ $__is_registrar_endpoint = str_contains(URL_PREFIX, '/registrar');
 
         /* ── Portal switcher ── */
         .portal-switch {
-            display: inline-flex;
-            align-self: flex-start;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
             background: rgba(15, 23, 42, 0.04);
             border: 1px solid var(--border-color);
             border-radius: 12px;
             padding: 4px;
             margin-bottom: 1.75rem;
             gap: 2px;
+            width: fit-content;
         }
 
         [data-theme="dark"] .portal-switch {
@@ -504,9 +525,9 @@ $__is_registrar_endpoint = str_contains(URL_PREFIX, '/registrar');
             display: inline-flex;
             align-items: center;
             gap: 0.45rem;
-            padding: 0.55rem 1.1rem;
+            padding: 0.55rem 0.9rem;
             border-radius: 9px;
-            font-size: 0.85rem;
+            font-size: 0.82rem;
             font-weight: 600;
             color: var(--text-secondary);
             text-decoration: none;
@@ -791,8 +812,8 @@ $__is_registrar_endpoint = str_contains(URL_PREFIX, '/registrar');
             .left-side { padding: 2rem 1.5rem 1.5rem; }
             .right-side { padding: 2rem 1.5rem; }
             .options { flex-direction: column; gap: 1rem; align-items: flex-start; }
-            .portal-switch { align-self: stretch; width: 100%; }
-            .portal-switch-item { flex: 1; justify-content: center; }
+            .portal-switch { width: 100%; justify-content: center; }
+            .portal-switch-item { flex: 1; justify-content: center; font-size: 0.75rem; padding: 0.55rem 0.5rem; }
             .live-value { font-size: 1rem; }
             .live-label { font-size: .55rem; }
         }
@@ -814,7 +835,7 @@ $__is_registrar_endpoint = str_contains(URL_PREFIX, '/registrar');
                 <img src="<?= ASSET_BASE ?>/assets/img/usat.jpg" alt="USAT College Seal" class="logo"
                      onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22160%22 height=%22160%22><rect fill=%22%234a90d9%22 width=%22160%22 height=%22160%22 rx=%2280%22/><text fill=%22white%22 font-size=%2260%22 x=%2250%25%22 y=%2255%25%22 text-anchor=%22middle%22 dy=%22.3em%22>USAT</text></svg>'">
             </div>
-            <h1><?= $__is_registrar_endpoint ? 'Registrar Portal' : 'Admin Portal' ?></h1>
+            <h1><?= $__portal_name ?> Portal</h1>
             <div class="school-name">USAT COLLEGE Sagay City INC.</div>
             <p class="subtitle">Enrollment Profiling System</p>
         </div>
@@ -823,21 +844,40 @@ $__is_registrar_endpoint = str_contains(URL_PREFIX, '/registrar');
 
             <!-- ── Portal switcher ───────────────────────────── -->
             <nav class="portal-switch" aria-label="Portal selection">
-                <?php if ($__is_registrar_endpoint): ?>
+                
+                <!-- Admin Tab -->
+                <?php if ($__is_admin_endpoint): ?>
+                    <span class="portal-switch-item active" aria-current="page">
+                        <i class="fas fa-shield-alt" aria-hidden="true"></i> Admin
+                    </span>
+                <?php else: ?>
                     <a href="<?= ASSET_BASE ?>/admin/admin_login.php" class="portal-switch-item">
                         <i class="fas fa-shield-alt" aria-hidden="true"></i> Admin
                     </a>
+                <?php endif; ?>
+
+                <!-- Registrar Tab -->
+                <?php if ($__is_registrar_endpoint): ?>
                     <span class="portal-switch-item active" aria-current="page">
                         <i class="fas fa-user-tie" aria-hidden="true"></i> Registrar
                     </span>
                 <?php else: ?>
-                    <span class="portal-switch-item active" aria-current="page">
-                        <i class="fas fa-shield-alt" aria-hidden="true"></i> Admin
-                    </span>
                     <a href="<?= ASSET_BASE ?>/registrar/admin_login.php" class="portal-switch-item">
                         <i class="fas fa-user-tie" aria-hidden="true"></i> Registrar
                     </a>
                 <?php endif; ?>
+
+                <!-- Teacher Tab -->
+                <?php if ($__is_teacher_endpoint): ?>
+                    <span class="portal-switch-item active" aria-current="page">
+                        <i class="fas fa-book" aria-hidden="true"></i> Teacher
+                    </span>
+                <?php else: ?>
+                    <a href="<?= ASSET_BASE ?>/teacher/admin_login.php" class="portal-switch-item">
+                        <i class="fas fa-book" aria-hidden="true"></i> Teacher
+                    </a>
+                <?php endif; ?>
+
             </nav>
 
             <?php if ($error): ?>
@@ -849,7 +889,7 @@ $__is_registrar_endpoint = str_contains(URL_PREFIX, '/registrar');
 
             <div class="form-header">
                 <h2>Welcome Back</h2>
-                <p>Sign in to access the <?= $__is_registrar_endpoint ? 'registrar' : 'admin' ?> dashboard</p>
+                <p>Sign in to access the <?= strtolower($__portal_name) ?> dashboard</p>
             </div>
 
             <form method="POST" id="loginForm" autocomplete="off" novalidate>

@@ -3,12 +3,6 @@ declare(strict_types=1);
 
 /**
  * process_enroll.php — Finalize a public enrollment submission.
- *
- * FIXES APPLIED:
- *   - CSRF token is NOT unset on success (fixes multi-tab submission failure).
- *   - LRN uniqueness re-checked INSIDE the transaction (race-safe).
- *   - `content_status` safely mapped/guarded against truncation errors.
- *   - Staged files are only deleted AFTER a successful commit (allows retry).
  */
 
 require_once __DIR__ . '/../config/bootstrap.php';
@@ -547,7 +541,7 @@ try {
     $student_info_id = $conn->insert_id;
     $stmt->close();
 
-    /* ── 2. Student ID number ── */
+    /* ── 2. Student ID number (Sequential Generation) ── */
     $school_year = clean_string($_POST['school_year'] ?? '', 9);
     $sy_parts = explode('-', $school_year);
     $year_enrolled = (int)($sy_parts[0] ?? 0);
@@ -556,14 +550,31 @@ try {
         $year_enrolled = (int)date('Y');
     }
 
-    $student_id_number = '';
+    $prefix = "UCSCI-{$year_enrolled}-";
+    
+    // Get the highest existing ID for this year
+    $seq_stmt = $conn->prepare("SELECT student_id_number FROM students_info WHERE student_id_number LIKE ? ORDER BY student_id_number DESC LIMIT 1");
+    if (!$seq_stmt) throw new Exception('[student_id_number:prepare] ' . $conn->error);
+    
+    $like_prefix = $prefix . '%';
+    $seq_stmt->bind_param("s", $like_prefix);
+    $seq_stmt->execute();
+    $res = $seq_stmt->get_result()->fetch_assoc();
+    $seq_stmt->close();
+
+    $next_seq = 1;
+    if ($res && !empty($res['student_id_number'])) {
+        $parts = explode('-', $res['student_id_number']);
+        $last_seq = (int)end($parts);
+        $next_seq = $last_seq + 1;
+    }
+
+    $student_id_number = $prefix . str_pad((string)$next_seq, 6, '0', STR_PAD_LEFT);
+
+    // Safety check for collisions (fallback)
     $attempts = 0;
     $collision = true;
-
-    do {
-        $random6 = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-        $student_id_number = "UCSCI-{$year_enrolled}-{$random6}";
-
+    while ($collision && $attempts < 10) {
         $check = $conn->prepare("SELECT 1 FROM students_info WHERE student_id_number = ? LIMIT 1");
         if (!$check) throw new Exception('[student_id_number:prepare] ' . $conn->error);
         $check->bind_param("s", $student_id_number);
@@ -571,8 +582,12 @@ try {
         $collision = $check->get_result()->num_rows > 0;
         $check->close();
 
-        $attempts++;
-    } while ($collision && $attempts < 10);
+        if ($collision) {
+            $next_seq++;
+            $student_id_number = $prefix . str_pad((string)$next_seq, 6, '0', STR_PAD_LEFT);
+            $attempts++;
+        }
+    }
 
     if ($collision) {
         throw new Exception('[student_id_number:generate] Could not generate a unique Student ID after 10 attempts.');
@@ -847,10 +862,6 @@ try {
         ]);
     }
 
-    // NOTE: We do NOT unset csrf_token — other open tabs with a rendered
-    // form need the SAME token to submit successfully. Rotating it on the
-    // next form load via csrf_token() is fine; forcibly clearing it here
-    // breaks multi-tab workflows.
     unset(
         $_SESSION['form_data'],
         $_SESSION['uploaded_files'],
@@ -882,9 +893,6 @@ try {
     foreach ($written_files as $abs) {
         if (file_exists($abs)) @unlink($abs);
     }
-
-    // Staged files remain on disk (not unlinked) — student can re-submit
-    // without re-uploading. purge_old_staging cleans them if abandoned.
 
     $corr    = bin2hex(random_bytes(4));
     $raw_msg = $e->getMessage();

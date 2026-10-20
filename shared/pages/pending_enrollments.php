@@ -82,34 +82,41 @@ $sql = "
 $stmt = $conn->prepare($sql);
 if (!empty($params)) $stmt->bind_param($types, ...$params);
 $stmt->execute();
-$pending = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$all_pending = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
+/* ── Pagination Logic ── */
+$limit = 10;
+$total_records = count($all_pending);
+$total_pages = max(1, ceil($total_records / $limit));
+$page = max(1, min($total_pages, (int)($_GET['page'] ?? 1)));
+$offset = ($page - 1) * $limit;
+
+$pending = array_slice($all_pending, $offset, $limit);
+
 /* ── Stats ── */
-$stat_total    = count($pending);
+$stat_total    = $total_records;
 $stat_withdocs = 0;
 $stat_nodocs   = 0;
 $stat_overdue  = 0;
-foreach ($pending as $p) {
+foreach ($all_pending as $p) {
     if ((int)$p['docs_uploaded'] > 0) $stat_withdocs++;
     else                              $stat_nodocs++;
     if ((time() - strtotime($p['enrolled_at'])) > 3 * 86400) $stat_overdue++;
 }
 
-/* Dropdown data */
 $sy_list    = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE status='Pending' ORDER BY school_year DESC")->fetch_all(MYSQLI_ASSOC) ?: [];
 $grade_list = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE status='Pending' ORDER BY grade_level ASC")->fetch_all(MYSQLI_ASSOC) ?: [];
 
 $csrf_token = csrf_token();
+$pagination_url = "?search=" . urlencode($search) . "&school_year=" . urlencode($sy_filter) . "&grade_level=" . urlencode($grade_filter);
 
-/* ═══ RENDER ═══ */
 $page_title = 'Pending Enrollments • USAT Admin';
 
 $page_css = <<<'CSS'
+    /* Table & Filters */
     .stat-hint { font-size:.68rem; color:var(--text-3); margin-top:.35rem; font-weight:500; display:flex; align-items:center; gap:.25rem; }
     .stat-hint i { color:var(--accent); }
-
-    /* Quick filter chips */
     .quick-filters{display:flex;gap:.5rem;flex-wrap:wrap;padding:0 1.25rem 1rem}
     .chip{display:inline-flex;align-items:center;gap:.4rem;padding:.4rem .85rem;border-radius:999px;border:1px solid var(--border);background:var(--surface-2);color:var(--text-2);font-size:.78rem;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit}
     .chip:hover{background:var(--surface);color:var(--text);border-color:var(--border-strong)}
@@ -119,19 +126,13 @@ $page_css = <<<'CSS'
     .chip.chip-green.active{background:var(--green);border-color:var(--green)}
     .chip.chip-amber.active{background:var(--amber);border-color:var(--amber)}
     .chip.chip-red.active{background:var(--red);border-color:var(--red)}
-
-    /* Row accents */
     .table-admin tbody tr.row-ready td:first-child{box-shadow:inset 4px 0 0 var(--green)}
     .table-admin tbody tr.row-nodocs td:first-child{box-shadow:inset 4px 0 0 var(--amber)}
-
-    /* Student cell */
     .student-cell{display:flex;align-items:center;gap:.7rem;min-width:0}
     .student-avatar{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;display:flex;align-items:center;justify-content:center;font-size:.78rem;font-weight:700;flex-shrink:0;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%, transparent)}
     .student-info{min-width:0}
     .student-name{font-weight:600;color:var(--text);font-size:.87rem;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .student-lrn{font-size:.72rem;color:var(--text-2);font-variant-numeric:tabular-nums}
-
-    /* Doc progress */
     .doc-progress{display:flex;flex-direction:column;gap:.3rem;min-width:90px}
     .doc-progress .doc-bar{width:100%;height:6px;border-radius:999px;background:var(--surface-2);overflow:hidden}
     .doc-progress .doc-bar-fill{height:100%;border-radius:999px;transition:width .3s ease}
@@ -141,122 +142,58 @@ $page_css = <<<'CSS'
     .doc-progress .doc-label{font-size:.7rem;font-weight:600;color:var(--text-2);font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:.3rem}
     .doc-progress .doc-label.ok{color:var(--green)}
     .doc-progress .doc-label.warn{color:var(--amber)}
-
-    /* Time cell */
     .time-cell{white-space:nowrap}
     .time-cell .rel{font-size:.82rem;font-weight:600;color:var(--text)}
     .time-cell .rel.overdue{color:var(--red)}
     .time-cell .abs{font-size:.72rem;color:var(--text-2);font-variant-numeric:tabular-nums}
+    .pagination-bar { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.25rem; border-top: 1px solid var(--border); background: var(--surface); }
+    .pagination { display: inline-flex; align-items: center; gap: .25rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: .25rem; }
+    .pagination .btn { border: none; color: var(--text-2); min-width: 34px; padding: .35rem .55rem; font-weight: 600; }
+    .pagination .btn:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+    .pagination .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .pagination .page-info { font-size: .78rem; color: var(--text-2); padding: 0 .65rem; font-weight: 600; }
 
-    /* ── Review modal ── */
-    .review-modal .modal-content{border-radius:18px;overflow:hidden;border:none;box-shadow:var(--shadow-lg)}
-    .review-modal .modal-dialog{max-width:720px}
-
-    .review-hero{padding:1.5rem 1.5rem 1.25rem;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;position:relative;overflow:hidden}
-    .review-hero::after{content:'';position:absolute;right:-40px;top:-40px;width:180px;height:180px;border-radius:50%;background:rgba(255,255,255,.08)}
-    .review-hero-inner{position:relative;z-index:1;display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
-    .review-hero .close-btn{position:absolute;top:.75rem;right:.75rem;z-index:2;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.2);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s}
-    .review-hero .close-btn:hover{background:rgba(255,255,255,.35)}
-    .review-avatar{width:64px;height:64px;border-radius:50%;background:rgba(255,255,255,.2);border:2px solid rgba(255,255,255,.4);display:flex;align-items:center;justify-content:center;font-size:1.4rem;font-weight:800;flex-shrink:0;backdrop-filter:blur(4px)}
-    .review-hero-info{min-width:0;flex:1}
-    .review-hero-info h5{font-size:1.15rem;font-weight:700;margin:0 0 .35rem;letter-spacing:-.01em;line-height:1.2}
-    .review-hero-chips{display:flex;gap:.35rem;flex-wrap:wrap}
-    .review-hero-chip{display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .7rem;border-radius:999px;background:rgba(255,255,255,.2);font-size:.72rem;font-weight:600;backdrop-filter:blur(4px)}
-    .review-hero-chip i{font-size:.75rem;opacity:.9}
-
-    .review-section{padding:1.25rem 1.5rem;border-bottom:1px solid var(--border)}
-    .review-section:last-of-type{border-bottom:none}
-    .review-section-head{display:flex;align-items:center;gap:.5rem;margin-bottom:.85rem;font-size:.72rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.8px}
-    .review-section-head i{width:24px;height:24px;border-radius:6px;background:var(--accent-soft);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;font-size:.78rem}
-    .review-section.tone-green .review-section-head i{background:var(--green-soft);color:var(--green)}
-    .review-section.tone-amber .review-section-head i{background:var(--amber-soft);color:var(--amber)}
-    .review-section.tone-purple .review-section-head i{background:var(--purple-soft);color:var(--purple)}
-
-    .review-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:.6rem 1.25rem}
-    .review-item{padding:.4rem 0;min-width:0}
-    .review-item .lbl{font-size:.68rem;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:.15rem}
-    .review-item .val{font-size:.9rem;color:var(--text);font-weight:600;word-break:break-word;line-height:1.3}
-    .review-item.full{grid-column:1/-1}
-    .review-item.empty .val{color:var(--text-3);font-weight:500;font-style:italic}
-
-    .review-doc-row{display:flex;align-items:center;gap:1rem;padding:.85rem 1rem;border-radius:12px;background:var(--surface-2);border:1px solid var(--border)}
-    .review-doc-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.25rem;flex-shrink:0}
-    .review-doc-icon.complete{background:var(--green-soft);color:var(--green)}
-    .review-doc-icon.partial{background:var(--accent-soft);color:var(--accent)}
-    .review-doc-icon.empty{background:var(--amber-soft);color:var(--amber)}
-    .review-doc-body{flex:1;min-width:0}
-    .review-doc-count{font-size:.9rem;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
-    .review-doc-label{font-size:.75rem;color:var(--text-2);font-weight:500;margin-top:.1rem}
-    .review-doc-bar{width:100%;height:8px;border-radius:999px;background:var(--surface);overflow:hidden;margin-top:.5rem;border:1px solid var(--border)}
-    .review-doc-bar-fill{height:100%;border-radius:999px;transition:width .3s}
-    .review-doc-bar-fill.fill-full{background:var(--green)}
-    .review-doc-bar-fill.fill-partial{background:var(--accent)}
-    .review-doc-bar-fill.fill-empty{background:var(--amber)}
-
-    .review-quick{display:flex;gap:.5rem;flex-wrap:wrap;padding:1rem 1.5rem;background:var(--surface-2);border-top:1px solid var(--border)}
-    .review-quick a{display:inline-flex;align-items:center;gap:.4rem;padding:.5rem .9rem;border-radius:10px;background:var(--surface);border:1px solid var(--border);color:var(--text);font-size:.78rem;font-weight:600;text-decoration:none;transition:all .15s}
-    .review-quick a:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px);box-shadow:0 4px 12px -4px color-mix(in srgb,var(--accent) 40%, transparent)}
-
-    .review-footer{padding:1rem 1.5rem;display:flex;align-items:center;justify-content:space-between;gap:.75rem;flex-wrap:wrap;border-top:1px solid var(--border);background:var(--surface)}
-
-    /* ── Approve modal ── */
-    .approve-modal .modal-content{border-radius:18px;overflow:hidden;border:none;box-shadow:var(--shadow-lg)}
-    .approve-modal .modal-dialog{max-width:560px}
-
-    .approve-hero{padding:1.5rem 1.5rem 1.25rem;background:linear-gradient(135deg,#059669,#047857);color:#fff;position:relative;overflow:hidden}
-    .approve-hero::after{content:'';position:absolute;right:-40px;top:-40px;width:180px;height:180px;border-radius:50%;background:rgba(255,255,255,.1)}
-    .approve-hero-inner{position:relative;z-index:1;display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
-    .approve-hero .close-btn{position:absolute;top:.75rem;right:.75rem;z-index:2;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.2);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s}
-    .approve-hero .close-btn:hover{background:rgba(255,255,255,.35)}
-
-    .approve-hero-icon{width:56px;height:56px;border-radius:16px;background:rgba(255,255,255,.2);border:2px solid rgba(255,255,255,.35);display:flex;align-items:center;justify-content:center;font-size:1.5rem;flex-shrink:0;backdrop-filter:blur(4px)}
-    .approve-hero-info{flex:1;min-width:0}
-    .approve-hero-info h5{font-size:1.1rem;font-weight:700;margin:0 0 .25rem;letter-spacing:-.01em;line-height:1.2}
-    .approve-hero-info .student-line{font-weight:700;font-size:.95rem;letter-spacing:-.01em;display:inline-flex;align-items:center;gap:.4rem;margin-bottom:.15rem}
-    .approve-hero-info .student-meta{font-size:.78rem;opacity:.9;display:flex;flex-wrap:wrap;gap:.4rem;align-items:center}
-    .approve-hero-info .student-meta .sep{opacity:.5}
-
-    .approve-body{padding:1.5rem}
-    .approve-subtitle{font-size:.72rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.8px;margin-bottom:.85rem}
-    .approve-checklist{display:flex;flex-direction:column;gap:.7rem;margin-bottom:1.35rem}
-    .approve-check{display:flex;align-items:flex-start;gap:.75rem;padding:.75rem .9rem;border-radius:12px;background:var(--surface-2);border:1px solid var(--border);transition:all .15s}
-    .approve-check:hover{border-color:color-mix(in srgb,var(--green) 30%, transparent);background:color-mix(in srgb,var(--green) 5%, var(--surface-2))}
-    .approve-check-icon{width:34px;height:34px;border-radius:10px;background:var(--green-soft);color:var(--green);display:flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0}
-    .approve-check-body{flex:1;min-width:0}
-    .approve-check-title{font-size:.85rem;font-weight:700;color:var(--text);line-height:1.25;margin-bottom:.15rem}
-    .approve-check-desc{font-size:.75rem;color:var(--text-2);line-height:1.45}
-
-    .approve-warn{display:flex;align-items:flex-start;gap:.6rem;padding:.85rem 1rem;border-radius:12px;background:var(--amber-soft);color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 30%, transparent);font-size:.82rem;line-height:1.5;margin-top:.5rem}
-    .approve-warn i{font-size:1.05rem;flex-shrink:0;margin-top:1px}
-    .approve-warn strong{font-weight:700}
-
-    .approve-email-box{padding:.85rem 1rem;border-radius:12px;background:var(--surface-2);border:1px solid var(--border);display:flex;align-items:center;gap:.7rem;margin-top:.5rem}
-    .approve-email-box .icon{width:36px;height:36px;border-radius:10px;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0}
-    .approve-email-box .body{flex:1;min-width:0}
-    .approve-email-box .label{font-size:.68rem;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.5px}
-    .approve-email-box .value{font-size:.88rem;font-weight:600;color:var(--text);word-break:break-all;line-height:1.3;margin-top:.1rem}
-    .approve-email-box .value.empty{color:var(--text-3);font-weight:500;font-style:italic}
-
-    .approve-footer{padding:1rem 1.5rem;background:var(--surface-2);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:.75rem;flex-wrap:wrap}
-    .approve-footer .btn{padding:.55rem 1.1rem;font-weight:600}
-    .approve-footer .btn-confirm{background:linear-gradient(135deg,#059669,#047857);border:none;color:#fff;box-shadow:0 4px 12px -4px rgba(5,150,105,.5);transition:all .15s}
-    .approve-footer .btn-confirm:hover{transform:translateY(-1px);box-shadow:0 8px 20px -4px rgba(5,150,105,.6);color:#fff}
-
-    .filter-bar{grid-template-columns:minmax(200px,1.5fr) 1fr 1fr auto}
-
-    @media (max-width:640px){
-        .review-grid{grid-template-columns:1fr}
-        .review-hero-inner{gap:.75rem}
-        .review-avatar{width:52px;height:52px;font-size:1.15rem}
-        .review-hero-info h5{font-size:1rem}
-        .review-footer{flex-direction:column-reverse}
-        .review-footer .btn{width:100%}
-        .approve-hero-inner{gap:.75rem}
-        .approve-hero-icon{width:46px;height:46px;font-size:1.25rem}
-        .approve-hero-info h5{font-size:1rem}
-        .approve-footer{flex-direction:column-reverse}
-        .approve-footer .btn{width:100%}
-    }
+    /* ═══════════════════════════════════════════════════════
+       ENHANCED MODALS
+       ═══════════════════════════════════════════════════════ */
+    .modal-content { border: none; border-radius: 20px; overflow: hidden; box-shadow: 0 24px 64px -12px rgba(0,0,0,0.3); }
+    
+    /* Approve Modal Specifics */
+    .approve-hero { background: linear-gradient(135deg, #059669, #047857); padding: 2rem 2rem 1.5rem; color: #fff; position: relative; }
+    .approve-hero-inner { display: flex; align-items: center; gap: 1.25rem; position: relative; z-index: 1; }
+    .approve-hero-icon { width: 56px; height: 56px; border-radius: 16px; background: rgba(255,255,255,0.2); border: 2px solid rgba(255,255,255,0.3); display: flex; align-items: center; justify-content: center; font-size: 1.5rem; flex-shrink: 0; }
+    .approve-hero-info h5 { margin: 0 0 .25rem; font-size: 1.15rem; font-weight: 800; letter-spacing: -0.01em; display: flex; align-items: center; gap: .5rem; }
+    .approve-hero-info .student-meta { display: flex; gap: .5rem; font-size: .85rem; opacity: .9; font-weight: 500; }
+    .approve-hero-info .student-meta .sep { opacity: .5; }
+    .approve-body { padding: 1.75rem 2rem; }
+    
+    /* Checklist */
+    .approve-subtitle { font-size: 0.75rem; font-weight: 800; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+    .approve-subtitle i { font-size: 1rem; color: var(--accent); }
+    .approve-checklist { display: flex; flex-direction: column; gap: 0.85rem; margin-bottom: 2rem; }
+    .approve-check { display: flex; align-items: flex-start; gap: 1rem; padding: 1rem; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--border); transition: transform 0.15s ease, box-shadow 0.15s ease; }
+    .approve-check:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.05); background: var(--surface); }
+    .approve-check-icon { width: 38px; height: 38px; border-radius: 10px; background: var(--green-soft); color: var(--green); display: flex; align-items: center; justify-content: center; font-size: 1.1rem; flex-shrink: 0; }
+    .approve-check-body { flex: 1; }
+    .approve-check-title { font-size: 0.9rem; font-weight: 700; color: var(--text); margin-bottom: 0.2rem; }
+    .approve-check-desc { font-size: 0.8rem; color: var(--text-2); line-height: 1.5; margin: 0; }
+    
+    /* Email Box */
+    .approve-email-box { display: flex; align-items: center; gap: 1rem; padding: 1rem 1.25rem; border-radius: 14px; background: var(--surface-2); border: 1px dashed var(--border-strong); }
+    .approve-email-box .icon { width: 40px; height: 40px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 1.1rem; flex-shrink: 0; }
+    .approve-email-box .label { font-size: 0.7rem; font-weight: 800; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.5px; }
+    .approve-email-box .value { font-size: 0.95rem; font-weight: 600; color: var(--text); margin-top: 0.1rem; word-break: break-all; }
+    .approve-email-box .value.empty { color: var(--text-3); font-style: italic; font-weight: 500; }
+    
+    /* Warning */
+    .approve-warn { display: flex; align-items: flex-start; gap: 0.75rem; padding: 1rem; border-radius: 14px; background: var(--amber-soft); color: var(--amber); border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent); font-size: 0.85rem; line-height: 1.5; margin-top: 1rem; }
+    .approve-warn i { font-size: 1.2rem; flex-shrink: 0; margin-top: 1px; }
+    
+    /* Footer */
+    .approve-footer { padding: 1.25rem 2rem; background: var(--surface); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    .approve-footer .btn { padding: 0.65rem 1.5rem; font-weight: 600; border-radius: 10px; }
+    .approve-footer .btn-confirm { background: linear-gradient(135deg, #059669, #047857); border: none; color: #fff; box-shadow: 0 4px 12px -2px rgba(5,150,105,.4); transition: all .15s; }
+    .approve-footer .btn-confirm:hover { transform: translateY(-1px); box-shadow: 0 6px 16px -2px rgba(5,150,105,.5); }
 CSS;
 
 require __DIR__ . '/../partials/head.php';
@@ -535,108 +472,68 @@ require __DIR__ . '/../partials/sidebar.php';
                         </tbody>
                     </table>
                 </div>
+
+                <?php if ($total_pages > 1): ?>
+                <div class="pagination-bar">
+                    <span class="muted-note">
+                        Showing <?= number_format($offset + 1) ?>–<?= number_format(min($offset + $limit, $total_records)) ?> of <?= number_format($total_records) ?>
+                    </span>
+                    <div class="pagination">
+                        <a href="<?= $pagination_url ?>&page=1" class="btn btn-sm <?= $page <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-left"></i></a>
+                        <a href="<?= $pagination_url ?>&page=<?= max(1, $page - 1) ?>" class="btn btn-sm <?= $page <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-left"></i></a>
+                        <span class="page-info">Page <?= $page ?> of <?= $total_pages ?></span>
+                        <a href="<?= $pagination_url ?>&page=<?= min($total_pages, $page + 1) ?>" class="btn btn-sm <?= $page >= $total_pages ? 'disabled' : '' ?>"><i class="bi bi-chevron-right"></i></a>
+                        <a href="<?= $pagination_url ?>&page=<?= $total_pages ?>" class="btn btn-sm <?= $page >= $total_pages ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-right"></i></a>
+                    </div>
+                </div>
+                <?php endif; ?>
+
             <?php endif; ?>
         </div>
     </div>
 </div>
 
-<!-- Review Modal -->
-<div class="modal fade review-modal" id="reviewModal" tabindex="-1">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="review-hero">
-                <button type="button" class="close-btn" data-bs-dismiss="modal" aria-label="Close">
-                    <i class="bi bi-x-lg"></i>
-                </button>
-                <div class="review-hero-inner">
-                    <div class="review-avatar" id="reviewAvatar">—</div>
-                    <div class="review-hero-info">
-                        <h5 id="reviewName">—</h5>
-                        <div class="review-hero-chips" id="reviewChips"></div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="review-section">
-                <div class="review-section-head">
-                    <i class="bi bi-person-vcard"></i>
-                    <span>Personal Information</span>
-                </div>
-                <div class="review-grid" id="reviewPersonal"></div>
-            </div>
-
-            <div class="review-section tone-purple">
-                <div class="review-section-head">
-                    <i class="bi bi-mortarboard"></i>
-                    <span>Enrollment Details</span>
-                </div>
-                <div class="review-grid" id="reviewEnrollment"></div>
-            </div>
-
-            <div class="review-section tone-green">
-                <div class="review-section-head">
-                    <i class="bi bi-folder-check"></i>
-                    <span>Documents</span>
-                </div>
-                <div id="reviewDocsBlock"></div>
-            </div>
-
-            <div class="review-quick">
-                <a id="reviewViewStudent" href="#" target="_blank">
-                    <i class="bi bi-person-badge"></i> Full Profile
-                </a>
-                <a id="reviewDocs" href="#" target="_blank">
-                    <i class="bi bi-folder2-open"></i> View Documents
-                </a>
-            </div>
-
-            <div class="review-footer">
-                <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Close</button>
-                <button class="btn btn-success btn-sm" id="reviewApproveBtn">
-                    <i class="bi bi-check-lg me-1"></i> Approve Enrollment
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
+<!-- ═══════════════════════════════════════════════════════
+     MODALS
+     ═══════════════════════════════════════════════════════ -->
 
 <!-- Approve Modal -->
-<div class="modal fade approve-modal" id="approveModal" tabindex="-1">
+<div class="modal fade" id="approveModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <form method="POST" action="<?= URL_PREFIX ?>/approve_enrollment.php" id="approveForm">
+                
+                <!-- Hero Header -->
                 <div class="approve-hero">
-                    <button type="button" class="close-btn" data-bs-dismiss="modal" aria-label="Close">
-                        <i class="bi bi-x-lg"></i>
-                    </button>
+                    <button type="button" class="btn-close btn-close-white position-absolute" data-bs-dismiss="modal" style="top: 1rem; right: 1rem; z-index: 2;"></button>
                     <div class="approve-hero-inner">
                         <div class="approve-hero-icon"><i class="bi bi-check2-circle"></i></div>
                         <div class="approve-hero-info">
-                            <div class="student-line" id="approveStudentLine">
-                                <i class="bi bi-person-fill"></i>
-                                <span id="approveName">—</span>
-                            </div>
-                            <div class="student-meta" id="approveStudentMeta">
-                                <span id="approveIdno">—</span>
+                            <h5 id="approveName">Student Name</h5>
+                            <div class="student-meta">
+                                <span id="approveIdno">ID</span>
                                 <span class="sep">·</span>
-                                <span id="approveGrade">—</span>
+                                <span id="approveGrade">Grade & Strand</span>
                                 <span class="sep">·</span>
-                                <span id="approveDocsInline">—</span>
+                                <span id="approveDocsInline">Docs</span>
                             </div>
                         </div>
                     </div>
                 </div>
 
+                <!-- Body -->
                 <div class="approve-body">
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <input type="hidden" name="enrollment_id" id="approveId">
                     <input type="hidden" name="action" value="approve">
 
-                    <div class="approve-subtitle">What happens next</div>
+                    <div class="approve-subtitle">
+                        <i class="bi bi-list-check"></i> What happens next
+                    </div>
 
                     <div class="approve-checklist">
                         <div class="approve-check">
-                            <div class="approve-check-icon"><i class="bi bi-check2-all"></i></div>
+                            <div class="approve-check-icon"><i class="bi bi-person-check-fill"></i></div>
                             <div class="approve-check-body">
                                 <div class="approve-check-title">Set status to Active</div>
                                 <div class="approve-check-desc">The enrollment will be officially activated and appear in the student masterlist.</div>
@@ -644,7 +541,7 @@ require __DIR__ . '/../partials/sidebar.php';
                         </div>
 
                         <div class="approve-check">
-                            <div class="approve-check-icon"><i class="bi bi-envelope-check"></i></div>
+                            <div class="approve-check-icon"><i class="bi bi-envelope-check-fill"></i></div>
                             <div class="approve-check-body">
                                 <div class="approve-check-title">Send confirmation email</div>
                                 <div class="approve-check-desc">The student will receive an enrollment confirmation with their student ID and section.</div>
@@ -660,7 +557,9 @@ require __DIR__ . '/../partials/sidebar.php';
                         </div>
                     </div>
 
-                    <div class="approve-subtitle">Notification</div>
+                    <div class="approve-subtitle">
+                        <i class="bi bi-bell-fill"></i> Notification
+                    </div>
 
                     <div class="approve-email-box">
                         <div class="icon"><i class="bi bi-envelope-fill"></i></div>
@@ -679,13 +578,29 @@ require __DIR__ . '/../partials/sidebar.php';
                     </div>
                 </div>
 
+                <!-- Footer -->
                 <div class="approve-footer">
-                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-                    <button class="btn btn-confirm btn-sm">
-                        <i class="bi bi-check-lg me-1"></i> Confirm Approval
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-confirm">
+                        <i class="bi bi-check-lg me-2"></i> Confirm Approval
                     </button>
                 </div>
             </form>
+        </div>
+    </div>
+</div>
+
+<!-- Review Modal -->
+<div class="modal fade" id="reviewModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header bg-dark text-white">
+                <h5 class="modal-title" id="reviewName">Student Details</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="reviewBody">
+                <!-- Loaded via JS -->
+            </div>
         </div>
     </div>
 </div>
@@ -695,25 +610,24 @@ require __DIR__ . '/../partials/sidebar.php';
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <form method="POST" action="<?= URL_PREFIX ?>/approve_enrollment.php">
-                <div class="modal-header">
-                    <h6 class="modal-title fw-bold"><i class="bi bi-x-circle me-2"></i>Reject Enrollment</h6>
-                    <button class="btn-close" data-bs-dismiss="modal"></button>
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title"><i class="bi bi-x-circle me-2"></i>Reject Enrollment</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
-                <div class="modal-body">
+                <div class="modal-body p-4">
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <input type="hidden" name="enrollment_id" id="rejectId">
                     <input type="hidden" name="action" value="reject">
-
-                    <p>Reject <strong id="rejectName"></strong>?</p>
+                    <p class="mb-3">Are you sure you want to reject <strong id="rejectName" class="text-danger"></strong>?</p>
                     <div class="mb-3">
-                        <label class="form-label">Reason (sent to student)</label>
+                        <label class="form-label fw-bold">Reason (sent to student)</label>
                         <textarea name="reason" class="form-control" rows="3" required maxlength="500"
                                   placeholder="e.g. Incomplete documents — please re-upload your PSA Birth Certificate."></textarea>
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-                    <button class="btn btn-outline-danger btn-sm"><i class="bi bi-x-lg me-1"></i> Reject</button>
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-danger"><i class="bi bi-x-lg me-1"></i> Reject Application</button>
                 </div>
             </form>
         </div>
@@ -723,7 +637,7 @@ require __DIR__ . '/../partials/sidebar.php';
 <script>
 const URL_PREFIX = <?= json_encode(URL_PREFIX) ?>;
 
-/* ── Quick filter chips ── */
+// Quick filters
 (function () {
     const chips = document.querySelectorAll('.chip');
     const rows  = document.querySelectorAll('#pendingTable tbody tr');
@@ -755,129 +669,49 @@ const URL_PREFIX = <?= json_encode(URL_PREFIX) ?>;
     });
 })();
 
-/* ── Helpers ── */
-function esc(v) {
-    return String(v || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-}
-function fmtDate(d) {
-    if (!d) return '';
-    const dt = new Date(d);
-    if (isNaN(dt.getTime())) return d;
-    return dt.toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' });
-}
-function infoItem(label, value) {
-    const empty = !value || value === '—';
-    return `<div class="review-item${empty ? ' empty' : ''}">
-        <div class="lbl">${label}</div>
-        <div class="val">${empty ? 'Not provided' : esc(value)}</div>
-    </div>`;
-}
-function chipHtml(icon, text) {
-    return `<span class="review-hero-chip"><i class="bi ${icon}"></i>${esc(text)}</span>`;
-}
-function initials(name) {
-    if (!name) return '?';
-    const parts = name.replace(',', '').split(/\s+/).filter(Boolean);
-    if (parts.length === 0) return '?';
-    const first = parts[0][0] || '';
-    const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
-    return (first + last).toUpperCase();
-}
-
-/* ── Review modal ── */
+// Modal Logic
 document.querySelectorAll('.view-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         const d = btn.dataset;
-
-        document.getElementById('reviewAvatar').textContent = initials(d.name);
-        document.getElementById('reviewName').textContent = d.name || '—';
-
-        document.getElementById('reviewChips').innerHTML = [
-            chipHtml('bi-upc-scan', d.idno || 'No ID'),
-            chipHtml('bi-hash', 'LRN ' + (d.lrn || '—')),
-            chipHtml('bi-mortarboard', d.grade || '—')
-        ].join('');
-
-        document.getElementById('reviewPersonal').innerHTML =
-            infoItem('Sex', d.sex) +
-            infoItem('Birth Date', fmtDate(d.birth)) +
-            infoItem('Email', d.email) +
-            infoItem('Phone', d.phone);
-
-        document.getElementById('reviewEnrollment').innerHTML =
-            infoItem('School Year', d.sy) +
-            infoItem('Grade Level', d.grade) +
-            infoItem('Term', d.term) +
-            infoItem('Track', d.track) +
-            infoItem('Strand', d.strand) +
-            infoItem('Program', d.program) +
-            infoItem('Section', d.section || 'Unassigned') +
-            infoItem('Enrollment ID', '#' + d.id);
-
-        const up = parseInt(d.docsup, 10) || 0;
-        const total = parseInt(d.docstotal, 10) || 0;
-        const pct = total > 0 ? Math.min(100, Math.round((up / total) * 100)) : 0;
-
-        let state, fillClass, icon, stateText;
-        if (up === 0) {
-            state = 'empty'; fillClass = 'fill-empty'; icon = 'bi-exclamation-circle';
-            stateText = 'No documents uploaded yet';
-        } else if (total > 0 && up >= total) {
-            state = 'complete'; fillClass = 'fill-full'; icon = 'bi-check2-circle';
-            stateText = 'All required documents received';
-        } else {
-            state = 'partial'; fillClass = 'fill-partial'; icon = 'bi-circle-half';
-            stateText = 'Some documents still missing';
-        }
-
-        document.getElementById('reviewDocsBlock').innerHTML = `
-            <div class="review-doc-row">
-                <div class="review-doc-icon ${state}">
-                    <i class="bi ${icon}"></i>
+        document.getElementById('reviewName').textContent = d.name || 'Student Details';
+        
+        let html = `
+            <div class="row g-4">
+                <div class="col-md-6">
+                    <h6 class="text-muted fw-bold mb-2">PERSONAL INFO</h6>
+                    <p class="mb-1"><strong>ID:</strong> ${d.idno}</p>
+                    <p class="mb-1"><strong>LRN:</strong> ${d.lrn}</p>
+                    <p class="mb-1"><strong>Sex:</strong> ${d.sex}</p>
+                    <p class="mb-1"><strong>Birth Date:</strong> ${d.birth}</p>
+                    <p class="mb-1"><strong>Email:</strong> ${d.email || '—'}</p>
+                    <p class="mb-1"><strong>Phone:</strong> ${d.phone || '—'}</p>
                 </div>
-                <div class="review-doc-body">
-                    <div class="review-doc-count">${up} of ${total} uploaded</div>
-                    <div class="review-doc-label">${stateText}</div>
-                    <div class="review-doc-bar">
-                        <div class="review-doc-bar-fill ${fillClass}" style="width:${pct}%"></div>
-                    </div>
+                <div class="col-md-6">
+                    <h6 class="text-muted fw-bold mb-2">ENROLLMENT</h6>
+                    <p class="mb-1"><strong>Grade:</strong> ${d.grade}</p>
+                    <p class="mb-1"><strong>Strand:</strong> ${d.strand || '—'}</p>
+                    <p class="mb-1"><strong>Program:</strong> ${d.program || '—'}</p>
+                    <p class="mb-1"><strong>Section:</strong> ${d.section || 'Unassigned'}</p>
+                    <p class="mb-1"><strong>School Year:</strong> ${d.sy}</p>
+                    <p class="mb-1"><strong>Term:</strong> ${d.term}</p>
                 </div>
             </div>
         `;
-
-        document.getElementById('reviewViewStudent').href = URL_PREFIX + '/view_student.php?id=' + d.sid;
-        document.getElementById('reviewDocs').href        = URL_PREFIX + '/view_student.php?id=' + d.sid + '#documents';
-
-        document.getElementById('reviewApproveBtn').onclick = () => {
-            bootstrap.Modal.getInstance(document.getElementById('reviewModal')).hide();
-            setTimeout(() => openApprove(d), 200);
-        };
-
+        document.getElementById('reviewBody').innerHTML = html;
         new bootstrap.Modal(document.getElementById('reviewModal')).show();
     });
 });
 
-/* ── Approve modal ── */
 function openApprove(d) {
-    const id    = d.id    || d.dataset?.id    || '';
-    const name  = d.name  || d.dataset?.name  || '—';
-    const email = d.email || d.dataset?.email || '';
-    const idno  = d.idno  || d.dataset?.idno  || '';
-    const grade = d.grade || d.dataset?.grade || '';
-    const strand= d.strand|| d.dataset?.strand|| '';
-    const docsup= d.docsup|| d.dataset?.docsup|| '0';
-    const docstotal = d.docstotal || d.dataset?.docstotal || '0';
-
-    document.getElementById('approveId').value = id;
-    document.getElementById('approveName').textContent = name;
-
-    document.getElementById('approveIdno').textContent  = idno || '—';
-    document.getElementById('approveGrade').textContent = grade + (strand ? ' · ' + strand : '');
-    document.getElementById('approveDocsInline').textContent = docsup + ' of ' + docstotal + ' docs';
+    document.getElementById('approveId').value = d.id;
+    document.getElementById('approveName').textContent = d.name;
+    document.getElementById('approveIdno').textContent = d.idno;
+    document.getElementById('approveGrade').textContent = d.grade + (d.strand ? ' · ' + d.strand : '');
+    document.getElementById('approveDocsInline').textContent = d.docsup + ' of ' + d.docstotal + ' docs';
 
     const emailEl = document.getElementById('approveEmailDisplay');
-    if (email) {
-        emailEl.textContent = email;
+    if (d.email && d.email.trim() !== '') {
+        emailEl.textContent = d.email;
         emailEl.classList.remove('empty');
         document.getElementById('approveEmailWarn').style.display = 'none';
     } else {
@@ -890,10 +724,9 @@ function openApprove(d) {
 }
 
 document.querySelectorAll('.approve-btn').forEach(btn => {
-    btn.addEventListener('click', () => openApprove(btn));
+    btn.addEventListener('click', () => openApprove(btn.dataset));
 });
 
-/* ── Reject modal ── */
 document.querySelectorAll('.reject-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         document.getElementById('rejectId').value = btn.dataset.id;

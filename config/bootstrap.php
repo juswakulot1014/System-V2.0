@@ -8,7 +8,7 @@ declare(strict_types=1);
    
    For /admin/dashboard.php            →  URL_PREFIX = /admin
    For /project/admin/students/x.php   →  URL_PREFIX = /project/admin
-   For /registrar/admin_login.php      →  URL_PREFIX = /registrar
+   For /teacher/admin_login.php        →  URL_PREFIX = /teacher
    
    ASSET_BASE is the parent (used for /assets/ links):
    For URL_PREFIX = /admin             →  ASSET_BASE = ''
@@ -16,7 +16,8 @@ declare(strict_types=1);
    ─────────────────────────────────────────────────────────────── */
 if (!defined('URL_PREFIX')) {
     $__sn = $_SERVER['SCRIPT_NAME'] ?? '';
-    if (preg_match('#^(.*/(?:admin|registrar))(/|$)#', $__sn, $__m)) {
+    // FIXED: Added 'teacher' to the regex
+    if (preg_match('#^(.*/(?:admin|registrar|teacher))(/|$)#', $__sn, $__m)) {
         define('URL_PREFIX', $__m[1]);
     } else {
         define('URL_PREFIX', '');
@@ -24,7 +25,7 @@ if (!defined('URL_PREFIX')) {
 }
 
 if (!defined('ASSET_BASE')) {
-    define('ASSET_BASE', preg_replace('#/(admin|registrar)$#', '', URL_PREFIX));
+    define('ASSET_BASE', preg_replace('#/(admin|registrar|teacher)$#', '', URL_PREFIX));
 }
 
 if (!defined('LOGIN_URL')) {
