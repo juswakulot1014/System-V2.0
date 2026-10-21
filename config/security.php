@@ -557,6 +557,27 @@ if (!function_exists('validate_upload')) {
 if (!function_exists('move_upload_securely')) {
     function move_upload_securely(string $tmp_path, string $dest_dir, string $ext): string
     {
+        // ── CLOUDINARY UPLOAD (Render) ──
+        if (defined('USE_CLOUDINARY') && USE_CLOUDINARY) {
+            $config = \Cloudinary\Configuration\Configuration::instance(getenv('CLOUDINARY_URL'));
+            $publicId = 'usat_docs/' . bin2hex(random_bytes(16));
+            $uploadApi = new \Cloudinary\Api\Upload\UploadApi();
+            
+            try {
+                $result = $uploadApi->upload($tmp_path, [
+                    'public_id' => $publicId,
+                    'resource_type' => 'auto', // Supports PDFs and Images
+                    'access_mode' => 'authenticated' // Keeps files private
+                ]);
+                
+                return $result['public_id'];
+            } catch (\Exception $e) {
+                error_log('Cloudinary upload failed: ' . $e->getMessage());
+                throw new RuntimeException('Failed to store file in cloud storage.');
+            }
+        }
+
+        // ── LOCAL DISK UPLOAD (Laragon) ──
         if (!is_dir($dest_dir)) {
             throw new RuntimeException('Upload destination does not exist.');
         }

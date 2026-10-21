@@ -6,7 +6,7 @@ declare(strict_types=1);
  *
  * Hardening applied:
  *   - Role check (registrar / superadmin only) via config/auth.php
- *   - Path containment via safe_path()
+ *   - Path containment via safe_path() (Local) or Cloudinary API (Cloud)
  *   - Full HTTP hardening (CSP sandbox, X-Frame-Options, nosniff)
  *   - Structured security logging
  *   - Access audit trail preserved
@@ -63,25 +63,61 @@ if (!$doc) {
     exit('Document not found');
 }
 
-/* ── 4. Path containment ──────────────────────────────────────── */
-try {
-    $abs_path = safe_path(DOCUMENTS_DIR, (string)$doc['file_path']);
-} catch (RuntimeException $e) {
-    security_log('document.path_escape', [
-        'doc_id'    => $doc_id,
-        'candidate' => (string)$doc['file_path'],
-        'ip'        => $_SERVER['REMOTE_ADDR'] ?? '',
-    ]);
-    http_response_code(404);
-    exit('Document not found');
-}
+/* ── 4 & 5. Fetch & Decrypt (Cloud vs Local) ──────────────────── */
+$stored_file = (string)$doc['file_path'];
+$plain = false;
 
-/* ── 5. Decrypt ───────────────────────────────────────────────── */
-$plain = doc_read_decrypt($abs_path);
-if ($plain === false || $plain === '') {
-    error_log("view_document: decrypt failed for doc {$doc_id}");
-    http_response_code(500);
-    exit('Cannot read document');
+if (defined('USE_CLOUDINARY') && USE_CLOUDINARY) {
+    // ── CLOUDINARY FETCH ──
+    try {
+        $config = \Cloudinary\Configuration\Configuration::instance(getenv('CLOUDINARY_URL'));
+        $cloudinary = new \Cloudinary\Cloudinary($config);
+        
+        // Generate a temporary secure URL (valid for 5 minutes)
+        $privateUrl = $cloudinary->privateDownloadUrl($stored_file, [
+            'expires_at' => time() + 300,
+            'attachment' => false
+        ]);
+        
+        $blob = @file_get_contents($privateUrl);
+        if ($blob !== false) {
+            $plain = doc_decrypt($blob);
+        }
+    } catch (\Throwable $e) {
+        error_log('view_document: Cloudinary fetch failed: ' . $e->getMessage());
+        $plain = false;
+    }
+
+    if ($plain === false || $plain === '') {
+        security_log('document.cloud_fetch_failed', [
+            'doc_id'    => $doc_id,
+            'public_id' => $stored_file,
+            'ip'        => $_SERVER['REMOTE_ADDR'] ?? '',
+        ]);
+        http_response_code(404);
+        exit('Document not found or could not be decrypted');
+    }
+
+} else {
+    // ── LOCAL DISK FETCH ──
+    try {
+        $abs_path = safe_path(DOCUMENTS_DIR, $stored_file);
+    } catch (RuntimeException $e) {
+        security_log('document.path_escape', [
+            'doc_id'    => $doc_id,
+            'candidate' => $stored_file,
+            'ip'        => $_SERVER['REMOTE_ADDR'] ?? '',
+        ]);
+        http_response_code(404);
+        exit('Document not found');
+    }
+
+    $plain = doc_read_decrypt($abs_path);
+    if ($plain === false || $plain === '') {
+        error_log("view_document: decrypt failed for doc {$doc_id}");
+        http_response_code(500);
+        exit('Cannot read document');
+    }
 }
 
 /* ── 6. Access audit ──────────────────────────────────────────── */

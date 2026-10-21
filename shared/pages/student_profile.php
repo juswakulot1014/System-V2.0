@@ -36,6 +36,72 @@ if (!function_exists('formatStudentName')) {
 }
 
 /* ═══════════════════════════════════════════════════════════
+   POST: DELETE ALL STUDENTS (SUPERADMIN ONLY)
+   ═══════════════════════════════════════════════════════════ */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_all_students'])) {
+    verify_csrf();
+    
+    if (($_SESSION['admin_role'] ?? '') !== 'superadmin') {
+        $_SESSION['error'] = 'Access denied. Only Superadmin can perform this action.';
+        header('Location: ' . URL_PREFIX . '/student_profile.php');
+        exit();
+    }
+
+    if (trim($_POST['confirm_phrase'] ?? '') !== 'DELETE ALL') {
+        $_SESSION['error'] = 'Confirmation phrase does not match.';
+        header('Location: ' . URL_PREFIX . '/student_profile.php');
+        exit();
+    }
+
+    $tables = [
+        'document_access_log',
+        'enrollment_email_log',
+        'student_status_history',
+        'student_grades',
+        'entrance_documents',
+        'educational_history',
+        'addresses',
+        'parents_info',
+        'enrollment_form',
+        'students_info'
+    ];
+
+    try {
+        $conn->query("SET FOREIGN_KEY_CHECKS = 0");
+        foreach ($tables as $tbl) {
+            $conn->query("TRUNCATE TABLE `$tbl`");
+        }
+        $conn->query("SET FOREIGN_KEY_CHECKS = 1");
+
+        // Cleanup physical files
+        if (!defined('USE_CLOUDINARY') || !USE_CLOUDINARY) {
+            $docs = glob(DOCUMENTS_DIR . '*');
+            if ($docs) {
+                foreach ($docs as $f) {
+                    if (is_file($f)) @unlink($f);
+                }
+            }
+            $photos = glob(STUDENTS_PHOTO_DIR . '*');
+            if ($photos) {
+                foreach ($photos as $f) {
+                    if (is_file($f)) @unlink($f);
+                }
+            }
+        }
+
+        audit_log($conn, 'system.delete_all_students', ['type' => 'system']);
+        $_SESSION['success'] = "All student records and files have been permanently deleted.";
+    } catch (Throwable $e) {
+        $conn->query("SET FOREIGN_KEY_CHECKS = 1");
+        error_log("Delete all failed: " . $e->getMessage());
+        $_SESSION['error'] = "Failed to delete all data: " . $e->getMessage();
+    }
+
+    header('Location: ' . URL_PREFIX . '/student_profile.php');
+    exit();
+}
+
+/* ═══════════════════════════════════════════════════════════
    POST: AUTO SECTION ASSIGNMENT (SECURED)
    ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auto_assign'])) {
@@ -207,6 +273,13 @@ if (!$is_ajax) {
                     <a href="<?= URL_PREFIX ?>/graduates.php" class="btn btn-outline-success btn-sm"><i class="bi bi-mortarboard-fill me-1"></i> Graduates</a>
                 <?php endif; ?>
                 <a href="<?= URL_PREFIX ?>/sections_list.php" class="btn btn-outline-primary btn-sm"><i class="bi bi-diagram-3 me-1"></i> Sections</a>
+                
+                <?php if (($_SESSION['admin_role'] ?? '') === 'superadmin'): ?>
+                    <button type="button" class="btn btn-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteAllStudentsModal">
+                        <i class="bi bi-trash3-fill me-1"></i> Delete All
+                    </button>
+                <?php endif; ?>
+                
                 <button class="theme-btn" id="themeToggle" title="Toggle theme"><i class="bi bi-moon-stars-fill" id="themeIcon"></i></button>
             </div>
         </div>
@@ -419,6 +492,41 @@ if (!$is_ajax) {
     </div>
     <?php endif; ?>
 
+    <!-- ═══════════════════════════════════════════════════════
+         DELETE ALL STUDENTS MODAL
+         ═══════════════════════════════════════════════════════ -->
+    <?php if (($_SESSION['admin_role'] ?? '') === 'superadmin'): ?>
+    <div class="modal fade" id="deleteAllStudentsModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-danger" style="border-width: 2px;">
+                <form method="POST" id="deleteAllForm">
+                    <div class="modal-header bg-danger text-white">
+                        <h5 class="modal-title"><i class="bi bi-exclamation-octagon me-2"></i> DANGER: Delete All Students</h5>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
+                        <input type="hidden" name="delete_all_students" value="1">
+                        
+                        <div class="alert alert-danger" style="border-left: 4px solid var(--red);">
+                            <strong>Warning:</strong> This will permanently delete <strong>ALL</strong> student records, enrollments, grades, and uploaded files from the system. This action <strong>cannot</strong> be undone.
+                        </div>
+                        
+                        <p class="mb-2">To confirm, please type <strong class="text-danger">DELETE ALL</strong> below:</p>
+                        <input type="text" name="confirm_phrase" id="confirmPhrase" class="form-control" placeholder="Type DELETE ALL" autocomplete="off" required>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-danger" id="btnDeleteAll" disabled>
+                            <i class="bi bi-trash3 me-1"></i> Permanently Delete All
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
+
     <script>
     (function () {
         const modalEl = document.getElementById('autoAssignModal'); if (!modalEl) return;
@@ -427,6 +535,25 @@ if (!$is_ajax) {
     })();
 
     document.addEventListener('DOMContentLoaded', function() {
+        // Confirmation input logic for "Delete All"
+        const confirmInput = document.getElementById('confirmPhrase');
+        const deleteBtn = document.getElementById('btnDeleteAll');
+        
+        if (confirmInput && deleteBtn) {
+            confirmInput.addEventListener('input', function() {
+                deleteBtn.disabled = (this.value !== 'DELETE ALL');
+            });
+            
+            document.getElementById('deleteAllForm').addEventListener('submit', function(e) {
+                if (confirmInput.value !== 'DELETE ALL') {
+                    e.preventDefault();
+                    return;
+                }
+                deleteBtn.disabled = true;
+                deleteBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Deleting...';
+            });
+        }
+
         const container = document.getElementById('ajax-container');
         if (!container) return;
 

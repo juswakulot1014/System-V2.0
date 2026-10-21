@@ -57,16 +57,38 @@ if (!function_exists('log_email')) {
 }
 
 if (!function_exists('usat_logo_html')) {
-    /** Formal Logo <img> for emails */
+    /** Formal Logo <img> for emails (Base64 Inline) */
     function usat_logo_html(): string
     {
-        $base = trim((string)(getenv('APP_PUBLIC_URL') ?: ''));
-        if ($base === '' || filter_var($base, FILTER_VALIDATE_URL) === false) {
-            return ''; // Return empty if no URL is set
+        // Locate the physical logo file relative to this page
+        $logo_file = __DIR__ . '/../../assets/img/usat.jpg';
+        $src = '';
+
+        // 1. Try Base64 inline encoding first (guarantees it shows up in Gmail/Outlook)
+        if (is_file($logo_file) && is_readable($logo_file)) {
+            $data = @file_get_contents($logo_file);
+            if ($data !== false && $data !== '') {
+                $fi = finfo_open(FILEINFO_MIME_TYPE);
+                $mime = $fi ? finfo_file($fi, $logo_file) : 'image/jpeg';
+                if ($fi) finfo_close($fi);
+                $src = 'data:' . $mime . ';base64,' . base64_encode($data);
+            }
         }
-        // Point to the logo image
-        $src = rtrim($base, '/') . '/assets/img/usat.jpg';
-        return '<img src="' . htmlspecialchars($src, ENT_QUOTES, 'UTF-8') . '" width="90" height="90"'
+
+        // 2. Fallback to public URL if local file reading fails
+        if ($src === '') {
+            $base = trim((string)(getenv('APP_PUBLIC_URL') ?: ''));
+            if ($base !== '' && filter_var($base, FILTER_VALIDATE_URL) !== false) {
+                $src = rtrim($base, '/') . '/assets/img/usat.jpg';
+            }
+        }
+
+        // 3. Return empty string if no logo can be found
+        if ($src === '') {
+            return '';
+        }
+
+        return '<img src="' . $src . '" width="90" height="90"'
              . ' alt="USAT College Logo"'
              . ' style="display:block;margin:0 auto 12px;width:90px;height:90px;border-radius:50%;object-fit:cover;border:3px solid #ffffff;box-shadow:0 4px 6px rgba(0,0,0,0.1);">';
     }
