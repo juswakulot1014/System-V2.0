@@ -233,17 +233,8 @@ if (!function_exists('require_login')) {
 }
 
 if (!function_exists('require_role')) {
-    /**
-     * Enforce that the current admin is logged in and (optionally) has
-     * one of the given roles.
-     *
-     *   require_role(null);                      // only requires login
-     *   require_role('superadmin');              // single role
-     *   require_role(['superadmin','registrar']);// any of these roles
-     */
     function require_role(string|array|null $roles = null): void
     {
-        // ── 1. Must be logged in ──
         if (!is_logged_in()) {
             $_SESSION['__redirect_after_login'] = $_SERVER['REQUEST_URI'] ?? '';
 
@@ -253,12 +244,10 @@ if (!function_exists('require_role')) {
             exit;
         }
 
-        // ── 2. No role constraint → done ──
         if ($roles === null || $roles === '' || $roles === []) {
             return;
         }
 
-        // ── 3. Normalize ──
         $roles = is_array($roles) ? $roles : [$roles];
 
         $roles = array_values(array_filter(
@@ -270,7 +259,6 @@ if (!function_exists('require_role')) {
             return;
         }
 
-        // ── 4. Role check ──
         if (!has_role($roles)) {
             if (function_exists('security_log')) {
                 security_log('auth.role_denied', [
@@ -851,19 +839,15 @@ if (!function_exists('rate_limit_session')) {
 if (!function_exists('security_log')) {
     function security_log(string $event, array $context = []): void
     {
-        $log_dir = dirname(__DIR__) . '/logs';
-        if (!is_dir($log_dir)) {
-            @mkdir($log_dir, 0700, true);
-        }
-
         $line = sprintf(
-            "[%s] %s %s\n",
+            "[SECURITY] [%s] %s %s",
             date('c'),
             $event,
             json_encode($context, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
         );
 
-        @error_log($line, 3, $log_dir . '/security.log');
+        // Route to PHP's central error log so it is captured by Render's dashboard
+        error_log($line);
     }
 }
 

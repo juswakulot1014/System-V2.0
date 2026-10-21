@@ -4,6 +4,21 @@
 declare(strict_types=1);
 
 /* ───────────────────────────────────────────────────────────────
+   PREVENT DOUBLE INCLUSION
+   ─────────────────────────────────────────────────────────────── */
+if (defined('BOOTSTRAPPED')) {
+    return;
+}
+define('BOOTSTRAPPED', true);
+
+/* ───────────────────────────────────────────────────────────────
+   COMPOSER AUTOLOADER (Required for PHPMailer & Dompdf)
+   ─────────────────────────────────────────────────────────────── */
+if (file_exists(__DIR__ . '/../vendor/autoload.php')) {
+    require_once __DIR__ . '/../vendor/autoload.php';
+}
+
+/* ───────────────────────────────────────────────────────────────
    URL namespace constants
    
    For /admin/dashboard.php            →  URL_PREFIX = /admin
@@ -36,6 +51,9 @@ if (!defined('DASHBOARD_URL')) {
     define('DASHBOARD_URL', URL_PREFIX . '/dashboard.php');
 }
 
+/* ───────────────────────────────────────────────────────────────
+   LOAD CORE CONFIGURATIONS & INITIALIZE
+   ─────────────────────────────────────────────────────────────── */
 require_once __DIR__ . '/security.php';
 require_once __DIR__ . '/paths.php';
 require_once __DIR__ . '/db.php';

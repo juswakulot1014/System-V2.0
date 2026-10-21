@@ -125,7 +125,7 @@ function mailer_build(): array
         // Headers that help with Gmail's bulk-mail heuristics.
         $mail->addCustomHeader('Auto-Submitted', 'auto-generated');
         $mail->addCustomHeader('X-Auto-Response-Suppress', 'OOF, AutoReply');
-        $mail->addCustomHeader('Precedence', 'bulk');
+        // Precedence: bulk REMOVED (causes transactional emails to be spam filtered)
 
         return [$mail, null];
     } catch (\Throwable $e) {
@@ -138,20 +138,6 @@ function mailer_build(): array
  *
  * Retryable: 4xx reply codes, timeouts, connection drops.
  * Not retryable: 5xx (auth failures, invalid recipient, blocked sender).
- *
- * NOTE: fixed the previous regex — '\b4\d\d\b' incorrectly matched the
- * "4" of "5.7.8" style codes in some PHPMailer error strings (e.g. the
- * string "535 5.7.8" contains a token "5.7" whose '4'… wait, no. The bug
- * was subtler: '\b4\d\d\b' matches ANY standalone 3-digit number starting
- * with 4, including sub-codes like "4.7.0" split at word boundaries. It
- * never produced false positives on 5xx, but it DID fail to match the
- * real case where a 4xx code is followed by a space then the extended
- * code, because \b treats the space as a boundary AND the code as a
- * word — which is correct — the issue was really that PHPMailer prefixes
- * the code differently across versions.
- *
- * The robust fix: anchor the SMTP reply-code position and only treat
- * leading 4xx codes as transient.
  */
 function mailer_is_transient(string $err): bool
 {
