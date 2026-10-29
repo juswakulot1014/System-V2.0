@@ -2,16 +2,34 @@
 // shared/pages/reports.php
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
+require_once __DIR__ . '/../lib/teacher_scope.php';   // PATCH 1: helper
 
 $__nav_section = 'reports';
+
+// PATCH 2: teacher scope state
+$__is_teacher = (($_SESSION['admin_role'] ?? '') === 'teacher');
+$__teacher_id = $__is_teacher ? (int)($_SESSION['admin_id'] ?? 0) : 0;
 
 /* ═══ Report type ═══ */
 $valid_reports = ['summary','masterlist','by_grade','by_strand','by_section','by_gender','documents','graduated'];
 $report_type = $_GET['report'] ?? 'summary';
+
+// PATCH 3: Teachers can only see the masterlist
+if ($__is_teacher) {
+    $report_type = 'masterlist';
+}
+
 if (!in_array($report_type, $valid_reports, true)) $report_type = 'summary';
 
-/* ═══ Filters ═══ */
-$selected_sy     = $_GET['school_year']   ?? '';
+/* ═══ Filters & Pagination ═══ */
+if (isset($_GET['school_year'])) {
+    $selected_sy = trim((string)$_GET['school_year']);
+} else {
+    // Default to the latest School Year if not explicitly set
+    $latest_sy_q = $conn->query("SELECT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC LIMIT 1");
+    $selected_sy = ($latest_sy_q && $row = $latest_sy_q->fetch_assoc()) ? $row['school_year'] : '';
+}
+
 $strand_filter   = $_GET['strand_filter'] ?? '';
 $grade_filter    = $_GET['grade_filter']  ?? '';
 $section_filter  = $_GET['section_filter']?? '';
@@ -19,6 +37,11 @@ $status_filter   = $_GET['status_filter'] ?? '';
 
 $export_word = isset($_GET['export_word']) && $_GET['export_word'] == 1;
 $export_pdf  = isset($_GET['export_pdf'])  && $_GET['export_pdf']  == 1;
+
+// Pagination Settings
+$page = max(1, (int)($_GET['page'] ?? 1));
+$per_page = 15; // For documents & graduated
+$per_page_sections = 10; // For masterlist (paginate by section blocks)
 
 /* ═══ Cascading dropdowns ═══ */
 $dd_build_where = function(array $pairs): array {
@@ -63,6 +86,13 @@ $stmt->close();
 $sy_filter    = "";
 $params_main  = [];
 $types_main   = "";
+
+if ($__is_teacher) {
+    $ts = teacher_scope_filter($conn, $__teacher_id, 'e');
+    $sy_filter .= " AND " . $ts['sql'];
+    $params_main = array_merge($params_main, $ts['params']);
+    $types_main .= $ts['types'];
+}
 
 if ($selected_sy !== '')     { $sy_filter .= " AND e.school_year = ?";  $params_main[] = $selected_sy;    $types_main .= "s"; }
 if ($strand_filter !== '')   { $sy_filter .= " AND e.strand = ?";       $params_main[] = $strand_filter;  $types_main .= "s"; }
@@ -139,49 +169,6 @@ $stmt->execute();
 $year_report = $stmt->get_result()->fetch_all(MYSQLI_ASSOC) ?: [];
 $stmt->close();
 
-$master_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.ext_name,
-                      s.sex, s.birth_date, s.age, s.email, s.phone,
-                      e.grade_level, e.strand, e.program, e.section, e.school_year, e.term, e.track,
-                      COALESCE(e.status,'Active') AS status
-               FROM students_info s
-               INNER JOIN enrollment_form e ON e.student_id = s.student_id
-               WHERE 1=1 $sy_filter
-               ORDER BY e.grade_level ASC, e.strand ASC, e.section ASC, s.last_name ASC, s.first_name ASC";
-$stmt = $conn->prepare($master_sql);
-if (!empty($params_main)) $stmt->bind_param($types_main, ...$params_main);
-$stmt->execute();
-$masterlist = $stmt->get_result()->fetch_all(MYSQLI_ASSOC) ?: [];
-$stmt->close();
-
-$masterlist_status_counts = [];
-foreach ($masterlist as $m) {
-    $st = $m['status'] ?? 'Active';
-    if ($st === '' || $st === null) $st = 'Active';
-    $masterlist_status_counts[$st] = ($masterlist_status_counts[$st] ?? 0) + 1;
-}
-$__status_order = ['Active', 'Pending', 'Transferred', 'Stopped', 'Dropped', 'Graduated'];
-uksort($masterlist_status_counts, function($a, $b) use ($__status_order) {
-    $ia = array_search($a, $__status_order, true);
-    $ib = array_search($b, $__status_order, true);
-    if ($ia === false) $ia = 999;
-    if ($ib === false) $ib = 999;
-    return $ia <=> $ib;
-});
-
-$grouped_masterlist = [];
-foreach ($masterlist as $m) {
-    $gl = $m['grade_level'] ?: 'Unassigned Grade';
-    $st = $m['strand']      ?: 'Unassigned Strand';
-    $sc = $m['section']     ?: 'Unassigned Section';
-    $grouped_masterlist[$gl][$st][$sc][] = $m;
-}
-$grade_order = ['Grade 11' => 1, 'Grade 12' => 2];
-uksort($grouped_masterlist, function($a, $b) use ($grade_order) {
-    $oa = $grade_order[$a] ?? 99;
-    $ob = $grade_order[$b] ?? 99;
-    return $oa <=> $ob ?: strcmp($a, $b);
-});
-
 $gender_sql = "SELECT e.grade_level, SUM(CASE WHEN s.sex = 'Male' THEN 1 ELSE 0 END) AS boys, SUM(CASE WHEN s.sex = 'Female' THEN 1 ELSE 0 END) AS girls, COUNT(DISTINCT s.student_id) AS total_students FROM enrollment_form e INNER JOIN students_info s ON s.student_id = e.student_id WHERE 1=1 $sy_filter GROUP BY e.grade_level ORDER BY e.grade_level ASC";
 $stmt = $conn->prepare($gender_sql);
 if (!empty($params_main)) $stmt->bind_param($types_main, ...$params_main);
@@ -189,38 +176,153 @@ $stmt->execute();
 $gender_report = $stmt->get_result()->fetch_all(MYSQLI_ASSOC) ?: [];
 $stmt->close();
 
-$doc_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name,
-                   e.grade_level, e.strand, e.section, e.school_year,
-                   (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id) AS docs_total,
-                   (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) AS docs_uploaded
-            FROM students_info s
-            INNER JOIN enrollment_form e ON e.student_id = s.student_id
-            WHERE 1=1 $sy_filter
-            ORDER BY e.grade_level ASC, s.last_name ASC";
-$stmt = $conn->prepare($doc_sql);
-if (!empty($params_main)) $stmt->bind_param($types_main, ...$params_main);
-$stmt->execute();
-$doc_report = $stmt->get_result()->fetch_all(MYSQLI_ASSOC) ?: [];
-$stmt->close();
+/* ═══ PAGINATED REPORT QUERIES ═══ */
+
+$masterlist = [];
+$grouped_masterlist = [];
+$masterlist_status_counts = [];
+$total_masterlist_students = 0;
+$total_master_sections = 0;
+$total_pages_master = 1;
+
+if ($report_type === 'masterlist') {
+    // 1. Count total students & sections for pagination
+    $count_sql = "SELECT COUNT(DISTINCT e.student_id) as total_students, COUNT(DISTINCT e.grade_level, e.strand, e.section) as total_sections FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $sy_filter";
+    $stmt = $conn->prepare($count_sql);
+    if (!empty($params_main)) $stmt->bind_param($types_main, ...$params_main);
+    $stmt->execute();
+    $counts = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    $total_masterlist_students = (int)($counts['total_students'] ?? 0);
+    $total_master_sections = (int)($counts['total_sections'] ?? 0);
+
+    $total_pages_master = max(1, (int)ceil($total_master_sections / $per_page_sections));
+    $page_master = max(1, min($total_pages_master, $page));
+    $offset_master = ($page_master - 1) * $per_page_sections;
+
+    // 2. Fetch the paginated sections
+    $sec_sql = "SELECT e.grade_level, e.strand, e.section FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $sy_filter GROUP BY e.grade_level, e.strand, e.section ORDER BY e.grade_level ASC, e.strand ASC, e.section ASC LIMIT ? OFFSET ?";
+    $sec_params = array_merge($params_main, [$per_page_sections, $offset_master]);
+    $sec_types = $types_main . "ii";
+    $stmt = $conn->prepare($sec_sql);
+    $stmt->bind_param($sec_types, ...$sec_params);
+    $stmt->execute();
+    $sec_rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+
+    $sec_names = array_column($sec_rows, 'section');
+
+    // 3. Fetch students ONLY for those sections
+    if (!empty($sec_names)) {
+        $in_placeholders = implode(',', array_fill(0, count($sec_names), '?'));
+        $in_types = $types_main . str_repeat('s', count($sec_names));
+        $in_params = array_merge($params_main, $sec_names);
+
+        $master_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.ext_name, s.sex, s.birth_date, s.age, s.email, s.phone, e.grade_level, e.strand, e.program, e.section, e.school_year, e.term, e.track, COALESCE(e.status,'Active') AS status FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $sy_filter AND e.section IN ($in_placeholders) ORDER BY e.grade_level ASC, e.strand ASC, e.section ASC, s.last_name ASC, s.first_name ASC";
+        $stmt = $conn->prepare($master_sql);
+        $stmt->bind_param($in_types, ...$in_params);
+        $stmt->execute();
+        $masterlist = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $stmt->close();
+    }
+
+    foreach ($masterlist as $m) {
+        $st = $m['status'] ?? 'Active';
+        if ($st === '' || $st === null) $st = 'Active';
+        $masterlist_status_counts[$st] = ($masterlist_status_counts[$st] ?? 0) + 1;
+    }
+    $__status_order = ['Active', 'Pending', 'Transferred', 'Stopped', 'Dropped', 'Graduated'];
+    uksort($masterlist_status_counts, function($a, $b) use ($__status_order) {
+        $ia = array_search($a, $__status_order, true);
+        $ib = array_search($b, $__status_order, true);
+        if ($ia === false) $ia = 999;
+        if ($ib === false) $ib = 999;
+        return $ia <=> $ib;
+    });
+
+    foreach ($masterlist as $m) {
+        $gl = $m['grade_level'] ?: 'Unassigned Grade';
+        $st = $m['strand']      ?: 'Unassigned Strand';
+        $sc = $m['section']     ?: 'Unassigned Section';
+        $grouped_masterlist[$gl][$st][$sc][] = $m;
+    }
+    $grade_order = ['Grade 11' => 1, 'Grade 12' => 2];
+    uksort($grouped_masterlist, function($a, $b) use ($grade_order) {
+        $oa = $grade_order[$a] ?? 99;
+        $ob = $grade_order[$b] ?? 99;
+        return $oa <=> $ob ?: strcmp($a, $b);
+    });
+}
+
+$doc_report = [];
+$total_doc_students = 0;
+$total_pages_doc = 1;
+$doc_complete = 0; $doc_partial = 0; $doc_missing = 0;
+
+if ($report_type === 'documents') {
+    // 1. Global stats
+    $doc_stats_sql = "SELECT 
+        SUM(CASE WHEN (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) >= (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id) AND (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id) > 0 THEN 1 ELSE 0 END) as complete,
+        SUM(CASE WHEN (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) > 0 AND (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) < (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id) THEN 1 ELSE 0 END) as partial,
+        SUM(CASE WHEN (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) = 0 THEN 1 ELSE 0 END) as missing,
+        COUNT(DISTINCT s.student_id) as total
+        FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $sy_filter";
+    $stmt = $conn->prepare($doc_stats_sql);
+    if (!empty($params_main)) $stmt->bind_param($types_main, ...$params_main);
+    $stmt->execute();
+    $dstats = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    $total_doc_students = (int)($dstats['total'] ?? 0);
+    $doc_complete = (int)($dstats['complete'] ?? 0);
+    $doc_partial = (int)($dstats['partial'] ?? 0);
+    $doc_missing = (int)($dstats['missing'] ?? 0);
+
+    $total_pages_doc = max(1, (int)ceil($total_doc_students / $per_page));
+    $page_doc = max(1, min($total_pages_doc, $page));
+    $offset_doc = ($page_doc - 1) * $per_page;
+
+    // 2. Paginated list
+    $doc_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, e.grade_level, e.strand, e.section, e.school_year, (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id) AS docs_total, (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) AS docs_uploaded FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $sy_filter ORDER BY e.grade_level ASC, s.last_name ASC LIMIT ? OFFSET ?";
+    $doc_params = array_merge($params_main, [$per_page, $offset_doc]);
+    $doc_types = $types_main . "ii";
+    $stmt = $conn->prepare($doc_sql);
+    $stmt->bind_param($doc_types, ...$doc_params);
+    $stmt->execute();
+    $doc_report = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+}
 
 $graduated_students = [];
 $total_graduated = 0;
-$grad_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.sex,
-                    e.grade_level, e.strand, e.program, e.section, e.school_year, e.status
-             FROM students_info s
-             INNER JOIN enrollment_form e ON s.student_id = e.student_id
-             WHERE e.status = 'Graduated'";
-$grad_params = []; $grad_types = "";
-if ($selected_sy !== '')   { $grad_sql .= " AND e.school_year = ?"; $grad_params[] = $selected_sy;    $grad_types .= "s"; }
-if ($strand_filter !== '') { $grad_sql .= " AND e.strand = ?";      $grad_params[] = $strand_filter;  $grad_types .= "s"; }
-if ($grade_filter !== '')  { $grad_sql .= " AND e.grade_level = ?"; $grad_params[] = $grade_filter;   $grad_types .= "s"; }
-$grad_sql .= " ORDER BY s.last_name ASC, s.first_name ASC";
-$gs = $conn->prepare($grad_sql);
-if (!empty($grad_params)) $gs->bind_param($grad_types, ...$grad_params);
-$gs->execute();
-$graduated_students = $gs->get_result()->fetch_all(MYSQLI_ASSOC) ?: [];
-$total_graduated = count($graduated_students);
-$gs->close();
+$total_pages_grad = 1;
+
+if ($report_type === 'graduated') {
+    $grad_where = "WHERE e.status = 'Graduated'";
+    $grad_params = []; $grad_types = "";
+    if ($selected_sy !== '')   { $grad_where .= " AND e.school_year = ?"; $grad_params[] = $selected_sy;    $grad_types .= "s"; }
+    if ($strand_filter !== '') { $grad_where .= " AND e.strand = ?";      $grad_params[] = $strand_filter;  $grad_types .= "s"; }
+    if ($grade_filter !== '')  { $grad_where .= " AND e.grade_level = ?"; $grad_params[] = $grade_filter;   $grad_types .= "s"; }
+
+    $count_sql = "SELECT COUNT(DISTINCT s.student_id) as total FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id $grad_where";
+    $stmt = $conn->prepare($count_sql);
+    if (!empty($grad_params)) $stmt->bind_param($grad_types, ...$grad_params);
+    $stmt->execute();
+    $total_graduated = (int)($stmt->get_result()->fetch_assoc()['total'] ?? 0);
+    $stmt->close();
+
+    $total_pages_grad = max(1, (int)ceil($total_graduated / $per_page));
+    $page_grad = max(1, min($total_pages_grad, $page));
+    $offset_grad = ($page_grad - 1) * $per_page;
+
+    $grad_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.sex, e.grade_level, e.strand, e.program, e.section, e.school_year, e.status FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id $grad_where ORDER BY s.last_name ASC, s.first_name ASC LIMIT ? OFFSET ?";
+    $grad_params_page = array_merge($grad_params, [$per_page, $offset_grad]);
+    $grad_types_page = $grad_types . "ii";
+    $gs = $conn->prepare($grad_sql);
+    $gs->bind_param($grad_types_page, ...$grad_params_page);
+    $gs->execute();
+    $graduated_students = $gs->get_result()->fetch_all(MYSQLI_ASSOC);
+    $gs->close();
+}
 
 $grade_labels = []; $grade_totals = []; $grade_boys = []; $grade_girls = [];
 foreach($grade_report as $g){ $grade_labels[]=$g['grade_level']; $grade_totals[]=(int)$g['total_students']; $grade_boys[]=(int)$g['boys']; $grade_girls[]=(int)$g['girls']; }
@@ -264,10 +366,52 @@ if ($grade_filter !== '')    $filter_desc[] = "Grade: $grade_filter";
 if ($strand_filter !== '')   $filter_desc[] = "Strand: $strand_filter";
 if ($section_filter !== '')  $filter_desc[] = "Section: $section_filter";
 if ($status_filter !== '')   $filter_desc[] = "Status: $status_filter";
+
 $filter_text = $filter_desc ? implode(' · ', $filter_desc) : 'All records (excl. Graduated & Pending)';
+if ($__is_teacher) {
+    $filter_text = 'My Students · ' . $filter_text;
+}
 
 /* ═══ Word + PDF export ═══ */
 if ($export_word || $export_pdf) {
+    
+    // Check if a specific section was requested for export
+    $export_section = trim((string)($_GET['export_section'] ?? ''));
+    $exp_sy_filter = $sy_filter;
+    $exp_params = $params_main;
+    $exp_types = $types_main;
+
+    if ($export_section !== '') {
+        $exp_sy_filter .= " AND e.section = ?";
+        $exp_params[] = $export_section;
+        $exp_types .= "s";
+    }
+
+    // If masterlist, we must fetch ALL matching records (ignoring pagination limit)
+    if ($report_type === 'masterlist') {
+        $master_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.ext_name, s.sex, s.birth_date, s.age, s.email, s.phone, e.grade_level, e.strand, e.program, e.section, e.school_year, e.term, e.track, COALESCE(e.status,'Active') AS status FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $exp_sy_filter ORDER BY e.grade_level ASC, e.strand ASC, e.section ASC, s.last_name ASC, s.first_name ASC";
+        $stmt = $conn->prepare($master_sql);
+        if (!empty($exp_params)) $stmt->bind_param($exp_types, ...$exp_params);
+        $stmt->execute();
+        $masterlist = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $stmt->close();
+
+        // Rebuild grouped masterlist for export
+        $grouped_masterlist = [];
+        foreach ($masterlist as $m) {
+            $gl = $m['grade_level'] ?: 'Unassigned Grade';
+            $st = $m['strand']      ?: 'Unassigned Strand';
+            $sc = $m['section']     ?: 'Unassigned Section';
+            $grouped_masterlist[$gl][$st][$sc][] = $m;
+        }
+        $grade_order = ['Grade 11' => 1, 'Grade 12' => 2];
+        uksort($grouped_masterlist, function($a, $b) use ($grade_order) {
+            $oa = $grade_order[$a] ?? 99;
+            $ob = $grade_order[$b] ?? 99;
+            return $oa <=> $ob ?: strcmp($a, $b);
+        });
+    }
+
     ob_start();
 
     echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Report</title><style>
@@ -309,6 +453,9 @@ if ($export_word || $export_pdf) {
     echo '<div class="meta">';
     echo '<strong>Generated:</strong> ' . date('F d, Y h:i A') . '<br>';
     echo '<strong>Filters:</strong> ' . htmlspecialchars($filter_text);
+    if ($export_section !== '') {
+        echo ' · <strong>Section:</strong> ' . htmlspecialchars($export_section);
+    }
     if ($report_type !== 'graduated' && $graduated_excluded) {
         echo '<br><strong>Note:</strong> Graduated and Pending students are excluded from this report.';
     }
@@ -448,7 +595,7 @@ if ($export_word || $export_pdf) {
     $export_html = ob_get_clean();
 
     if ($export_word) {
-        $filename = 'usat_' . $report_type . '_report_' . date('Y-m-d') . '.doc';
+        $filename = 'usat_' . $report_type . ($export_section !== '' ? '_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $export_section) : '') . '_report_' . date('Y-m-d') . '.doc';
         header("Content-Type: application/msword");
         header("Content-Disposition: attachment; filename=\"$filename\"");
         echo $export_html;
@@ -484,7 +631,7 @@ if ($export_word || $export_pdf) {
     $dompdf->loadHtml($export_html, 'UTF-8');
     $dompdf->render();
 
-    $filename = 'usat_' . $report_type . '_report_' . date('Y-m-d') . '.pdf';
+    $filename = 'usat_' . $report_type . ($export_section !== '' ? '_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $export_section) : '') . '_report_' . date('Y-m-d') . '.pdf';
     $dompdf->stream($filename, ['Attachment' => true]);
     exit;
 }
@@ -565,11 +712,21 @@ $page_css = <<<'CSS'
     .fill-partial{background:var(--accent)}
     .fill-empty{background:var(--amber)}
 
-    .btn-ghost{background:var(--surface-2);border:1px solid var(--border);color:var(--text-2);font-size:.72rem;padding:.3rem .7rem;border-radius:8px}
-    .btn-ghost:hover{background:var(--surface);color:var(--text);border-color:var(--border-strong)}
+    .btn-ghost{background:var(--surface-2);border:1px solid var(--border);color:var(--text-2);font-size:.72rem;padding:.3rem .7rem;border-radius:8px;display:inline-flex;align-items:center;gap:.3rem;text-decoration:none}
+    .btn-ghost:hover{background:var(--surface);color:var(--accent);border-color:var(--accent)}
 
     .filter-bar{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
     .filter-bar .actions{grid-column:1/-1;justify-content:flex-end}
+
+    /* Pagination */
+    .pagination-bar { display: flex; justify-content: space-between; align-items: center; padding: 1.25rem 0 0; margin-top: 1.5rem; border-top: 1px solid var(--border); flex-wrap: wrap; gap: 1rem; }
+    .page-info { font-size: .85rem; color: var(--text-2); font-weight: 500; }
+    .pagination { display: inline-flex; align-items: center; gap: .25rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: .25rem; }
+    .page-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; height: 36px; border-radius: 8px; border: none; background: transparent; color: var(--text-2); font-size: .85rem; font-weight: 600; text-decoration: none; transition: all .15s; }
+    .page-btn:hover:not(.disabled) { background: var(--surface); color: var(--accent); box-shadow: 0 2px 6px rgba(0,0,0,.05); }
+    .page-btn.disabled { opacity: .4; cursor: not-allowed; }
+    .page-btn.active { background: var(--accent); color: #fff; }
+    .page-btn.active:hover { background: var(--accent); color: #fff; }
 
     @media (max-width:640px){
         .stat-grid{grid-template-columns:repeat(2,1fr);gap:.75rem}
@@ -621,6 +778,7 @@ require __DIR__ . '/../partials/sidebar.php';
         </div>
     </div>
 
+    <?php if (!$__is_teacher): ?>
     <div class="report-selector">
         <?php foreach ($reports as $key => $r): ?>
             <a href="<?= htmlspecialchars(report_url($key, $filter_arr)) ?>"
@@ -633,15 +791,18 @@ require __DIR__ . '/../partials/sidebar.php';
             </a>
         <?php endforeach; ?>
     </div>
+    <?php endif; ?>
 
     <?php if ($graduated_excluded && $report_type !== 'graduated'): ?>
     <div class="exclude-note">
         <i class="bi bi-shield-check"></i>
         <span>Graduated and Pending students are excluded from this report.</span>
+        <?php if (!$__is_teacher): ?>
         <span class="hint-inline">
             <i class="bi bi-info-circle me-1"></i>
-            Pick a specific status below (or view the <a href="?report=graduated" style="color:inherit;text-decoration:underline;font-weight:700">Graduated report</a>) to see them.
+            Pick a specific status below (or view the <a href="?report=graduated&school_year=<?= urlencode($selected_sy) ?>" style="color:inherit;text-decoration:underline;font-weight:700">Graduated report</a>) to see them.
         </span>
+        <?php endif; ?>
     </div>
     <?php endif; ?>
 
@@ -666,6 +827,8 @@ require __DIR__ . '/../partials/sidebar.php';
                         <?php endforeach; ?>
                     </select>
                 </div>
+                
+                <?php if (!$__is_teacher): ?>
                 <div class="field">
                     <label for="f_grade">Grade Level</label>
                     <select name="grade_filter" id="f_grade" onchange="this.form.submit()">
@@ -708,11 +871,13 @@ require __DIR__ . '/../partials/sidebar.php';
                         <?php endforeach; ?>
                     </select>
                 </div>
+                <?php endif; ?>
+                
                 <div class="actions">
                     <button type="submit" class="btn btn-primary btn-sm">
                         <i class="bi bi-check2 me-1"></i> Apply Filters
                     </button>
-                    <a href="?report=<?= htmlspecialchars($report_type) ?>" class="btn btn-outline-secondary btn-sm">
+                    <a href="?report=<?= htmlspecialchars($report_type) ?>&school_year=" class="btn btn-outline-secondary btn-sm">
                         <i class="bi bi-x-circle me-1"></i> Clear
                     </a>
                 </div>
@@ -783,8 +948,8 @@ require __DIR__ . '/../partials/sidebar.php';
             <div class="card-body" style="padding:.75rem 1.25rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap">
                 <div style="font-size:.85rem;color:var(--text-2)">
                     <i class="bi bi-info-circle me-1"></i>
-                    <strong style="color:var(--text)"><?= number_format(count($masterlist)) ?></strong> student(s) across
-                    <strong style="color:var(--text)"><?= number_format(count($grouped_masterlist)) ?></strong> grade level(s)
+                    <strong style="color:var(--text)"><?= number_format($total_masterlist_students) ?></strong> total student(s).
+                    Showing section <?= number_format($offset_master + 1) ?>–<?= number_format(min($offset_master + $per_page_sections, $total_master_sections)) ?>.
                 </div>
                 <div class="d-flex gap-2">
                     <button type="button" class="btn-ghost" onclick="document.querySelectorAll('.section-block').forEach(d=>d.open=true)">
@@ -800,7 +965,7 @@ require __DIR__ . '/../partials/sidebar.php';
         <?php if (!empty($masterlist_status_counts)): ?>
         <div class="card" style="margin-bottom:1rem">
             <div class="status-summary-bar">
-                <span class="label"><i class="bi bi-tags-fill me-1"></i>Status breakdown</span>
+                <span class="label"><i class="bi bi-tags-fill me-1"></i>Status breakdown (Current Page)</span>
                 <?php foreach ($masterlist_status_counts as $st => $cnt):
                     $cls  = 'status-chip ' . strtolower($st);
                 ?>
@@ -810,7 +975,7 @@ require __DIR__ . '/../partials/sidebar.php';
                         <span class="count"><?= number_format($cnt) ?></span>
                     </span>
                 <?php endforeach; ?>
-                <span class="total-chip"><i class="bi bi-people-fill me-1"></i>Total: <?= number_format(count($masterlist)) ?></span>
+                <span class="total-chip"><i class="bi bi-people-fill me-1"></i>Page Total: <?= number_format(count($masterlist)) ?></span>
             </div>
         </div>
         <?php endif; ?>
@@ -872,6 +1037,10 @@ require __DIR__ . '/../partials/sidebar.php';
                         <span class="mini-pill"><i class="bi bi-people me-1"></i><?= number_format(count($students)) ?></span>
                         <span class="mini-pill male"><i class="bi bi-gender-male me-1"></i><?= number_format($sec_m) ?></span>
                         <span class="mini-pill female"><i class="bi bi-gender-female me-1"></i><?= number_format($sec_f) ?></span>
+                        <!-- Export Specific Section Button -->
+                        <a href="?<?= http_build_query(array_merge($filter_arr, ['report'=>'masterlist', 'export_word'=>1, 'export_section'=>$section])) ?>" class="btn-ghost no-print" onclick="event.stopPropagation();" title="Export just this section to Word">
+                            <i class="bi bi-file-word text-primary"></i> Export
+                        </a>
                     </div>
                 </summary>
                 <div class="section-body">
@@ -926,6 +1095,32 @@ require __DIR__ . '/../partials/sidebar.php';
             <?php endforeach; ?>
         </div>
         <?php endforeach; ?>
+
+        <!-- Masterlist Pagination -->
+        <?php if ($total_pages_master > 1): ?>
+        <div class="pagination-bar">
+            <div class="page-info">
+                Showing Sections <strong><?= number_format($offset_master + 1) ?>–<?= number_format(min($offset_master + $per_page_sections, $total_master_sections)) ?></strong> of <strong><?= number_format($total_master_sections) ?></strong>
+            </div>
+            <div class="pagination">
+                <?php $base_url_master = '?' . http_build_query(array_merge($filter_arr, ['report' => 'masterlist'])); ?>
+                <a href="<?= $base_url_master ?>&page=1" class="page-btn <?= $page_master <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-left"></i></a>
+                <a href="<?= $base_url_master ?>&page=<?= max(1, $page_master - 1) ?>" class="page-btn <?= $page_master <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-left"></i></a>
+                
+                <?php 
+                $start_page = max(1, $page_master - 2); 
+                $end_page = min($total_pages_master, $page_master + 2); 
+                for ($i = $start_page; $i <= $end_page; $i++): 
+                ?>
+                    <a href="<?= $base_url_master ?>&page=<?= $i ?>" class="page-btn <?= $i === $page_master ? 'active' : '' ?>"><?= $i ?></a>
+                <?php endfor; ?>
+                
+                <a href="<?= $base_url_master ?>&page=<?= min($total_pages_master, $page_master + 1) ?>" class="page-btn <?= $page_master >= $total_pages_master ? 'disabled' : '' ?>"><i class="bi bi-chevron-right"></i></a>
+                <a href="<?= $base_url_master ?>&page=<?= $total_pages_master ?>" class="page-btn <?= $page_master >= $total_pages_master ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-right"></i></a>
+            </div>
+        </div>
+        <?php endif; ?>
+
     <?php endif; ?>
 
     <?php elseif ($report_type === 'by_grade'): ?>
@@ -1055,47 +1250,39 @@ require __DIR__ . '/../partials/sidebar.php';
     </div>
 
     <?php elseif ($report_type === 'documents'): ?>
-    <?php
-        $complete = 0; $partial = 0; $missing = 0;
-        foreach ($doc_report as $d) {
-            if ($d['docs_total'] > 0 && $d['docs_uploaded'] >= $d['docs_total']) $complete++;
-            elseif ($d['docs_uploaded'] > 0) $partial++;
-            else $missing++;
-        }
-    ?>
     <div class="stat-grid">
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-people-fill"></i></div>
             <div class="stat-info">
-                <div class="stat-value"><?= number_format(count($doc_report)) ?></div>
+                <div class="stat-value"><?= number_format($total_doc_students) ?></div>
                 <div class="stat-label">Total Students</div>
             </div>
         </div>
         <div class="stat-card tone-green">
             <div class="stat-icon"><i class="bi bi-check2-circle"></i></div>
             <div class="stat-info">
-                <div class="stat-value"><?= number_format($complete) ?></div>
+                <div class="stat-value"><?= number_format($doc_complete) ?></div>
                 <div class="stat-label">Complete</div>
             </div>
         </div>
         <div class="stat-card tone-amber">
             <div class="stat-icon"><i class="bi bi-hourglass-split"></i></div>
             <div class="stat-info">
-                <div class="stat-value"><?= number_format($partial) ?></div>
+                <div class="stat-value"><?= number_format($doc_partial) ?></div>
                 <div class="stat-label">Partial</div>
             </div>
         </div>
         <div class="stat-card tone-red">
             <div class="stat-icon"><i class="bi bi-x-circle"></i></div>
             <div class="stat-info">
-                <div class="stat-value"><?= number_format($missing) ?></div>
+                <div class="stat-value"><?= number_format($doc_missing) ?></div>
                 <div class="stat-label">Missing All</div>
             </div>
         </div>
     </div>
 
     <div class="card">
-        <div class="card-header"><h3><i class="bi bi-folder-check"></i> Document Compliance <span class="hint">(<?= count($doc_report) ?> students)</span></h3></div>
+        <div class="card-header"><h3><i class="bi bi-folder-check"></i> Document Compliance <span class="hint">(<?= count($doc_report) ?> on this page)</span></h3></div>
         <div class="card-body no-padding">
             <div class="table-scroll">
                 <table class="table-admin">
@@ -1121,7 +1308,7 @@ require __DIR__ . '/../partials/sidebar.php';
                         else { $fill = 'fill-partial'; $label = 'Partial'; $pill = 'warning'; }
                     ?>
                         <tr>
-                            <td class="cell-muted"><?= $i++ ?></td>
+                            <td class="cell-muted"><?= $i++ + $offset_doc ?></td>
                             <td class="cell-strong"><?= htmlspecialchars($d['student_id_number']??'—') ?></td>
                             <td class="cell-strong"><?= htmlspecialchars($d['last_name'].', '.$d['first_name']) ?></td>
                             <td><?= htmlspecialchars($d['grade_level']??'—') ?></td>
@@ -1147,6 +1334,31 @@ require __DIR__ . '/../partials/sidebar.php';
             </div>
         </div>
     </div>
+    
+    <!-- Documents Pagination -->
+    <?php if ($total_pages_doc > 1): ?>
+    <div class="pagination-bar">
+        <div class="page-info">
+            Showing students <strong><?= number_format($offset_doc + 1) ?>–<?= number_format(min($offset_doc + $per_page, $total_doc_students)) ?></strong> of <strong><?= number_format($total_doc_students) ?></strong>
+        </div>
+        <div class="pagination">
+            <?php $base_url_doc = '?' . http_build_query(array_merge($filter_arr, ['report' => 'documents'])); ?>
+            <a href="<?= $base_url_doc ?>&page=1" class="page-btn <?= $page_doc <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-left"></i></a>
+            <a href="<?= $base_url_doc ?>&page=<?= max(1, $page_doc - 1) ?>" class="page-btn <?= $page_doc <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-left"></i></a>
+            
+            <?php 
+            $start_page = max(1, $page_doc - 2); 
+            $end_page = min($total_pages_doc, $page_doc + 2); 
+            for ($i = $start_page; $i <= $end_page; $i++): 
+            ?>
+                <a href="<?= $base_url_doc ?>&page=<?= $i ?>" class="page-btn <?= $i === $page_doc ? 'active' : '' ?>"><?= $i ?></a>
+            <?php endfor; ?>
+            
+            <a href="<?= $base_url_doc ?>&page=<?= min($total_pages_doc, $page_doc + 1) ?>" class="page-btn <?= $page_doc >= $total_pages_doc ? 'disabled' : '' ?>"><i class="bi bi-chevron-right"></i></a>
+            <a href="<?= $base_url_doc ?>&page=<?= $total_pages_doc ?>" class="page-btn <?= $page_doc >= $total_pages_doc ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-right"></i></a>
+        </div>
+    </div>
+    <?php endif; ?>
 
     <?php elseif ($report_type === 'graduated'): ?>
     <div class="stat-grid">
@@ -1215,6 +1427,32 @@ require __DIR__ . '/../partials/sidebar.php';
             <?php endif; ?>
         </div>
     </div>
+    
+    <!-- Graduated Pagination -->
+    <?php if ($total_pages_grad > 1): ?>
+    <div class="pagination-bar">
+        <div class="page-info">
+            Showing students <strong><?= number_format($offset_grad + 1) ?>–<?= number_format(min($offset_grad + $per_page, $total_graduated)) ?></strong> of <strong><?= number_format($total_graduated) ?></strong>
+        </div>
+        <div class="pagination">
+            <?php $base_url_grad = '?' . http_build_query(array_merge($filter_arr, ['report' => 'graduated'])); ?>
+            <a href="<?= $base_url_grad ?>&page=1" class="page-btn <?= $page_grad <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-left"></i></a>
+            <a href="<?= $base_url_grad ?>&page=<?= max(1, $page_grad - 1) ?>" class="page-btn <?= $page_grad <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-left"></i></a>
+            
+            <?php 
+            $start_page = max(1, $page_grad - 2); 
+            $end_page = min($total_pages_grad, $page_grad + 2); 
+            for ($i = $start_page; $i <= $end_page; $i++): 
+            ?>
+                <a href="<?= $base_url_grad ?>&page=<?= $i ?>" class="page-btn <?= $i === $page_grad ? 'active' : '' ?>"><?= $i ?></a>
+            <?php endfor; ?>
+            
+            <a href="<?= $base_url_grad ?>&page=<?= min($total_pages_grad, $page_grad + 1) ?>" class="page-btn <?= $page_grad >= $total_pages_grad ? 'disabled' : '' ?>"><i class="bi bi-chevron-right"></i></a>
+            <a href="<?= $base_url_grad ?>&page=<?= $total_pages_grad ?>" class="page-btn <?= $page_grad >= $total_pages_grad ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-right"></i></a>
+        </div>
+    </div>
+    <?php endif; ?>
+
     <?php endif; ?>
 </div>
 

@@ -2,8 +2,12 @@
 // shared/pages/sections_list.php
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
+require_once __DIR__ . '/../lib/teacher_scope.php';
 
 $__nav_section = 'students';
+
+$__is_teacher = (($_SESSION['admin_role'] ?? '') === 'teacher');
+$__teacher_id = $__is_teacher ? (int)($_SESSION['admin_id'] ?? 0) : 0;
 
 /* ═══ EXPORT MODES ═══ */
 $export_word = isset($_GET['export_word']) && $_GET['export_word'] == 1;
@@ -18,11 +22,12 @@ $section     = trim($_GET['section'] ?? '');
 $show_student_list = !empty($section);
 
 /* ═══ ROLE / CSRF ═══ */
-$can_edit_section = in_array($_SESSION['admin_role'] ?? '', ['teacher', 'registrar', 'superadmin'], true);
-$is_teacher       = ($_SESSION['admin_role'] ?? '') === 'teacher';
+$can_edit_section = in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true);
 $csrf_token       = csrf_token();
 
-/* ═══ POST: RENAME SECTION (Scoped to specific cluster) ═══ */
+/* ═══════════════════════════════════════════════════════════════════
+   POST: RENAME SECTION (Scoped to specific cluster)
+   ═══════════════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_section'])) {
 
     if (!$can_edit_section) {
@@ -33,9 +38,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_section'])) {
 
     $old_name       = trim((string)($_POST['old_section_name'] ?? ''));
     $new_name       = trim((string)($_POST['new_section_name'] ?? ''));
-    $target_grade   = trim((string)($_POST['target_grade'] ?? ''));
-    $target_sy      = trim((string)($_POST['target_sy'] ?? ''));
-    $target_program = trim((string)($_POST['target_program'] ?? ''));
+    $target_grade   = trim((string)($_POST['target_grade']     ?? ''));
+    $target_sy      = trim((string)($_POST['target_sy']        ?? ''));
+    $target_program = trim((string)($_POST['target_program']   ?? ''));
 
     $redirect_params = [
         'school_year' => $school_year,
@@ -61,14 +66,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_section'])) {
         exit;
     }
 
-    /* Uniqueness check WITHIN the specific cluster */
+    // FIX: Verify the cluster actually exists before touching anything.
+    if ($err === '') {
+        $verify = $conn->prepare("
+            SELECT 1 FROM enrollment_form
+             WHERE section = ?
+               AND COALESCE(grade_level, '') = ?
+               AND COALESCE(school_year, '') = ?
+               AND COALESCE(program, '')     = ?
+             LIMIT 1
+        ");
+        if ($verify) {
+            $verify->bind_param('ssss', $old_name, $target_grade, $target_sy, $target_program);
+            $verify->execute();
+            $verify->store_result();
+            if ($verify->num_rows === 0) {
+                $err = 'That section cluster no longer exists. Refresh and try again.';
+            }
+            $verify->close();
+        } else {
+            $err = 'System error: could not verify cluster.';
+        }
+    }
+
+    // Verify new name doesn't already exist in this cluster
     if ($err === '') {
         $chk = $conn->prepare("
             SELECT COUNT(*) AS c FROM enrollment_form
-            WHERE section = ?
-              AND COALESCE(grade_level, '') = ?
-              AND COALESCE(school_year, '') = ?
-              AND COALESCE(program, '') = ?
+             WHERE section = ?
+               AND COALESCE(grade_level, '') = ?
+               AND COALESCE(school_year, '') = ?
+               AND COALESCE(program, '')     = ?
         ");
         if ($chk) {
             $chk->bind_param('ssss', $new_name, $target_grade, $target_sy, $target_program);
@@ -83,7 +111,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_section'])) {
         }
     }
 
-    /* Rename globally inside a transaction */
     if ($err === '') {
         $conn->begin_transaction();
         try {
@@ -93,7 +120,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_section'])) {
                  WHERE section = ?
                    AND COALESCE(grade_level, '') = ?
                    AND COALESCE(school_year, '') = ?
-                   AND COALESCE(program, '') = ?
+                   AND COALESCE(program, '')     = ?
             ");
             if (!$upd) throw new RuntimeException('Prepare failed: ' . $conn->error);
             $upd->bind_param('sssss', $new_name, $old_name, $target_grade, $target_sy, $target_program);
@@ -105,6 +132,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_section'])) {
                 $conn->rollback();
                 $err = 'No records found matching that section and cluster.';
             } else {
+                // FIX: COALESCE on teacher_sections cascade so NULL columns don't skip the row.
+                $cascade = $conn->prepare("
+                    UPDATE teacher_sections
+                       SET section = ?
+                     WHERE section = ?
+                       AND COALESCE(grade_level, '') = ?
+                       AND COALESCE(school_year, '') = ?
+                       AND COALESCE(program, '')     = ?
+                ");
+                if ($cascade) {
+                    $cascade->bind_param('sssss', $new_name, $old_name, $target_grade, $target_sy, $target_program);
+                    $cascade->execute();
+                    $cascade->close();
+                }
+
                 $conn->commit();
 
                 if (function_exists('audit_log')) {
@@ -157,11 +199,17 @@ if (!$show_student_list) {
     $params = [];
     $types = "";
 
+    if ($__is_teacher) {
+        $ts = teacher_scope_filter($conn, $__teacher_id, 'e');
+        $where .= " AND " . $ts['sql'];
+        $params = array_merge($params, $ts['params']);
+        $types .= $ts['types'];
+    }
+
     if ($school_year) { $where .= " AND e.school_year = ?"; $params[] = $school_year; $types .= "s"; }
     if ($grade_level) { $where .= " AND e.grade_level = ?"; $params[] = $grade_level; $types .= "s"; }
     if ($program)     { $where .= " AND e.program = ?";     $params[] = $program;     $types .= "s"; }
 
-    /* FIXED: Group by Section AND Grade Level so Grade 11 and Grade 12 are separated */
     $sql = "SELECT e.section, e.grade_level,
                    COUNT(DISTINCT s.student_id) AS total,
                    COUNT(DISTINCT CASE WHEN s.sex = 'Male'   THEN s.student_id END) AS boys,
@@ -212,6 +260,13 @@ if (!$show_student_list) {
     $params = [$section];
     $types = "s";
 
+    if ($__is_teacher) {
+        $ts = teacher_scope_filter($conn, $__teacher_id, 'e');
+        $where .= " AND " . $ts['sql'];
+        $params = array_merge($params, $ts['params']);
+        $types .= $ts['types'];
+    }
+
     if ($school_year) { $where .= " AND e.school_year = ?"; $params[] = $school_year; $types .= "s"; }
     if ($grade_level) { $where .= " AND e.grade_level = ?"; $params[] = $grade_level; $types .= "s"; }
     if ($program)     { $where .= " AND e.program = ?";     $params[] = $program;     $types .= "s"; }
@@ -252,10 +307,38 @@ if (!$show_student_list) {
     $cstmt->close();
 }
 
-/* ═══ DROPDOWN DATA ═══ */
-$years    = $conn->query("SELECT DISTINCT school_year FROM enrollment_form ORDER BY school_year DESC")->fetch_all(MYSQLI_ASSOC);
-$grades   = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form ORDER BY grade_level ASC")->fetch_all(MYSQLI_ASSOC);
-$programs = $conn->query("SELECT DISTINCT program FROM enrollment_form WHERE program IS NOT NULL AND program != '' ORDER BY program ASC")->fetch_all(MYSQLI_ASSOC);
+/* ═══ Dropdowns (scoped for teachers) ═══ */
+if ($__is_teacher) {
+    $ts = teacher_scope_filter($conn, $__teacher_id, 'enrollment_form');
+
+    $ys = $conn->prepare("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' AND " . $ts['sql'] . " ORDER BY school_year DESC");
+    if ($ys) {
+        if (!empty($ts['params'])) $ys->bind_param($ts['types'], ...$ts['params']);
+        $ys->execute();
+        $years = $ys->get_result()->fetch_all(MYSQLI_ASSOC);
+        $ys->close();
+    } else { $years = []; }
+
+    $gs = $conn->prepare("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' AND " . $ts['sql'] . " ORDER BY grade_level ASC");
+    if ($gs) {
+        if (!empty($ts['params'])) $gs->bind_param($ts['types'], ...$ts['params']);
+        $gs->execute();
+        $grades = $gs->get_result()->fetch_all(MYSQLI_ASSOC);
+        $gs->close();
+    } else { $grades = []; }
+
+    $ps = $conn->prepare("SELECT DISTINCT program FROM enrollment_form WHERE program IS NOT NULL AND program != '' AND " . $ts['sql'] . " ORDER BY program ASC");
+    if ($ps) {
+        if (!empty($ts['params'])) $ps->bind_param($ts['types'], ...$ts['params']);
+        $ps->execute();
+        $programs = $ps->get_result()->fetch_all(MYSQLI_ASSOC);
+        $ps->close();
+    } else { $programs = []; }
+} else {
+    $years    = $conn->query("SELECT DISTINCT school_year FROM enrollment_form ORDER BY school_year DESC")->fetch_all(MYSQLI_ASSOC);
+    $grades   = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form ORDER BY grade_level ASC")->fetch_all(MYSQLI_ASSOC);
+    $programs = $conn->query("SELECT DISTINCT program FROM enrollment_form WHERE program IS NOT NULL AND program != '' ORDER BY program ASC")->fetch_all(MYSQLI_ASSOC);
+}
 
 /* ═══ STATS — summary ═══ */
 $stat_total_sections = 0;
@@ -857,7 +940,8 @@ require __DIR__ . '/../partials/sidebar.php';
                             <i class="bi bi-pencil-square"></i> Update Section Name
                         </button>
                     <?php endif; ?>
-                    <a href="<?= URL_PREFIX ?>/sections_list.php?<?= http_build_query(array_filter(['school_year'=>$school_year,'grade_level'=>$grade_level,'program'=>$program])) ?>" class="btn-hero">
+
+                    <a href="<?= URL_PREFIX ?>/sections_list.php" class="btn-hero">
                         <i class="bi bi-arrow-left"></i> All Sections
                     </a>
                 </div>
@@ -1015,7 +1099,7 @@ require __DIR__ . '/../partials/sidebar.php';
                 </h3>
                 <?php if (!empty($section_result)): ?>
                     <span class="cell-muted" style="font-size:.75rem">
-                        <i class="bi bi-hand-index-thumb me-1"></i> Row → full roster · chip → that grade / year only
+                        <i class="bi bi-hand-index-thumb me-1"></i> Row → full roster · chip → that grade / year only<?= $can_edit_section ? ' · pencil → rename' : '' ?>
                     </span>
                 <?php endif; ?>
             </div>
@@ -1030,12 +1114,11 @@ require __DIR__ . '/../partials/sidebar.php';
                                 <th class="cell-center" style="width:70px">Male</th>
                                 <th class="cell-center" style="width:80px">Female</th>
                                 <th>Clusters</th>
-                                <th style="width:44px"></th>
+                                <th style="width:110px"></th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php foreach($section_result as $s):
-                                // FIXED: Include grade_level in the URL to keep the roster separated
                                 $roster_url = URL_PREFIX . '/sections_list.php?' . http_build_query(array_filter([
                                     'section'     => $s['section'],
                                     'grade_level' => $s['grade_level'],
@@ -1102,7 +1185,15 @@ require __DIR__ . '/../partials/sidebar.php';
                                         <span class="cell-muted">—</span>
                                     <?php endif; ?>
                                 </td>
-                                <td style="text-align:right">
+                                <td style="text-align:right;white-space:nowrap">
+                                    <?php if ($can_edit_section): ?>
+                                        <a href="<?= htmlspecialchars($roster_url . '&open_rename=1', ENT_QUOTES, 'UTF-8') ?>"
+                                           class="btn btn-icon btn-outline-warning"
+                                           onclick="event.stopPropagation();"
+                                           title="Rename this section">
+                                            <i class="bi bi-pencil-square"></i>
+                                        </a>
+                                    <?php endif; ?>
                                     <i class="bi bi-chevron-right row-chevron" aria-hidden="true"></i>
                                 </td>
                             </tr>
@@ -1133,8 +1224,7 @@ require __DIR__ . '/../partials/sidebar.php';
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8') ?>">
                 <input type="hidden" name="rename_section" value="1">
                 <input type="hidden" name="old_section_name" value="<?= htmlspecialchars($section, ENT_QUOTES, 'UTF-8') ?>">
-                
-                <!-- Hidden fields populated by JS based on cluster selection -->
+
                 <input type="hidden" name="target_grade" id="rs_grade" value="">
                 <input type="hidden" name="target_sy" id="rs_sy" value="">
                 <input type="hidden" name="target_program" id="rs_program" value="">
@@ -1151,10 +1241,10 @@ require __DIR__ . '/../partials/sidebar.php';
                     <div class="mb-3">
                         <label class="form-label" for="rs_cluster">Which cluster to rename? <span class="text-danger">*</span></label>
                         <select class="form-select" id="rs_cluster" required>
-                            <?php foreach ($roster_clusters as $c): 
+                            <?php foreach ($roster_clusters as $c):
                                 $val = json_encode([
-                                    'g' => $c['grade_level'], 
-                                    's' => $c['school_year'], 
+                                    'g' => $c['grade_level'],
+                                    's' => $c['school_year'],
                                     'p' => $c['program']
                                 ]);
                                 $label = _cluster_chip_label($c);
@@ -1208,20 +1298,17 @@ require __DIR__ . '/../partials/sidebar.php';
                         </div>
                     </div>
 
-                    <?php if ($is_teacher): ?>
-                    <div class="teacher-note">
-                        <i class="bi bi-info-circle-fill"></i>
+                    <div class="teacher-note" style="background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 25%,transparent)">
+                        <i class="bi bi-shield-check"></i>
                         <span>
-                            You are renaming as a <strong>Teacher</strong>. This updates the master section record for this specific cluster.
+                            You are editing as <strong><?= htmlspecialchars(ucfirst($_SESSION['admin_role'] ?? 'admin')) ?></strong>.
+                            This renames the section cluster and cascades to <code>teacher_sections</code>.
                         </span>
                     </div>
-                    <?php endif; ?>
 
                     <div class="warning-note">
                         <i class="bi bi-exclamation-triangle-fill"></i>
-                        <span id="rs_warning_text">
-                            <!-- Populated by JS -->
-                        </span>
+                        <span id="rs_warning_text"></span>
                     </div>
                 </div>
 
@@ -1248,6 +1335,11 @@ require __DIR__ . '/../partials/sidebar.php';
     const clusterSelect = document.getElementById('rs_cluster');
     const warningText = document.getElementById('rs_warning_text');
 
+    // FIX: Auto-open when arriving via "?open_rename=1" from the summary table pencil button.
+    if (new URLSearchParams(location.search).get('open_rename') === '1') {
+        new bootstrap.Modal(modalEl).show();
+    }
+
     function updateWarning() {
         if (!clusterSelect || !warningText) return;
         const opt = clusterSelect.options[clusterSelect.selectedIndex];
@@ -1256,12 +1348,12 @@ require __DIR__ . '/../partials/sidebar.php';
         const grade = opt.getAttribute('data-grade');
         const sy = opt.getAttribute('data-sy');
         const prog = opt.getAttribute('data-program');
-        
+
         let label = [];
         if (grade) label.push(grade);
         if (sy) label.push('SY ' + sy);
         if (prog) label.push(prog);
-        
+
         warningText.innerHTML = `This will rename <strong>${count} record(s)</strong> in the <strong>${label.join(' · ')}</strong> cluster. Students in other grades or school years will not be affected.`;
     }
 
@@ -1273,7 +1365,7 @@ require __DIR__ . '/../partials/sidebar.php';
         newInput.value = oldValue;
         newInput.focus();
         newInput.select();
-        updateWarning(); // Populate warning text when modal opens
+        updateWarning();
     });
 
     modalEl.addEventListener('hidden.bs.modal', function () {
@@ -1291,11 +1383,10 @@ require __DIR__ . '/../partials/sidebar.php';
             alert('No cluster selected.');
             return;
         }
-        
-        // Populate the hidden inputs with the selected cluster data
+
         const clusterData = JSON.parse(clusterSelect.value);
-        document.getElementById('rs_grade').value = clusterData.g || '';
-        document.getElementById('rs_sy').value = clusterData.s || '';
+        document.getElementById('rs_grade').value   = clusterData.g || '';
+        document.getElementById('rs_sy').value      = clusterData.s || '';
         document.getElementById('rs_program').value = clusterData.p || '';
 
         const v = newInput.value.trim();

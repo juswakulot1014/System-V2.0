@@ -4,8 +4,13 @@ date_default_timezone_set('Asia/Manila');
 
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
+require_once __DIR__ . '/../lib/teacher_scope.php';   // PATCH 1: helper
 
 $__nav_section     = 'dashboard';
+
+// PATCH 2: teacher scope state
+$__is_teacher = (($_SESSION['admin_role'] ?? '') === 'teacher');
+$__teacher_id = $__is_teacher ? (int)($_SESSION['admin_id'] ?? 0) : 0;
 
 /* ── Detect AJAX Requests ── */
 $is_ajax = (isset($_GET['ajax']) && $_GET['ajax'] === '1') || 
@@ -65,12 +70,46 @@ function dash_url(array $changes = []): string {
 
 function dash_csv_safe($v): string { $s = (string)$v; return preg_match('/^[=+\-@\t\r]/', $s) ? "'" . $s : $s; }
 
-function dash_snapshot(mysqli $conn): array {
+// PATCH 3: dash_snapshot() accepts teacher_id and scopes all five queries
+function dash_snapshot(mysqli $conn, int $__teacher_id = 0): array {
     $week_start = date('Y-m-d', strtotime('monday this week'));
-    $s = dash_rows($conn, "SELECT COUNT(*) AS total, COALESCE(SUM(s.sex = 'Male'), 0) AS boys, COALESCE(SUM(s.sex = 'Female'), 0) AS girls, COALESCE(SUM(le.status IS NULL OR le.status = 'Active'), 0) AS active, COALESCE(SUM(le.section IS NULL OR le.section = ''), 0) AS no_section, COUNT(DISTINCT NULLIF(le.section, '')) AS sections, COALESCE(SUM(s.created_at >= ?), 0) AS new_week " . DASH_BASE_VIS_ONLY, 's', [$week_start])[0] ?? [];
-    $grade_rows = dash_rows($conn, "SELECT le.grade_level AS label, COUNT(*) AS cnt " . dash_vis("le.grade_level IS NOT NULL AND le.grade_level <> ''") . " GROUP BY le.grade_level ORDER BY le.grade_level");
-    $strand_rows = dash_rows($conn, "SELECT COALESCE(NULLIF(le.strand, ''), 'Unassigned') AS label, COUNT(*) AS cnt " . dash_vis() . " GROUP BY label ORDER BY cnt DESC");
-    $recent_rows = dash_rows($conn, "SELECT s.student_id, s.first_name, s.last_name, s.lrn, s.student_id_number, le.grade_level, le.strand, le.section, le.enrolled_at " . dash_vis() . " ORDER BY le.enrolled_at DESC LIMIT 10");
+
+    if ($__teacher_id > 0) {
+        $ts        = teacher_scope_filter($conn, $__teacher_id, 'le');
+        $ts_sql    = ' AND ' . $ts['sql'];
+        $ts_types  = $ts['types'];
+        $ts_params = $ts['params'];
+    } else {
+        $ts_sql    = '';
+        $ts_types  = '';
+        $ts_params = [];
+    }
+
+    $s = dash_rows(
+        $conn,
+        "SELECT COUNT(*) AS total, COALESCE(SUM(s.sex = 'Male'), 0) AS boys, COALESCE(SUM(s.sex = 'Female'), 0) AS girls, COALESCE(SUM(le.status IS NULL OR le.status = 'Active'), 0) AS active, COALESCE(SUM(le.section IS NULL OR le.section = ''), 0) AS no_section, COUNT(DISTINCT NULLIF(le.section, '')) AS sections, COALESCE(SUM(s.created_at >= ?), 0) AS new_week " . DASH_BASE_VIS_ONLY . $ts_sql,
+        's' . $ts_types,
+        array_merge([$week_start], $ts_params)
+    )[0] ?? [];
+
+    $grade_rows = dash_rows(
+        $conn,
+        "SELECT le.grade_level AS label, COUNT(*) AS cnt " . dash_vis("le.grade_level IS NOT NULL AND le.grade_level <> ''") . $ts_sql . " GROUP BY le.grade_level ORDER BY le.grade_level",
+        $ts_types, $ts_params
+    );
+
+    $strand_rows = dash_rows(
+        $conn,
+        "SELECT COALESCE(NULLIF(le.strand, ''), 'Unassigned') AS label, COUNT(*) AS cnt " . dash_vis() . $ts_sql . " GROUP BY label ORDER BY cnt DESC",
+        $ts_types, $ts_params
+    );
+
+    $recent_rows = dash_rows(
+        $conn,
+        "SELECT s.student_id, s.first_name, s.last_name, s.lrn, s.student_id_number, le.grade_level, le.strand, le.section, le.enrolled_at " . dash_vis() . $ts_sql . " ORDER BY le.enrolled_at DESC LIMIT 10",
+        $ts_types, $ts_params
+    );
+
     $recent = [];
     foreach ($recent_rows as $r) {
         $recent[] = [
@@ -80,24 +119,30 @@ function dash_snapshot(mysqli $conn): array {
             'section' => (string)($r['section'] ?? ''), 'enrolled_label' => !empty($r['enrolled_at']) ? date('M d, Y', strtotime($r['enrolled_at'])) : '',
         ];
     }
+
+    $pending_count = $__teacher_id > 0
+        ? 0
+        : dash_scalar($conn, "SELECT COUNT(DISTINCT student_id) FROM enrollment_form WHERE status = 'Pending'");
+
     return [
         'server_time' => date('c'), 'server_time_label' => date('M d, Y g:i:s A'),
         'stats' => ['total' => (int)($s['total'] ?? 0), 'boys' => (int)($s['boys'] ?? 0), 'girls' => (int)($s['girls'] ?? 0), 'active' => (int)($s['active'] ?? 0), 'no_section' => (int)($s['no_section'] ?? 0), 'sections' => (int)($s['sections'] ?? 0), 'new_week' => (int)($s['new_week'] ?? 0)],
-        'pending' => dash_scalar($conn, "SELECT COUNT(DISTINCT student_id) FROM enrollment_form WHERE status = 'Pending'"),
+        'pending' => $pending_count,
         'grade' => ['labels' => array_column($grade_rows, 'label'), 'counts' => array_map('intval', array_column($grade_rows, 'cnt'))],
         'strand' => ['labels' => array_column($strand_rows, 'label'), 'counts' => array_map('intval', array_column($strand_rows, 'cnt'))],
         'recent' => $recent,
     ];
 }
 
+// PATCH 4: pass teacher_id into both snapshot call sites
 if (dash_get('action') === 'live') {
     header('Content-Type: application/json; charset=UTF-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-    echo json_encode(dash_snapshot($conn), JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    echo json_encode(dash_snapshot($conn, $__teacher_id), JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
 }
 
-$snap = dash_snapshot($conn);
+$snap = dash_snapshot($conn, $__teacher_id);
 
 /* ═══════════════════════════════════════════════════════════
    DEFAULT SCHOOL YEAR LOGIC
@@ -129,7 +174,16 @@ $SORTS = [
 
 $sort_in = dash_get('sort'); $sort = isset($SORTS[$sort_in]) ? $sort_in : 'grade'; $dir_lc = strtolower(dash_get('dir')) === 'desc' ? 'desc' : 'asc'; $dir_sql = strtoupper($dir_lc);
 
+// PATCH 5: teacher scope added to the $where array FIRST (before user filters, so param order stays aligned)
 $where  = [DASH_VISIBLE]; $types  = ''; $params = [];
+
+if ($__is_teacher) {
+    $ts = teacher_scope_filter($conn, $__teacher_id, 'le');
+    $where[] = $ts['sql'];
+    $types  .= $ts['types'];
+    $params  = array_merge($params, $ts['params']);
+}
+
 if ($f_search !== '') { $where[] = "(s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)"; $like = '%' . addcslashes($f_search, '%_\\') . '%'; array_push($params, $like, $like, $like, $like); $types  .= 'ssss'; }
 if ($f_grade !== '')  { $where[] = 'le.grade_level = ?'; $params[] = $f_grade;  $types .= 's'; }
 if ($f_sy !== '')     { $where[] = 'le.school_year = ?'; $params[] = $f_sy;     $types .= 's'; }
@@ -255,7 +309,9 @@ if (!$is_ajax) {
             <?php if (isset($_SESSION['error'])): ?><div class="flash error"><i class="bi bi-exclamation-triangle-fill"></i><span><?= dash_e($_SESSION['error']) ?></span><button class="btn-close" data-bs-dismiss="alert"></button></div><?php unset($_SESSION['error']); endif; ?>
 
             <div class="dash-quick">
-                <a class="btn btn-primary btn-sm" href="<?= URL_PREFIX ?>/pending_enrollments.php"><i class="bi bi-hourglass-split me-1"></i> Review pending <span class="badge-count" data-stat="pending"><?= number_format($snap['pending']) ?></span></a>
+                <?php if (!$__is_teacher): ?>
+                    <a class="btn btn-primary btn-sm" href="<?= URL_PREFIX ?>/pending_enrollments.php"><i class="bi bi-hourglass-split me-1"></i> Review pending <span class="badge-count" data-stat="pending"><?= number_format($snap['pending']) ?></span></a>
+                <?php endif; ?>
                 <a class="btn btn-outline-primary btn-sm" href="<?= URL_PREFIX ?>/reports.php"><i class="bi bi-file-earmark-text me-1"></i> Reports</a>
                 <a class="btn btn-outline-success btn-sm" href="<?= dash_e(dash_url(['export' => 'csv', 'page' => null])) ?>"><i class="bi bi-filetype-csv me-1"></i> Export CSV</a>
             </div>

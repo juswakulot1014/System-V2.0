@@ -11,35 +11,116 @@ require_once __DIR__ . '/../../config/mailer.php';
 require_once __DIR__ . '/../../config/security.php';
 
 /* =========================================================
-   1. HELPERS
+   1. EMAIL HELPERS & LAYOUTS
    ========================================================= */
 
+// Generates a flattened white-background JPEG for CID attachment
+if (!function_exists('create_email_logo_temp')) {
+    function create_email_logo_temp(string $dir): ?string {
+        if (!extension_loaded('gd')) return null; 
+
+        $files = glob($dir . 'usat.*');
+        if (empty($files)) return null;
+        
+        $path = $files[0];
+        $info = @getimagesize($path);
+        if (!$info) return null;
+
+        $mime = $info['mime'];
+        $w = $info[0];
+        $h = $info[1];
+
+        switch ($mime) {
+            case 'image/jpeg': $im = @imagecreatefromjpeg($path); break;
+            case 'image/png':  $im = @imagecreatefrompng($path);  break;
+            case 'image/webp': $im = @imagecreatefromwebp($path); break;
+            default: return null;
+        }
+        if (!$im) return null;
+
+        // Resize to max 100px
+        $size = 100;
+        $new_w = $size;
+        $new_h = (int)round(($h / $w) * $size);
+        
+        $new_im = imagecreatetruecolor($new_w, $new_h);
+        
+        // CRITICAL: Fill with solid white to prevent Gmail Dark Mode blackout
+        $white = imagecolorallocate($new_im, 255, 255, 255);
+        imagefill($new_im, 0, 0, $white);
+        
+        imagecopyresampled($new_im, $im, 0, 0, 0, 0, $new_w, $new_h, $w, $h);
+
+        // Save to temp file as JPEG
+        $temp = tempnam(sys_get_temp_dir(), 'email_logo_') . '.jpg';
+        imagejpeg($new_im, $temp, 90); 
+
+        imagedestroy($im);
+        imagedestroy($new_im);
+
+        return $temp;
+    }
+}
+
+if (!function_exists('send_usat_email')) {
+    function send_usat_email(string $to, string $subject, string $html, string $alt = ''): array {
+        [$mail, $buildErr] = mailer_build();
+        if ($mail === null) return ['ok' => false, 'error' => $buildErr];
+
+        $mail->addAddress($to);
+        $mail->isHTML(true);
+        $mail->Subject = $subject;
+        $mail->Body    = $html;
+        $mail->AltBody = $alt !== '' ? $alt : strip_tags(str_replace(['<br>', '<br/>', '</p>', '</tr>', '</div>'], "\n", $html));
+        
+        // Prevent Gmail from grouping emails
+        $mail->addCustomHeader('X-Entity-Ref-ID', uniqid('usat_', true));
+
+        $temp_logo = null;
+        // ONLY attach the logo if the HTML actually uses it
+        if (strpos($html, 'cid:usat_logo') !== false) {
+            $temp_logo = create_email_logo_temp(__DIR__ . '/../../assets/img/');
+            if ($temp_logo && is_file($temp_logo)) {
+                // Give it a clean filename so Gmail doesn't show 'ema123.tmp.jpg'
+                $mail->addEmbeddedImage($temp_logo, 'usat_logo', 'USAT_Logo.jpg');
+            }
+        }
+
+        try {
+            $mail->send();
+            $res = ['ok' => true, 'error' => null, 'attempts' => 1, 'transient' => false];
+        } catch (\Throwable $e) {
+            $res = ['ok' => false, 'error' => $mail->ErrorInfo ?: $e->getMessage(), 'attempts' => 1, 'transient' => false];
+        }
+
+        // Cleanup temp file immediately after sending
+        if ($temp_logo && is_file($temp_logo)) {
+            @unlink($temp_logo);
+        }
+
+        return $res;
+    }
+}
+
 if (!function_exists('usat_e')) {
-    function usat_e(?string $v, string $fallback = '—'): string
-    {
+    function usat_e(?string $v, string $fallback = '—'): string {
         $v = trim((string)$v);
         return htmlspecialchars($v === '' ? $fallback : $v, ENT_QUOTES, 'UTF-8');
     }
 }
 
 if (!function_exists('format_email_failure_note')) {
-    function format_email_failure_note(string $to, array $result): string
-    {
+    function format_email_failure_note(string $to, array $result): string {
         $attempts = (int)($result['attempts'] ?? 0);
         $err      = trim((string)($result['error'] ?? '')) ?: 'no error message';
         $kind     = !empty($result['transient']) ? 'transient' : 'permanent';
         if (strlen($err) > 200) { $err = substr($err, 0, 197) . '...'; }
-        return sprintf(
-            ' (Warning: email to %s failed after %d attempt(s) [%s] — %s)',
-            htmlspecialchars($to, ENT_QUOTES, 'UTF-8'),
-            $attempts, $kind, htmlspecialchars($err, ENT_QUOTES, 'UTF-8')
-        );
+        return sprintf(' (Warning: email to %s failed after %d attempt(s) [%s] — %s)', htmlspecialchars($to, ENT_QUOTES, 'UTF-8'), $attempts, $kind, htmlspecialchars($err, ENT_QUOTES, 'UTF-8'));
     }
 }
 
 if (!function_exists('log_email')) {
-    function log_email(mysqli $conn, int $eid, int $sid, string $to, string $subject, array $r, int $admin_id): void
-    {
+    function log_email(mysqli $conn, int $eid, int $sid, string $to, string $subject, array $r, int $admin_id): void {
         $status = !empty($r['ok']) ? 'sent' : 'failed';
         $err = null;
         if ($status === 'failed') {
@@ -56,47 +137,8 @@ if (!function_exists('log_email')) {
     }
 }
 
-if (!function_exists('usat_logo_html')) {
-    /** Formal Logo <img> for emails (Base64 Inline) */
-    function usat_logo_html(): string
-    {
-        // Locate the physical logo file relative to this page
-        $logo_file = __DIR__ . '/../../assets/img/usat.jpg';
-        $src = '';
-
-        // 1. Try Base64 inline encoding first (guarantees it shows up in Gmail/Outlook)
-        if (is_file($logo_file) && is_readable($logo_file)) {
-            $data = @file_get_contents($logo_file);
-            if ($data !== false && $data !== '') {
-                $fi = finfo_open(FILEINFO_MIME_TYPE);
-                $mime = $fi ? finfo_file($fi, $logo_file) : 'image/jpeg';
-                if ($fi) finfo_close($fi);
-                $src = 'data:' . $mime . ';base64,' . base64_encode($data);
-            }
-        }
-
-        // 2. Fallback to public URL if local file reading fails
-        if ($src === '') {
-            $base = trim((string)(getenv('APP_PUBLIC_URL') ?: ''));
-            if ($base !== '' && filter_var($base, FILTER_VALIDATE_URL) !== false) {
-                $src = rtrim($base, '/') . '/assets/img/usat.jpg';
-            }
-        }
-
-        // 3. Return empty string if no logo can be found
-        if ($src === '') {
-            return '';
-        }
-
-        return '<img src="' . $src . '" width="90" height="90"'
-             . ' alt="USAT College Logo"'
-             . ' style="display:block;margin:0 auto 12px;width:90px;height:90px;border-radius:50%;object-fit:cover;border:3px solid #ffffff;box-shadow:0 4px 6px rgba(0,0,0,0.1);">';
-    }
-}
-
 if (!function_exists('usat_detail_table')) {
-    function usat_detail_table(array $rows): string
-    {
+    function usat_detail_table(array $rows): string {
         $html  = '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid #cbd5e1;border-radius:6px;border-collapse:separate;overflow:hidden;margin-bottom:20px;">';
         $count = count($rows);
         $i     = 0;
@@ -115,13 +157,13 @@ if (!function_exists('usat_detail_table')) {
 }
 
 if (!function_exists('usat_email_layout')) {
-    /** Formal Corporate Layout */
-    function usat_email_layout(string $headerColor, string $title, string $subtitle, string $bodyHtml): string
-    {
+    function usat_email_layout(string $headerColor, string $title, string $subtitle, string $bodyHtml): string {
         $t    = htmlspecialchars($title, ENT_QUOTES, 'UTF-8');
         $s    = htmlspecialchars($subtitle, ENT_QUOTES, 'UTF-8');
-        $logo = usat_logo_html();
         $year = date('Y');
+        
+        // We use CID here. The white background in the style tag ensures Gmail Dark Mode ignores it.
+        $logo = '<img src="cid:usat_logo" width="80" height="80" alt="USAT Logo" style="display:block;margin:0 auto 12px;border-radius:50%;object-fit:contain;border:3px solid #ffffff;background:#ffffff;box-shadow:0 4px 6px rgba(0,0,0,0.1);">';
 
         return <<<HTML
 <!DOCTYPE html>
@@ -167,8 +209,7 @@ HTML;
 }
 
 if (!function_exists('approval_email_html')) {
-    function approval_email_html(string $name, array $e): string
-    {
+    function approval_email_html(string $name, array $e): string {
         $rows = [
             'Student ID'  => '<strong style="color:#047857;font-size:16px;">' . usat_e($e['student_id_number'] ?? null) . '</strong>',
             'LRN'         => usat_e($e['lrn'] ?? null),
@@ -185,7 +226,6 @@ if (!function_exists('approval_email_html')) {
             .     'We are pleased to inform you that your enrollment application for the upcoming academic term has been <strong>officially approved</strong>. Welcome to USAT College Sagay City Inc.!'
             . '</p>'
             
-            // Status Banner
             . '<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:30px;border-radius:6px;overflow:hidden;border:1px solid #059669;">'
             . '<tr><td style="background:#059669;color:#ffffff;padding:12px 20px;font-size:13px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;text-align:center;">'
             . '✓ Application Status: Approved'
@@ -205,18 +245,12 @@ if (!function_exists('approval_email_html')) {
             . '<p style="margin:5px 0 0;font-size:15px;line-height:1.6;color:#334155;font-weight:bold;">Office of the University Registrar</p>'
             . '<p style="margin:0;font-size:14px;color:#64748b;">USAT College Sagay City Inc.</p>';
 
-        return usat_email_layout(
-            '#1e3a8a', // Formal Navy Blue
-            'Enrollment Approved',
-            'Official Notice of Admission',
-            $body
-        );
+        return usat_email_layout('#1e3a8a', 'Enrollment Approved', 'Official Notice of Admission', $body);
     }
 }
 
 if (!function_exists('rejection_email_html')) {
-    function rejection_email_html(string $name, array $e, string $reason): string
-    {
+    function rejection_email_html(string $name, array $e, string $reason): string {
         $rows = [
             'Student ID'  => usat_e($e['student_id_number'] ?? null),
             'LRN'         => usat_e($e['lrn'] ?? null),
@@ -231,7 +265,6 @@ if (!function_exists('rejection_email_html')) {
             .     'Thank you for your interest in USAT College Sagay City Inc. We have carefully reviewed your enrollment application. Regrettably, we are unable to approve your application at this time.'
             . '</p>'
             
-            // Status Banner
             . '<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:30px;border-radius:6px;overflow:hidden;border:1px solid #dc2626;">'
             . '<tr><td style="background:#dc2626;color:#ffffff;padding:12px 20px;font-size:13px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;text-align:center;">'
             . '✗ Application Status: Declined'
@@ -250,24 +283,17 @@ if (!function_exists('rejection_email_html')) {
             .   '<li style="margin-bottom:8px;">If you believe this is a mistake, please contact the Registrar\'s Office immediately.</li>'
             .   '<li style="margin-bottom:8px;">You may correct the issue mentioned above and submit a new application.</li>'
             . '</ul>'
-            . '<p style="margin:30px 0 0;font-size:13px;line-height:1.6;color:#64748b;font-style:italic;">Note: Your application record has been securely removed from our system. A new application is required to re-apply.</p>'
 
             . '<p style="margin:30px 0 0;font-size:15px;line-height:1.6;color:#334155;">Sincerely,</p>'
             . '<p style="margin:5px 0 0;font-size:15px;line-height:1.6;color:#334155;font-weight:bold;">Office of the University Registrar</p>'
             . '<p style="margin:0;font-size:14px;color:#64748b;">USAT College Sagay City Inc.</p>';
 
-        return usat_email_layout(
-            '#0f172a', // Dark Slate
-            'Enrollment Application Declined',
-            'Official Notice of Application Status',
-            $body
-        );
+        return usat_email_layout('#0f172a', 'Enrollment Application Declined', 'Official Notice of Application Status', $body);
     }
 }
 
 if (!function_exists('registrar_notification_html')) {
-    function registrar_notification_html(string $student_name, array $e, string $action, string $admin_name, ?string $reason = null): string
-    {
+    function registrar_notification_html(string $student_name, array $e, string $action, string $admin_name, ?string $reason = null): string {
         $student_name = htmlspecialchars($student_name, ENT_QUOTES, 'UTF-8');
         $admin_name   = htmlspecialchars($admin_name, ENT_QUOTES, 'UTF-8');
         $idno         = usat_e($e['student_id_number'] ?? null);
@@ -339,8 +365,7 @@ HTML;
 }
 
 if (!function_exists('notify_registrar')) {
-    function notify_registrar(string $student_name, array $enr, string $action, ?string $reason): void
-    {
+    function notify_registrar(string $student_name, array $enr, string $action, ?string $reason): void {
         $raw = trim((string)(getenv('REGISTRAR_NOTIFY_EMAIL') ?: ''));
         if ($raw === '') { return; }
 
@@ -356,7 +381,7 @@ if (!function_exists('notify_registrar')) {
         $body       = registrar_notification_html($student_name, $enr, $action, $admin_name, $reason);
 
         foreach ($recipients as $rcpt) {
-            $r = send_mail($rcpt, $subject, $body);
+            $r = send_usat_email($rcpt, $subject, $body);
             if (empty($r['ok'])) {
                 error_log(sprintf('notify_registrar: failed to %s — %s', $rcpt, $r['error'] ?? 'unknown'));
             }
@@ -480,7 +505,8 @@ if ($action === 'reject') {
         try {
             $subject = 'Enrollment Application Declined — USAT College';
             $body    = rejection_email_html($student_name, $enr, $reason);
-            $result  = send_mail($email_target, $subject, $body);
+            $result  = send_usat_email($email_target, $subject, $body);
+
             log_email($conn, $enrollment_id, $student_id, $email_target, $subject, $result, $admin_id);
 
             if (!empty($result['ok'])) {
@@ -633,7 +659,8 @@ if ($has_valid_email) {
     try {
         $subject = 'Official Enrollment Confirmation — USAT College Sagay City Inc.';
         $body    = approval_email_html($student_name, $enr);
-        $result  = send_mail($email_target, $subject, $body);
+        $result  = send_usat_email($email_target, $subject, $body);
+
         log_email($conn, $enrollment_id, $student_id, $email_target, $subject, $result, $admin_id);
 
         $email_note = !empty($result['ok'])

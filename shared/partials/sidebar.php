@@ -162,7 +162,6 @@ $__sidebar_role    = ucfirst(htmlspecialchars((string)$role, ENT_QUOTES, 'UTF-8'
             <i class="bi bi-people-fill"></i> Students
         </a>
 
-        <!-- FIXED: Sections now visible to Teachers -->
         <a href="<?= URL_PREFIX ?>/sections_list.php" class="nav-link <?= $current_page === 'sections_list.php' ? 'active' : '' ?>">
             <i class="bi bi-diagram-3-fill"></i> Sections
         </a>
@@ -172,7 +171,6 @@ $__sidebar_role    = ucfirst(htmlspecialchars((string)$role, ENT_QUOTES, 'UTF-8'
                 <i class="bi bi-journal-check"></i> Grades
             </a>
 
-            <!-- FIXED: Reports now visible to Teachers -->
             <a href="<?= URL_PREFIX ?>/reports.php" class="nav-link <?= $current_page === 'reports.php' ? 'active' : '' ?>">
                 <i class="bi bi-file-earmark-bar-graph-fill"></i> Reports
             </a>
@@ -194,6 +192,10 @@ $__sidebar_role    = ucfirst(htmlspecialchars((string)$role, ENT_QUOTES, 'UTF-8'
 
             <a href="<?= URL_PREFIX ?>/graduates.php" class="nav-link <?= $current_page === 'graduates.php' ? 'active' : '' ?>">
                 <i class="bi bi-mortarboard-fill"></i> Graduates
+            </a>
+
+            <a href="<?= URL_PREFIX ?>/teacher_assignments.php" class="nav-link <?= $current_page === 'teacher_assignments.php' ? 'active' : '' ?>">
+                <i class="bi bi-person-workspace"></i> Teacher Assignments
             </a>
         <?php endif; ?>
 

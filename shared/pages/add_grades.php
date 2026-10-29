@@ -2,6 +2,7 @@
 // shared/pages/add_grades.php
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
+require_once __DIR__ . '/../lib/teacher_scope.php';   // PATCH 1: helper
 
 $__nav_section = 'grades';
 
@@ -34,6 +35,21 @@ if (!$student) { $_SESSION['error'] = 'Student not found or not actively enrolle
 $enrollment_id = (int)$student['enrollment_id'];
 $sy            = (string)$student['school_year'];
 $grade_level   = (string)$student['grade_level'];
+
+/* PATCH 2: teacher scope gate */
+if (($_SESSION['admin_role'] ?? '') === 'teacher') {
+    $teacher_id = (int)$_SESSION['admin_id'];
+    if (!teacher_has_student($conn, $teacher_id, $student_id, $enrollment_id)) {
+        security_log('grades.teacher_scope_denied', [
+            'teacher_id'    => $teacher_id,
+            'student_id'    => $student_id,
+            'enrollment_id' => $enrollment_id,
+            'ip'            => $_SERVER['REMOTE_ADDR'] ?? '',
+        ]);
+        $_SESSION['error'] = 'You are not assigned to this student.';
+        header('Location: ' . URL_PREFIX . '/dashboard.php'); exit;
+    }
+}
 
 /* ═══════════════════════════════════════════════════════════
    POST — Save a grade (Insert or Update)
@@ -119,6 +135,20 @@ $stmt->execute();
 $grades = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
+/* ── Check Term Availability ── */
+$has_t1 = false;
+$has_t2 = false;
+$has_t3 = false;
+foreach ($grades as $g) {
+    if ($g['term'] === '1st Term') $has_t1 = true;
+    if ($g['term'] === '2nd Term') $has_t2 = true;
+    if ($g['term'] === '3rd Term') $has_t3 = true;
+}
+// 2nd Term unlocks if there is a 1st Term grade (or if they already have 2nd Term grades)
+$disable_t2 = (!$has_t1 && !$has_t2);
+// 3rd Term unlocks if there is a 2nd Term grade (or if they already have 3rd Term grades)
+$disable_t3 = (!$has_t2 && !$has_t3);
+
 /* Calculate Stats */
 $total_subjects = count($grades);
 $passed_count = 0; $failed_count = 0; $total_grade = 0;
@@ -143,6 +173,16 @@ $page_css = <<<'CSS'
     .term-segments label { display:flex; align-items:center; justify-content:center; padding:.5rem .25rem; font-size:.82rem; font-weight:600; color:var(--text-2); border-radius:8px; cursor:pointer; transition:all .15s; user-select:none; text-align:center; margin:0; border:1px solid transparent; }
     .term-segments label:hover { color:var(--text); background:color-mix(in srgb, var(--accent) 8%, transparent); }
     .term-segments input[type=radio]:checked + label { background:var(--accent); color:#fff; box-shadow:0 2px 8px -2px rgba(79,70,229,.5); }
+    
+    /* Disabled Term Styling */
+    .term-segments input[type=radio]:disabled + label { 
+        opacity: 0.4; 
+        cursor: not-allowed; 
+        background: transparent !important; 
+        color: var(--text-3) !important; 
+        box-shadow: none !important; 
+        text-decoration: line-through;
+    }
 
     /* Grade Input Wrapper */
     .grade-input-wrap { position:relative; }
@@ -234,12 +274,17 @@ require __DIR__ . '/../partials/sidebar.php';
         <div class="col-md-4">
           <label class="form-label">Term</label>
           <div class="term-segments">
+            <!-- 1st Term is always enabled -->
             <input type="radio" name="term" id="term_1" value="1st Term" checked>
             <label for="term_1">1st Term</label>
-            <input type="radio" name="term" id="term_2" value="2nd Term">
-            <label for="term_2">2nd Term</label>
-            <input type="radio" name="term" id="term_3" value="3rd Term">
-            <label for="term_3">3rd Term</label>
+
+            <!-- 2nd Term -->
+            <input type="radio" name="term" id="term_2" value="2nd Term" <?= $disable_t2 ? 'disabled' : '' ?>>
+            <label for="term_2" <?= $disable_t2 ? 'title="Please add a 1st Term grade first."' : '' ?>>2nd Term</label>
+
+            <!-- 3rd Term -->
+            <input type="radio" name="term" id="term_3" value="3rd Term" <?= $disable_t3 ? 'disabled' : '' ?>>
+            <label for="term_3" <?= $disable_t3 ? 'title="Please add a 2nd Term grade first."' : '' ?>>3rd Term</label>
           </div>
         </div>
         

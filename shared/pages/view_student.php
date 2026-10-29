@@ -4,6 +4,7 @@ require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
 require_once __DIR__ . '/../../config/crypto.php';
 require_once __DIR__ . '/../../config/security.php';
+require_once __DIR__ . '/../lib/teacher_scope.php'; 
 
 $__nav_section = 'students';
 

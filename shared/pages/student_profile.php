@@ -2,6 +2,7 @@
 // shared/pages/student_profile.php
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
+require_once __DIR__ . '/../lib/teacher_scope.php';   // PATCH 1: helper
 
 $__nav_section = 'students';
 
@@ -15,6 +16,10 @@ if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin', 'teache
     header('Location: ' . URL_PREFIX . '/dashboard.php');
     exit;
 }
+
+// PATCH 2: teacher scope state
+$__is_teacher = (($_SESSION['admin_role'] ?? '') === 'teacher');
+$__teacher_id = $__is_teacher ? (int)($_SESSION['admin_id'] ?? 0) : 0;
 
 /* ═══════════════════════════════════════════════════════════
    Helpers
@@ -183,9 +188,19 @@ $offset   = ($page - 1) * $per_page;
 
 $all_students = []; $total_students = 0; $total_pages = 0; $total_all_students = 0; $boys = 0; $girls = 0; $sec_count = 0; $unassigned_count = 0;
 
-/* Build Base Query */
+/* ═══════════════════════════════════════════════════════════
+   PATCH 3: Main list query — teacher scope added FIRST so params align
+   ═══════════════════════════════════════════════════════════ */
 $sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.ext_name, s.sex, s.age, e.grade_level, e.school_year, e.section, e.strand, e.track, e.program, e.term, COALESCE(e.status, 'Active') AS status, COUNT(*) OVER() as total_count FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE 1=1";
 $params = []; $types = "";
+
+// PATCH 3a: teacher scope FIRST
+if ($__is_teacher) {
+    $ts = teacher_scope_filter($conn, $__teacher_id, 'e');
+    $sql .= ' AND ' . $ts['sql'];
+    $params = array_merge($params, $ts['params']);
+    $types .= $ts['types'];
+}
 
 if ($search !== '') { $like = "%$search%"; $sql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)"; array_push($params, $like, $like, $like, $like); $types .= "ssss"; }
 if ($grade_level !== '') { $sql .= " AND e.grade_level = ?"; $params[] = $grade_level; $types .= "s"; }
@@ -198,27 +213,121 @@ $params[] = $per_page; $types .= "i"; $params[] = $offset; $types .= "i";
 
 $stmt = $conn->prepare($sql); if (!empty($params)) $stmt->bind_param($types, ...$params); $stmt->execute(); $all_students = $stmt->get_result()->fetch_all(MYSQLI_ASSOC); $total_students = !empty($all_students) ? (int)$all_students[0]['total_count'] : 0; $total_pages = (int)ceil($total_students / $per_page); $stmt->close();
 
-/* Global Stats */
+/* ═══════════════════════════════════════════════════════════
+   PATCH 4: Global count query ($tsql) — teacher scope added FIRST
+   ═══════════════════════════════════════════════════════════ */
 $tsql = "SELECT COUNT(*) AS c FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
 $tp = []; $tt = "";
+
+if ($__is_teacher) {
+    $ts = teacher_scope_filter($conn, $__teacher_id, 'e');
+    $tsql .= ' AND ' . $ts['sql'];
+    $tp = array_merge($tp, $ts['params']);
+    $tt .= $ts['types'];
+}
+
 if ($search !== '') { $tlike = "%$search%"; $tsql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)"; array_push($tp, $tlike, $tlike, $tlike, $tlike); $tt .= "ssss"; }
 if ($grade_level !== '') { $tsql .= " AND e.grade_level = ?"; $tp[] = $grade_level; $tt .= "s"; }
 if ($school_year !== '') { $tsql .= " AND e.school_year = ?"; $tp[] = $school_year; $tt .= "s"; }
+
 $ts = $conn->prepare($tsql); if (!empty($tp)) $ts->bind_param($tt, ...$tp); $ts->execute(); $ts_row = $ts->get_result()->fetch_assoc(); $ts->close(); $total_all_students = (int)($ts_row['c'] ?? 0);
 
-$unassigned_row = $conn->query("SELECT COUNT(*) AS c FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE (e.section IS NULL OR e.section = '') AND COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')")->fetch_assoc(); $unassigned_count = (int)($unassigned_row['c'] ?? 0);
+/* ═══════════════════════════════════════════════════════════
+   PATCH 5: Unassigned count — rewritten as prepared with teacher scope.
+   For teachers, this will return 0 (correct: students in their sections
+   always have a section by definition).
+   ═══════════════════════════════════════════════════════════ */
+$usql = "SELECT COUNT(*) AS c FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE (e.section IS NULL OR e.section = '') AND COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
+$up = []; $ut = "";
 
+if ($__is_teacher) {
+    $ts = teacher_scope_filter($conn, $__teacher_id, 'e');
+    $usql .= ' AND ' . $ts['sql'];
+    $up = array_merge($up, $ts['params']);
+    $ut .= $ts['types'];
+}
+
+$ustmt = $conn->prepare($usql);
+if ($ustmt) {
+    if (!empty($up)) $ustmt->bind_param($ut, ...$up);
+    $ustmt->execute();
+    $unassigned_count = (int)($ustmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $ustmt->close();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PATCH 6: Gender breakdown ($gsql) — teacher scope added FIRST
+   ═══════════════════════════════════════════════════════════ */
 $gsql = "SELECT SUM(CASE WHEN UPPER(TRIM(s.sex)) IN ('MALE','M') THEN 1 ELSE 0 END) AS boys, SUM(CASE WHEN UPPER(TRIM(s.sex)) IN ('FEMALE','F') THEN 1 ELSE 0 END) AS girls FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
 $gp = []; $gt = "";
-if ($search !== '')      { $gsql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ?)"; $gp = [$like, $like, $like]; $gt = "sss"; }
+
+if ($__is_teacher) {
+    $ts = teacher_scope_filter($conn, $__teacher_id, 'e');
+    $gsql .= ' AND ' . $ts['sql'];
+    $gp = array_merge($gp, $ts['params']);
+    $gt .= $ts['types'];
+}
+
+if ($search !== '')      { $gsql .= " AND (s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ?)"; $gp = array_merge($gp, [$like, $like, $like]); $gt .= "sss"; }
 if ($grade_level !== '') { $gsql .= " AND e.grade_level = ?"; $gp[] = $grade_level; $gt .= "s"; }
 if ($school_year !== '') { $gsql .= " AND e.school_year = ?"; $gp[] = $school_year; $gt .= "s"; }
+
 $gs = $conn->prepare($gsql); if (!empty($gp)) $gs->bind_param($gt, ...$gp); $gs->execute(); $st = $gs->get_result()->fetch_assoc(); $gs->close(); $boys  = (int)($st['boys'] ?? 0); $girls = (int)($st['girls'] ?? 0);
 
-$sec_count_row = $conn->query("SELECT COUNT(DISTINCT section) AS c FROM enrollment_form WHERE section IS NOT NULL AND section != '' AND COALESCE(status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')")->fetch_assoc(); $sec_count = (int)($sec_count_row['c'] ?? 0);
+/* ═══════════════════════════════════════════════════════════
+   PATCH 7: Distinct-section count — teacher scope applied
+   ═══════════════════════════════════════════════════════════ */
+$secsql = "SELECT COUNT(DISTINCT e.section) AS c FROM enrollment_form e WHERE e.section IS NOT NULL AND e.section != '' AND COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
+$sp = []; $stp = "";
 
-$grade_levels_data = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' ORDER BY grade_level ASC")->fetch_all(MYSQLI_ASSOC);
-$school_years_data = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC")->fetch_all(MYSQLI_ASSOC);
+if ($__is_teacher) {
+    $ts = teacher_scope_filter($conn, $__teacher_id, 'e');
+    $secsql .= ' AND ' . $ts['sql'];
+    $sp = array_merge($sp, $ts['params']);
+    $stp .= $ts['types'];
+}
+
+$secstmt = $conn->prepare($secsql);
+if ($secstmt) {
+    if (!empty($sp)) $secstmt->bind_param($stp, ...$sp);
+    $secstmt->execute();
+    $sec_count = (int)($secstmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $secstmt->close();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PATCH 8 + 9: Dropdowns — scoped to teacher's assigned data.
+   Teachers only see filter options that will return results.
+   ═══════════════════════════════════════════════════════════ */
+if ($__is_teacher) {
+    $ts = teacher_scope_filter($conn, $__teacher_id, 'enrollment_form');
+
+    $glsql = "SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' AND " . $ts['sql'] . " ORDER BY grade_level ASC";
+    $glstmt = $conn->prepare($glsql);
+    if ($glstmt) {
+        if (!empty($ts['params'])) $glstmt->bind_param($ts['types'], ...$ts['params']);
+        $glstmt->execute();
+        $grade_levels_data = $glstmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $glstmt->close();
+    } else {
+        $grade_levels_data = [];
+    }
+
+    $sysql = "SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' AND " . $ts['sql'] . " ORDER BY school_year DESC";
+    $systmt = $conn->prepare($sysql);
+    if ($systmt) {
+        if (!empty($ts['params'])) $systmt->bind_param($ts['types'], ...$ts['params']);
+        $systmt->execute();
+        $school_years_data = $systmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $systmt->close();
+    } else {
+        $school_years_data = [];
+    }
+} else {
+    $grade_levels_data = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' ORDER BY grade_level ASC")->fetch_all(MYSQLI_ASSOC);
+    $school_years_data = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC")->fetch_all(MYSQLI_ASSOC);
+}
+
 $possible_statuses = ['Active', 'Pending', 'Transferred', 'Stopped', 'Dropped', 'Graduated', 'Promoted'];
 $base_url = "?search=" . urlencode($search) . "&grade_level=" . urlencode($grade_level) . "&school_year=" . urlencode($school_year) . "&status=" . urlencode($status) . ($needs_section ? "&needs_section=1" : "");
 $csrf_token = csrf_token();

@@ -5,7 +5,8 @@ declare(strict_types=1);
  * shared/pages/photo.php — Stream a student's profile photo.
  *
  * Hardening applied:
- *   - Path containment via safe_path()  (blocks traversal)
+ *   - Teacher scope: teachers can only view photos of assigned students (404 on denial)
+ *   - Path containment via safe_path() (blocks traversal)
  *   - MIME allow-list on response
  *   - CSP + X-Frame-Options + nosniff
  *   - Structured security logging on escape attempts
@@ -15,12 +16,26 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/security.php';
+require_once __DIR__ . '/../lib/teacher_scope.php';
 
 /* ── 1. Validate ID ───────────────────────────────────────────── */
 $sid = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
 if (!$sid || $sid < 1) {
     http_response_code(400);
     exit('Bad request');
+}
+
+/* ── 1b. Teacher scope gate — 404 (not 403) to avoid existence leak ── */
+if (($_SESSION['admin_role'] ?? '') === 'teacher') {
+    if (!teacher_has_student($conn, (int)$_SESSION['admin_id'], $sid)) {
+        security_log('photo.teacher_scope_denied', [
+            'teacher_id' => (int)$_SESSION['admin_id'],
+            'student_id' => $sid,
+            'ip'         => $_SERVER['REMOTE_ADDR'] ?? '',
+        ]);
+        http_response_code(404);
+        exit('No photo');
+    }
 }
 
 /* ── 2. Fetch photo reference ─────────────────────────────────── */
@@ -65,7 +80,6 @@ if ($fi) finfo_close($fi);
 
 $allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 if (!in_array($mime, $allowed, true)) {
-    // Never echo an unexpected MIME — force a download of bytes.
     $mime = 'application/octet-stream';
 }
 
