@@ -28,7 +28,7 @@ if (($_GET['action'] ?? '') === 'check_username') {
         exit;
     }
 
-    $chk = $conn->prepare("SELECT id FROM admins WHERE username = ? LIMIT 1");
+    $chk = $conn->prepare("SELECT admin_id FROM admins WHERE username = ? LIMIT 1");
     if (!$chk) {
         echo json_encode(['exists' => false, 'valid' => true, 'error' => 'db']);
         exit;
@@ -81,7 +81,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($admin_password === '') {
             $error = 'Please enter your own admin password for verification.';
         } else {
-            $verify_stmt = $conn->prepare("SELECT password FROM admins WHERE id = ? LIMIT 1");
+            $verify_stmt = $conn->prepare("SELECT password FROM admins WHERE admin_id = ? LIMIT 1");
             if (!$verify_stmt) {
                 $error = 'System error. Please try again later.';
             } else {
@@ -143,7 +143,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $target_username = clean_string($_POST['username'] ?? '', 50);
 
         $stmt = $conn->prepare("
-            SELECT id, fullname, username, role
+            SELECT admin_id, fullname, username, role
             FROM admins
             WHERE username = ?
             LIMIT 1
@@ -159,7 +159,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $error = 'Username "' . htmlspecialchars($target_username, ENT_QUOTES, 'UTF-8') . '" does not exist.';
             } else {
                 $user    = $result->fetch_assoc();
-                $is_self = ((int)$user['id'] === (int)$_SESSION['admin_id']);
+                $is_self = ((int)$user['admin_id'] === (int)$_SESSION['admin_id']);
 
                 if ($user['role'] === 'superadmin' && !$is_self) {
                     $error = "You cannot change another superadmin's password.";
@@ -175,13 +175,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                reset_expires    = NULL,
                                remember_token   = NULL,
                                remember_expires = NULL
-                         WHERE id = ?
+                         WHERE admin_id = ?
                     ");
                     if (!$upd) {
                         error_log('Password change prepare failed: ' . $conn->error);
                         $error = 'System error. Please try again later.';
                     } else {
-                        $upd->bind_param('si', $hashed_password, $user['id']);
+                        $upd->bind_param('si', $hashed_password, $user['admin_id']);
                         if (!$upd->execute()) {
                             error_log('Password change execute failed: ' . $upd->error);
                             $error = 'System error. Please try again later.';
@@ -192,13 +192,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             if ($is_self) {
                                 audit_log($conn, 'password.self_change', [
                                     'type' => 'admin',
-                                    'id'   => $user['id'],
+                                    'id'   => $user['admin_id'],
                                 ]);
                                 $success = 'Your password has been updated successfully.';
                             } else {
                                 audit_log($conn, 'password.change', [
                                     'type'     => 'admin',
-                                    'id'       => $user['id'],
+                                    'id'       => $user['admin_id'],
                                     'username' => $target_username,
                                 ]);
                                 $success = 'Password successfully updated for user: '

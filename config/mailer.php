@@ -1,4 +1,5 @@
 <?php
+
 // config/mailer.php — SMTP wrapper using PHPMailer.
 //
 // Fixes the intermittent Gmail delivery problem:

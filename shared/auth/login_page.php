@@ -14,30 +14,45 @@ require_once __DIR__ . '/../../config/bootstrap.php';
 require_once __DIR__ . '/../../config/audit.php';
 
 /**
- * Roles allowed at the current endpoint.
+ * Strict 1:1 portal → role isolation.
+ *
+ *   /admin      → superadmin (system administrator) only
+ *   /registrar  → registrar only
+ *   /teacher    → teacher only
+ *
+ * Cross-portal fallbacks were removed on purpose: an account may only
+ * authenticate through the portal that belongs to its role. If you ever
+ * need a role to reach multiple portals (e.g. superadmin acting as a
+ * registrar), add it explicitly here AND document the reason — do not
+ * quietly broaden this again.
  */
 function login_allowed_roles($base_roles): array
 {
-    $allowed = is_array($base_roles) ? $base_roles : [$base_roles];
-    
+    $roles = is_array($base_roles) ? $base_roles : [$base_roles];
+
+    // Defence-in-depth: hard-map the URL prefix to its canonical role,
+    // and intersect with whatever the wrapper asked for. If the wrapper
+    // is misconfigured, the intersection is empty and login fails closed.
+    $portal_role = null;
     if (str_contains(URL_PREFIX, '/admin')) {
-        if (!in_array('teacher', $allowed, true)) $allowed[] = 'teacher';
-        if (!in_array('superadmin', $allowed, true)) $allowed[] = 'superadmin';
+        $portal_role = 'superadmin';
+    } elseif (str_contains(URL_PREFIX, '/registrar')) {
+        $portal_role = 'registrar';
+    } elseif (str_contains(URL_PREFIX, '/teacher')) {
+        $portal_role = 'teacher';
     }
-    if (str_contains(URL_PREFIX, '/registrar')) {
-        if (!in_array('teacher', $allowed, true)) $allowed[] = 'teacher';
-        if (!in_array('superadmin', $allowed, true)) $allowed[] = 'superadmin';
+
+    if ($portal_role === null) {
+        // Unknown prefix — fall back to the wrapper's value, do not broaden.
+        return array_values(array_unique($roles));
     }
-    if (str_contains(URL_PREFIX, '/teacher')) {
-        if (!in_array('superadmin', $allowed, true)) $allowed[] = 'superadmin';
-        if (!in_array('registrar', $allowed, true)) $allowed[] = 'registrar';
-    }
-    
-    return $allowed;
+
+    return array_values(array_intersect($roles, [$portal_role]));
 }
 
 /**
  * Determine where to send a user based on their role.
+ * Unknown roles fail closed to LOGIN_URL instead of the admin dashboard.
  */
 function get_dashboard_url(string $role): string
 {
@@ -45,7 +60,7 @@ function get_dashboard_url(string $role): string
         'superadmin' => ASSET_BASE . '/admin/dashboard.php',
         'registrar'  => ASSET_BASE . '/registrar/dashboard.php',
         'teacher'    => ASSET_BASE . '/teacher/dashboard.php',
-        default      => ASSET_BASE . '/admin/dashboard.php',
+        default      => LOGIN_URL,
     };
 }
 
@@ -100,7 +115,7 @@ if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && e
     $token = $_COOKIE[$remember_cookie_name];
 
     $stmt = $conn->prepare("
-        SELECT id, fullname, username, role
+        SELECT admin_id, fullname, username, role
         FROM admins
         WHERE remember_token = ?
           AND remember_expires > NOW()
@@ -119,6 +134,8 @@ if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && e
             $allowed_roles = login_allowed_roles($LOGIN_ROLE);
 
             if (!in_array($admin['role'], $allowed_roles, true)) {
+                // Wrong portal for this account — do NOT create a session here.
+                // Send them to the portal that matches their role instead.
                 security_log('login.auto_role_mismatch', [
                     'role'     => $admin['role'],
                     'endpoint' => URL_PREFIX,
@@ -131,7 +148,7 @@ if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && e
 
             session_regenerate_id(true);
 
-            $_SESSION['admin_id']   = $admin['id'];
+            $_SESSION['admin_id']   = $admin['admin_id'];
             $_SESSION['admin_name'] = $admin['fullname'];
             $_SESSION['admin_role'] = $admin['role'];
             $_SESSION['login_time'] = time();
@@ -141,17 +158,17 @@ if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && e
             $new_token   = bin2hex(random_bytes(32));
             $new_expires = date('Y-m-d H:i:s', time() + $remember_duration_secs);
 
-            $upd = $conn->prepare("UPDATE admins SET remember_token = ?, remember_expires = ? WHERE id = ?");
+            $upd = $conn->prepare("UPDATE admins SET remember_token = ?, remember_expires = ? WHERE admin_id = ?");
             if ($upd) {
-                $upd->bind_param('ssi', $new_token, $new_expires, $admin['id']);
+                $upd->bind_param('ssi', $new_token, $new_expires, $admin['admin_id']);
                 $upd->execute();
                 $upd->close();
             }
 
             setcookie($remember_cookie_name, $new_token, $remember_cookie_opts(time() + $remember_duration_secs));
 
-            audit_log($conn, 'admin.login_auto', ['type' => 'admin', 'id' => $admin['id']]);
-            
+            audit_log($conn, 'admin.login_auto', ['type' => 'admin', 'id' => $admin['admin_id']]);
+
             header('Location: ' . get_dashboard_url($admin['role']));
             exit;
         }
@@ -162,7 +179,7 @@ if (!isset($_SESSION['admin_id']) && isset($_COOKIE[$remember_cookie_name]) && e
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   2. ALREADY LOGGED IN — redirect appropriately
+   2. ALREADY LOGGED IN — validate session, then redirect
    ═══════════════════════════════════════════════════════════════ */
 if (isset($_SESSION['admin_id'])) {
 
@@ -178,8 +195,14 @@ if (isset($_SESSION['admin_id'])) {
     $current_role  = $_SESSION['admin_role'] ?? '';
     $allowed_roles = login_allowed_roles($LOGIN_ROLE);
 
-    if (!in_array($current_role, $allowed_roles, true)) {
-        header('Location: ' . get_dashboard_url($current_role));
+    if ($current_role === '' || !in_array($current_role, $allowed_roles, true)) {
+        // Session's role isn't valid for this endpoint — could be a
+        // stale/corrupted session. Don't redirect to a dashboard we can't
+        // trust; kill it and bounce to login.
+        $clearRememberCookie();
+        session_unset();
+        session_destroy();
+        header('Location: ' . LOGIN_URL);
         exit;
     }
 
@@ -202,7 +225,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
         $error = 'Please fill in all fields.';
     } else {
         $stmt = $conn->prepare("
-            SELECT id, fullname, username, password, role
+            SELECT admin_id, fullname, username, password, role
             FROM admins
             WHERE username = ?
             LIMIT 1
@@ -227,7 +250,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                         rate_limit_hit($rl_key, $LOGIN_WINDOW, $conn);
                         audit_log($conn, 'admin.login_role_mismatch', [
                             'type'     => 'admin',
-                            'id'       => $admin['id'],
+                            'id'       => $admin['admin_id'],
                             'role'     => $admin['role'],
                             'endpoint' => URL_PREFIX,
                         ]);
@@ -243,7 +266,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                         rate_limit_reset($rl_key, $conn);
                         session_regenerate_id(true);
 
-                        $_SESSION['admin_id']   = $admin['id'];
+                        $_SESSION['admin_id']   = $admin['admin_id'];
                         $_SESSION['admin_name'] = $admin['fullname'];
                         $_SESSION['admin_role'] = $admin['role'];
                         $_SESSION['login_time'] = time();
@@ -252,9 +275,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
 
                         if (password_needs_rehash($admin['password'], PASSWORD_DEFAULT)) {
                             $new_hash = password_hash($password, PASSWORD_DEFAULT);
-                            $rh = $conn->prepare("UPDATE admins SET password = ? WHERE id = ?");
+                            $rh = $conn->prepare("UPDATE admins SET password = ? WHERE admin_id = ?");
                             if ($rh) {
-                                $rh->bind_param('si', $new_hash, $admin['id']);
+                                $rh->bind_param('si', $new_hash, $admin['admin_id']);
                                 $rh->execute();
                                 $rh->close();
                             }
@@ -263,9 +286,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                         if ($remember) {
                             $tk = bin2hex(random_bytes(32));
                             $ex = date('Y-m-d H:i:s', time() + $remember_duration_secs);
-                            $upd = $conn->prepare("UPDATE admins SET remember_token = ?, remember_expires = ? WHERE id = ?");
+                            $upd = $conn->prepare("UPDATE admins SET remember_token = ?, remember_expires = ? WHERE admin_id = ?");
                             if ($upd) {
-                                $upd->bind_param('ssi', $tk, $ex, $admin['id']);
+                                $upd->bind_param('ssi', $tk, $ex, $admin['admin_id']);
                                 $upd->execute();
                                 $upd->close();
                             }
@@ -274,9 +297,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                             $clearRememberCookie();
                         }
 
-                        audit_log($conn, 'admin.login', ['type' => 'admin', 'id' => $admin['id']]);
+                        audit_log($conn, 'admin.login', ['type' => 'admin', 'id' => $admin['admin_id']]);
                         $stmt->close();
-                        
+
                         header('Location: ' . get_dashboard_url($admin['role']));
                         exit;
                     }
@@ -503,7 +526,6 @@ if ($__is_teacher_endpoint)   $__portal_name = 'Teacher';
             background: var(--bg-glass);
         }
 
-        /* ── Portal switcher ── */
         .portal-switch {
             display: flex;
             flex-wrap: wrap;
@@ -683,9 +705,6 @@ if ($__is_teacher_endpoint)   $__portal_name = 'Teacher';
         .btn-login:active { transform: translateY(0); }
         .btn-login:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
 
-        /* ═══════════════════════════════════════════════════════
-           LIVE STATS STRIP
-           ═══════════════════════════════════════════════════════ */
         .live-stats {
             display: flex;
             align-items: stretch;
@@ -842,10 +861,8 @@ if ($__is_teacher_endpoint)   $__portal_name = 'Teacher';
 
         <div class="right-side">
 
-            <!-- ── Portal switcher ───────────────────────────── -->
             <nav class="portal-switch" aria-label="Portal selection">
-                
-                <!-- Admin Tab -->
+
                 <?php if ($__is_admin_endpoint): ?>
                     <span class="portal-switch-item active" aria-current="page">
                         <i class="fas fa-shield-alt" aria-hidden="true"></i> Admin
@@ -856,7 +873,6 @@ if ($__is_teacher_endpoint)   $__portal_name = 'Teacher';
                     </a>
                 <?php endif; ?>
 
-                <!-- Registrar Tab -->
                 <?php if ($__is_registrar_endpoint): ?>
                     <span class="portal-switch-item active" aria-current="page">
                         <i class="fas fa-user-tie" aria-hidden="true"></i> Registrar
@@ -867,7 +883,6 @@ if ($__is_teacher_endpoint)   $__portal_name = 'Teacher';
                     </a>
                 <?php endif; ?>
 
-                <!-- Teacher Tab -->
                 <?php if ($__is_teacher_endpoint): ?>
                     <span class="portal-switch-item active" aria-current="page">
                         <i class="fas fa-book" aria-hidden="true"></i> Teacher
@@ -938,7 +953,6 @@ if ($__is_teacher_endpoint)   $__portal_name = 'Teacher';
                 </button>
             </form>
 
-            <!-- ── Live stats strip ──────────────────────────── -->
             <div class="live-stats" id="liveStats" role="status" aria-live="polite" style="display:none">
                 <div class="live-stat">
                     <span class="live-value" data-stat="students">—</span>
@@ -1041,9 +1055,6 @@ if ($__is_teacher_endpoint)   $__portal_name = 'Teacher';
     });
 })();
 
-/* ═══════════════════════════════════════════════════════════
-   LIVE STATS POLLING
-   ═══════════════════════════════════════════════════════════ */
 (function () {
     const statsEl = document.getElementById('liveStats');
     if (!statsEl) return;

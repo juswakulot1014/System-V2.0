@@ -761,7 +761,7 @@ $s = $conn->prepare("
            LENGTH(d.file_data) AS blob_size,
            a.fullname AS uploader_name
     FROM entrance_documents d
-    LEFT JOIN admins a ON d.uploaded_by = a.id
+LEFT JOIN admins a ON d.uploaded_by = a.admin_id
     WHERE d.student_id = ?
     ORDER BY
         (CASE WHEN d.file_data IS NOT NULL THEN 1 ELSE 0 END
@@ -769,10 +769,15 @@ $s = $conn->prepare("
         d.submitted DESC,
         d.uploaded_at DESC
 ");
-$s->bind_param("i", $student_id);
-$s->execute();
-$raw_docs = $s->get_result()->fetch_all(MYSQLI_ASSOC);
-$s->close();
+if ($s === false) {
+    error_log('[view_student] documents prepare failed: ' . $conn->error);
+    $raw_docs = [];
+} else {
+    $s->bind_param("i", $student_id);
+    $s->execute();
+    $raw_docs = $s->get_result()->fetch_all(MYSQLI_ASSOC);
+    $s->close();
+}
 
 $best_by_norm = [];
 foreach ($raw_docs as $d) {

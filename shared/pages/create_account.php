@@ -29,7 +29,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_account'])) {
     } elseif (($pw_err = validate_strong_password($password)) !== null) {
         $_SESSION['error'] = $pw_err;
     } else {
-        $check = $conn->prepare("SELECT id FROM admins WHERE username = ? LIMIT 1");
+        $check = $conn->prepare("SELECT admin_id FROM admins WHERE username = ? LIMIT 1");
         $check->bind_param("s", $username);
         $check->execute();
         $exists = $check->get_result()->num_rows > 0;
@@ -83,7 +83,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_account'])) {
         $_SESSION['error'] = "Invalid role selected.";
     } else {
         // Check if username is taken by someone else
-        $check = $conn->prepare("SELECT id FROM admins WHERE username = ? AND id != ? LIMIT 1");
+        $check = $conn->prepare("SELECT admin_id FROM admins WHERE username = ? AND admin_id != ? LIMIT 1");
         $check->bind_param("si", $username, $id);
         $check->execute();
         $exists = $check->get_result()->num_rows > 0;
@@ -92,7 +92,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_account'])) {
         // Check if demoting the last superadmin
         $is_last_superadmin = false;
         if ($role !== 'superadmin') {
-            $sa_check = $conn->prepare("SELECT role FROM admins WHERE id = ?");
+            $sa_check = $conn->prepare("SELECT role FROM admins WHERE admin_id = ?");
             $sa_check->bind_param("i", $id);
             $sa_check->execute();
             $current_role = $sa_check->get_result()->fetch_assoc()['role'] ?? '';
@@ -116,10 +116,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_account'])) {
         } else {
             if ($password !== '') {
                 $hashed = password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
-                $stmt = $conn->prepare("UPDATE admins SET fullname = ?, username = ?, password = ?, role = ? WHERE id = ?");
+                $stmt = $conn->prepare("UPDATE admins SET fullname = ?, username = ?, password = ?, role = ? WHERE admin_id = ?");
                 $stmt->bind_param("ssssi", $fullname, $username, $hashed, $role, $id);
             } else {
-                $stmt = $conn->prepare("UPDATE admins SET fullname = ?, username = ?, role = ? WHERE id = ?");
+                $stmt = $conn->prepare("UPDATE admins SET fullname = ?, username = ?, role = ? WHERE admin_id = ?");
                 $stmt->bind_param("sssi", $fullname, $username, $role, $id);
             }
 
@@ -164,7 +164,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_account'])) {
         $count_sa = (int)($count_stmt->get_result()->fetch_assoc()['cnt'] ?? 0);
         $count_stmt->close();
 
-        $role_stmt = $conn->prepare("SELECT fullname, username, role FROM admins WHERE id = ? LIMIT 1");
+        $role_stmt = $conn->prepare("SELECT fullname, username, role FROM admins WHERE admin_id = ? LIMIT 1");
         $role_stmt->bind_param("i", $account_id);
         $role_stmt->execute();
         $target = $role_stmt->get_result()->fetch_assoc();
@@ -175,7 +175,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_account'])) {
         } elseif ($target['role'] === 'superadmin' && $count_sa <= 1) {
             $_SESSION['error'] = "Cannot delete the last Super Admin account!";
         } else {
-            $del = $conn->prepare("DELETE FROM admins WHERE id = ?");
+            $del = $conn->prepare("DELETE FROM admins WHERE admin_id = ?");
             $del->bind_param("i", $account_id);
             $ok = $del->execute();
             $del->close();
@@ -198,7 +198,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_account'])) {
 }
 
 /* ═══ FETCH ACCOUNTS ═══ */
-$accounts = $conn->query("SELECT id, fullname, username, role, created_at FROM admins ORDER BY created_at DESC")->fetch_all(MYSQLI_ASSOC);
+$accounts = $conn->query("SELECT admin_id, fullname, username, role, created_at FROM admins ORDER BY created_at DESC")->fetch_all(MYSQLI_ASSOC);
 
 $total_accounts   = count($accounts);
 $superadmin_count = 0;
@@ -351,19 +351,19 @@ require __DIR__ . '/../partials/sidebar.php';
                         </thead>
                         <tbody>
                         <?php foreach($accounts as $row):
-                            $is_self  = ((int)$row['id'] === (int)($_SESSION['admin_id'] ?? 0));
+                            $is_self  = ((int)$row['admin_id'] === (int)($_SESSION['admin_id'] ?? 0));
                             $role     = $row['role'] ?? 'registrar';
-                            
+
                             $avatar_class = '';
                             if ($role === 'superadmin') $avatar_class = 'super';
                             elseif ($role === 'teacher') $avatar_class = 'teacher';
-                            
+
                             $pill_class = match($role) {
                                 'superadmin' => 'danger',
                                 'teacher'    => 'success',
                                 default      => 'info'
                             };
-                            
+
                             $icon_class = match($role) {
                                 'superadmin' => 'shield-fill',
                                 'teacher'    => 'book',
@@ -374,7 +374,7 @@ require __DIR__ . '/../partials/sidebar.php';
                             $initials = strtoupper(substr($parts[0] ?? '?', 0, 1) . substr(end($parts) ?: '', 0, 1));
                         ?>
                             <tr class="<?= $is_self ? 'is-self' : '' ?>">
-                                <td class="cell-num">#<?= (int)$row['id'] ?></td>
+                                <td class="cell-num">#<?= (int)$row['admin_id'] ?></td>
                                 <td>
                                     <div class="account-cell">
                                         <div class="account-avatar <?= $avatar_class ?>"><?= htmlspecialchars($initials) ?></div>
@@ -401,19 +401,19 @@ require __DIR__ . '/../partials/sidebar.php';
                                         <!-- EDIT BUTTON -->
                                         <button type="button"
                                                 class="btn btn-outline-primary btn-xs edit-btn"
-                                                data-id="<?= (int)$row['id'] ?>"
+                                                data-id="<?= (int)$row['admin_id'] ?>"
                                                 data-fullname="<?= htmlspecialchars($row['fullname'], ENT_QUOTES, 'UTF-8') ?>"
                                                 data-username="<?= htmlspecialchars($row['username'], ENT_QUOTES, 'UTF-8') ?>"
                                                 data-role="<?= htmlspecialchars($role, ENT_QUOTES, 'UTF-8') ?>"
                                                 title="Edit Account">
                                             <i class="bi bi-pencil"></i>
                                         </button>
-                                        
+
                                         <!-- DELETE BUTTON -->
                                         <?php if(!$is_self): ?>
                                             <button type="button"
                                                     class="btn btn-outline-danger btn-xs delete-btn"
-                                                    data-id="<?= (int)$row['id'] ?>"
+                                                    data-id="<?= (int)$row['admin_id'] ?>"
                                                     data-name="<?= htmlspecialchars($row['fullname'], ENT_QUOTES, 'UTF-8') ?>"
                                                     title="Delete Account">
                                                 <i class="bi bi-trash3"></i>
@@ -589,7 +589,7 @@ document.querySelectorAll('.edit-btn').forEach(btn => {
         document.getElementById('editFullname').value = this.dataset.fullname;
         document.getElementById('editUsername').value = this.dataset.username;
         document.getElementById('editRole').value = this.dataset.role;
-        
+
         // Clear password field always
         document.getElementById('editPassword').value = '';
         document.getElementById('editPassword').type = 'password';

@@ -9,6 +9,8 @@ declare(strict_types=1);
  *   - Cache headers and 413 checks moved AFTER secure session start.
  *   - Review mode strictly disables the submit button if JHS or 2x2 docs mismatch.
  *   - JS interceptor added to disabled button to explain the mismatch.
+ *   - Privacy: LRN and name checks no longer disclose any student's name, ID,
+ *     grade, or enrollment data to the public form.
  */
 
 /* ── 1. Load configs FIRST (no output yet) ── */
@@ -122,7 +124,7 @@ $t = [
         'lrn_available' => 'LRN is available',
         'checking' => 'Checking…',
         'name_duplicate_title' => 'Similar name found',
-        'name_duplicate_msg' => 'A student with the same name already exists. Is this a different person?',
+        'name_duplicate_msg' => 'A student with a similar name may already be registered. Is this a different person?',
         'name_duplicate_yes' => 'Yes, enroll anyway',
         'name_duplicate_no' => 'Cancel',
         'select_one_entrance' => 'Please select at least one entrance document',
@@ -356,14 +358,6 @@ function db_prepare_or_log(mysqli $conn, string $sql, string $ctx): ?mysqli_stmt
     return $stmt;
 }
 
-function mask_lrn(string $lrn): string
-{
-    $lrn = trim($lrn);
-    if ($lrn === '') return '';
-    if (strlen($lrn) <= 4) return str_repeat('*', strlen($lrn));
-    return str_repeat('*', strlen($lrn) - 4) . substr($lrn, -4);
-}
-
 /* =========================================================
    AJAX ENDPOINTS
    ========================================================= */
@@ -406,18 +400,14 @@ if (isset($_GET['action'])) {
         exit;
     }
 
+    /* check_lrn — returns ONLY whether the LRN is taken. No names, IDs, or enrollment data. */
     if ($action === 'check_lrn') {
         $lrn = preg_replace('/\D/', '', (string)($_POST['lrn'] ?? ''));
         if (!is_valid_lrn($lrn)) {
-            echo json_encode(['valid' => false, 'exists' => false, 'message' => 'LRN must be 12 digits']);
+            echo json_encode(['valid' => false, 'exists' => false]);
             exit;
         }
-        $stmt = db_prepare_or_log($conn, "
-            SELECT s.student_id, s.first_name, s.middle_name, s.last_name, e.grade_level, e.school_year
-            FROM students_info s
-            LEFT JOIN enrollment_form e ON s.student_id = e.student_id
-            WHERE s.lrn = ? ORDER BY e.enrollment_id DESC LIMIT 1
-        ", 'check_lrn');
+        $stmt = db_prepare_or_log($conn, "SELECT 1 FROM students_info WHERE lrn = ? LIMIT 1", 'check_lrn');
         if ($stmt === null) {
             http_response_code(500);
             echo json_encode(['error' => 'server']);
@@ -425,42 +415,30 @@ if (isset($_GET['action'])) {
         }
         $stmt->bind_param("s", $lrn);
         $stmt->execute();
-        $row = $stmt->get_result()->fetch_assoc();
+        $exists = $stmt->get_result()->num_rows > 0;
         $stmt->close();
 
-        $existing = null;
-        if ($row) {
-            $existing = [
-                'student_id'  => (int)$row['student_id'],
-                'name'        => trim(($row['last_name'] ?? '') . ', ' . ($row['first_name'] ?? '') . ' ' . ($row['middle_name'] ?? '')),
-                'grade_level' => $row['grade_level'] ?? null,
-                'school_year' => $row['school_year'] ?? null,
-            ];
-        }
-        echo json_encode(['valid' => true, 'exists' => $row !== null, 'existing' => $existing]);
+        echo json_encode(['valid' => true, 'exists' => $exists]);
         exit;
     }
 
+    /* check_name — returns ONLY whether a similar name exists. No names, LRNs, or enrollment data. */
     if ($action === 'check_name') {
         $fn = trim((string)($_POST['first_name'] ?? ''));
         $mn = trim((string)($_POST['middle_name'] ?? ''));
         $ln = trim((string)($_POST['last_name'] ?? ''));
         if ($fn === '' || $ln === '') {
-            echo json_encode(['checked' => false, 'matches' => []]);
+            echo json_encode(['checked' => false, 'possible_duplicate' => false]);
             exit;
         }
 
         if ($mn !== '') {
             $stmt = db_prepare_or_log($conn, "
-                SELECT s.student_id, s.lrn, s.first_name, s.middle_name, s.last_name,
-                       e.grade_level, e.school_year
-                FROM students_info s
-                LEFT JOIN enrollment_form e ON s.student_id = e.student_id
-                WHERE LOWER(s.first_name) = LOWER(?)
-                  AND LOWER(s.last_name)  = LOWER(?)
-                  AND LOWER(COALESCE(s.middle_name, '')) = LOWER(?)
-                ORDER BY e.enrollment_id DESC LIMIT 5
-            ", 'check_name_mn');
+                SELECT 1 FROM students_info
+                WHERE LOWER(first_name) = LOWER(?)
+                  AND LOWER(last_name) = LOWER(?)
+                  AND LOWER(COALESCE(middle_name, '')) = LOWER(?)
+                LIMIT 1", 'check_name_mn');
             if ($stmt === null) {
                 http_response_code(500);
                 echo json_encode(['error' => 'server']);
@@ -469,13 +447,9 @@ if (isset($_GET['action'])) {
             $stmt->bind_param("sss", $fn, $ln, $mn);
         } else {
             $stmt = db_prepare_or_log($conn, "
-                SELECT s.student_id, s.lrn, s.first_name, s.middle_name, s.last_name,
-                       e.grade_level, e.school_year
-                FROM students_info s
-                LEFT JOIN enrollment_form e ON s.student_id = e.student_id
-                WHERE LOWER(s.first_name) = LOWER(?) AND LOWER(s.last_name) = LOWER(?)
-                ORDER BY e.enrollment_id DESC LIMIT 5
-            ", 'check_name_nomn');
+                SELECT 1 FROM students_info
+                WHERE LOWER(first_name) = LOWER(?) AND LOWER(last_name) = LOWER(?)
+                LIMIT 1", 'check_name_nomn');
             if ($stmt === null) {
                 http_response_code(500);
                 echo json_encode(['error' => 'server']);
@@ -484,19 +458,10 @@ if (isset($_GET['action'])) {
             $stmt->bind_param("ss", $fn, $ln);
         }
         $stmt->execute();
-        $res = $stmt->get_result();
-        $matches = [];
-        while ($r = $res->fetch_assoc()) {
-            $matches[] = [
-                'student_id'  => (int)$r['student_id'],
-                'name'        => trim(($r['last_name'] ?? '') . ', ' . ($r['first_name'] ?? '') . ' ' . ($r['middle_name'] ?? '')),
-                'lrn_masked'  => mask_lrn((string)($r['lrn'] ?? '')),
-                'grade_level' => $r['grade_level'] ?? null,
-                'school_year' => $r['school_year'] ?? null,
-            ];
-        }
+        $possible = $stmt->get_result()->num_rows > 0;
         $stmt->close();
-        echo json_encode(['checked' => true, 'matches' => $matches]);
+
+        echo json_encode(['checked' => true, 'possible_duplicate' => $possible]);
         exit;
     }
 
@@ -762,15 +727,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (empty($_POST['entrance_data'] ?? [])) $errors['entrance_data'] = $t[$lang]['select_one_entrance'];
     if (!empty($_POST['email']) && !filter_var($_POST['email'], FILTER_VALIDATE_EMAIL)) $errors['email'] = $t[$lang]['invalid_email'];
 
+    /* LRN duplicate — generic message only; never reveals the existing student's identity. */
     if (empty($errors['lrn']) && !empty($_POST['lrn'])) {
-        $lrn_check = db_prepare_or_log($conn, "SELECT s.student_id, s.first_name, s.last_name FROM students_info s WHERE s.lrn = ? LIMIT 1", 'post_lrn_dup');
+        $lrn_check = db_prepare_or_log($conn, "SELECT 1 FROM students_info WHERE lrn = ? LIMIT 1", 'post_lrn_dup');
         if ($lrn_check !== null) {
             $lrn_check->bind_param("s", $_POST['lrn']);
             $lrn_check->execute();
-            $dup = $lrn_check->get_result()->fetch_assoc();
+            $dup = $lrn_check->get_result()->num_rows > 0;
             $lrn_check->close();
             if ($dup) {
-                $errors['lrn'] = $t[$lang]['lrn_exists'] . ': ' . trim(($dup['last_name'] ?? '') . ', ' . ($dup['first_name'] ?? ''));
+                $errors['lrn'] = $t[$lang]['lrn_exists'];
             }
         }
     }
@@ -1138,13 +1104,10 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
         .check-hint.ok      { color: #059669; }
         .check-hint.error   { color: #dc2626; }
         .check-hint.warn    { color: #d97706; }
-        .check-hint .existing-name { font-weight: 500; color: #64748b; margin-left: 0.15rem; }
 
         .name-dup-alert { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 0.6rem; padding: 0.85rem 1.1rem; border-radius: 12px; background: linear-gradient(135deg, #fff7ed, #fed7aa); border-left: 4px solid #d97706; color: #92400e; font-size: 0.85rem; font-weight: 500; line-height: 1.45; margin-top: 0.5rem; }
         .name-dup-alert i { font-size: 1.1rem; color: #d97706; margin-top: 2px; flex-shrink: 0; }
-        .name-dup-alert ul { margin: 0.35rem 0 0 1.15rem; padding: 0; }
-        .name-dup-alert li { margin-bottom: 0.15rem; }
-        .name-dup-alert li strong { color: #78350f; }
+        .name-dup-alert strong { color: #78350f; }
 
         .name-verify-card { border-left-width: 4px; }
         .name-verify-head { display:flex; align-items:center; gap:.85rem; flex-wrap:wrap; }
@@ -2880,11 +2843,12 @@ document.addEventListener('DOMContentLoaded', syncReligion);
                 if (!r.ok) { if (r.status === 429) setHint('warn', '<i class="fas fa-clock"></i> Too many checks. Please wait.'); else setHint('', ''); return; }
                 const j = await r.json();
                 if (lrnEl.value !== v) return;
-                if (!j.valid) { setHint('error', '<i class="fas fa-exclamation-circle"></i> ' + (j.message || 'Invalid LRN')); return; }
+                if (!j.valid) { setHint('error', '<i class="fas fa-exclamation-circle"></i> <?= htmlspecialchars($t[$lang]['invalid_lrn'], ENT_QUOTES, "UTF-8") ?>'); return; }
                 if (j.exists) {
-                    const nm = j.existing?.name || '';
-                    setHint('error', '<i class="fas fa-times-circle"></i> <?= htmlspecialchars($t[$lang]['lrn_exists'], ENT_QUOTES, "UTF-8") ?>' + (nm ? ' <span class="existing-name">(' + nm + ')</span>' : ''));
-                } else setHint('ok', '<i class="fas fa-check-circle"></i> <?= htmlspecialchars($t[$lang]['lrn_available'], ENT_QUOTES, "UTF-8") ?>');
+                    setHint('error', '<i class="fas fa-times-circle"></i> <?= htmlspecialchars($t[$lang]['lrn_exists'], ENT_QUOTES, "UTF-8") ?>');
+                } else {
+                    setHint('ok', '<i class="fas fa-check-circle"></i> <?= htmlspecialchars($t[$lang]['lrn_available'], ENT_QUOTES, "UTF-8") ?>');
+                }
             } catch (e) { setHint('', ''); }
         }, 400);
     });
@@ -2906,17 +2870,11 @@ document.addEventListener('DOMContentLoaded', syncReligion);
 
     function clearAlert(){ container.style.display = 'none'; alertEl.innerHTML = ''; currentMatches = []; }
 
-    function renderMatches(matches){
-        currentMatches = matches;
-        if (!matches || matches.length === 0){ clearAlert(); return; }
-        const items = matches.map(m => {
-            let line = '<strong>' + m.name + '</strong>';
-            if (m.lrn_masked) line += ' · LRN: ' + m.lrn_masked;
-            if (m.grade_level) line += ' · ' + m.grade_level;
-            if (m.school_year) line += ' (' + m.school_year + ')';
-            return '<li>' + line + '</li>';
-        }).join('');
-        alertEl.innerHTML = '<i class="fas fa-exclamation-triangle"></i><div><div><strong>Possible duplicate name detected.</strong> These existing students have the same name:</div><ul>' + items + '</ul><div style="margin-top:.4rem;font-size:.8rem;opacity:.85">If this is a different person, you can continue — you\'ll be asked to confirm on submit.</div></div>';
+    /* Generic notice only — no names, LRNs, or enrollment data are ever shown. */
+    function renderMatches(found){
+        if (!found){ clearAlert(); return; }
+        currentMatches = [{}];
+        alertEl.innerHTML = '<i class="fas fa-exclamation-triangle"></i><div><strong>Possible duplicate name detected.</strong><div style="margin-top:.35rem;font-size:.8rem;opacity:.85">A student with a similar name may already be registered. If this is a different person, you can continue and confirm on submit.</div></div>';
         container.style.display = 'block';
     }
 
@@ -2941,7 +2899,7 @@ document.addEventListener('DOMContentLoaded', syncReligion);
                 const j = await r.json();
                 const curSig = (fnEl.value.trim() + '|' + mnEl.value.trim() + '|' + lnEl.value.trim()).toLowerCase();
                 if (curSig !== sig) return;
-                if (j.checked && Array.isArray(j.matches) && j.matches.length) renderMatches(j.matches);
+                if (j.checked && j.possible_duplicate) renderMatches(true);
                 else clearAlert();
             } catch (e) {}
         }, 500);
@@ -3237,6 +3195,7 @@ document.addEventListener('DOMContentLoaded',()=>{
 
     let currentStep = <?= (int)$initial_step ?>;
     const visited   = new Set([1]);
+    const passed    = new Set();
 
     const STEP_NAMES = { 1: 'Student Info', 2: 'Parents & Guardian', 3: 'Address', 4: 'Education', 5: 'Enrollment & Documents' };
 
@@ -3344,20 +3303,29 @@ document.addEventListener('DOMContentLoaded',()=>{
         return err === null;
     }
 
+    function refreshIndicators() {
+        indicators.forEach(el => {
+            const s = parseInt(el.dataset.step, 10);
+            el.classList.remove('active', 'completed', 'invalid');
+            el.removeAttribute('aria-current');
+
+            if (s === currentStep) {
+                el.classList.add('active');
+                el.setAttribute('aria-current', 'step');
+            } else if (passed.has(s)) {
+                el.classList.add(stepIsComplete(s) ? 'completed' : 'invalid');
+            }
+
+            el.disabled = !(s <= currentStep || visited.has(s));
+        });
+    }
+
     function showStep(n) {
         if (n < 1 || n > TOTAL_STEPS) return;
         currentStep = n;
         visited.add(n);
         stepContents.forEach(el => { const s = parseInt(el.dataset.stepContent, 10); el.classList.toggle('active', s === n); });
-        indicators.forEach(el => {
-            const s = parseInt(el.dataset.step, 10);
-            el.classList.remove('active','completed','invalid');
-            el.removeAttribute('aria-current');
-            if (s === n) { el.classList.add('active'); el.setAttribute('aria-current','step'); }
-            else if (stepIsComplete(s)) el.classList.add('completed');
-            else if (visited.has(s)) el.classList.add('invalid');
-            el.disabled = !(s <= n || visited.has(s));
-        });
+        refreshIndicators();
         if (n === 5 && typeof renderStrandRecommendation === 'function') setTimeout(renderStrandRecommendation, 50);
         const target = document.querySelector('.wizard-progress-wrap');
         if (target) { const y = target.getBoundingClientRect().top + window.pageYOffset - 20; window.scrollTo({ top: y, behavior: 'smooth' }); }
@@ -3384,6 +3352,7 @@ document.addEventListener('DOMContentLoaded',()=>{
             try { err = getStepError(from); }
             catch (ex) { console.error('Wizard: getStepError threw', ex); }
             if (err) { alertError(err); return; }
+            passed.add(from);
             showStep(target);
             return;
         }
@@ -3433,22 +3402,15 @@ document.addEventListener('DOMContentLoaded',()=>{
             return;
         }
 
-        const matches = (typeof window.__getNameMatches === 'function') ? window.__getNameMatches() : [];
+        const hasPossibleDup = (typeof window.__getNameMatches === 'function') && window.__getNameMatches().length > 0;
 
-        if (matches && matches.length > 0) {
+        if (hasPossibleDup) {
             e.preventDefault();
-            const items = matches.map(m => {
-                let line = '<strong>' + m.name + '</strong>';
-                if (m.lrn_masked) line += ' · LRN: ' + m.lrn_masked;
-                if (m.grade_level) line += ' · ' + m.grade_level;
-                return '<li style="text-align:left">' + line + '</li>';
-            }).join('');
-
             if (typeof Swal !== 'undefined' && Swal.fire) {
                 const res = await Swal.fire({
                     icon: 'warning',
                     title: '<?= htmlspecialchars($t[$lang]['name_duplicate_title'], ENT_QUOTES, "UTF-8") ?>',
-                    html: '<p style="margin-bottom:.5rem"><?= htmlspecialchars($t[$lang]['name_duplicate_msg'], ENT_QUOTES, "UTF-8") ?></p><ul style="display:inline-block;margin:0;padding-left:1.2rem;font-size:.9rem">' + items + '</ul>',
+                    html: '<p><?= htmlspecialchars($t[$lang]['name_duplicate_msg'], ENT_QUOTES, "UTF-8") ?></p>',
                     showCancelButton: true,
                     confirmButtonText: '<?= htmlspecialchars($t[$lang]['name_duplicate_yes'], ENT_QUOTES, "UTF-8") ?>',
                     cancelButtonText: '<?= htmlspecialchars($t[$lang]['name_duplicate_no'], ENT_QUOTES, "UTF-8") ?>',
@@ -3469,16 +3431,12 @@ document.addEventListener('DOMContentLoaded',()=>{
         if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Submitting...'; }
     });
 
-    form.addEventListener('input', () => {
-        indicators.forEach(el => {
-            const s = parseInt(el.dataset.step, 10);
-            if (s === currentStep) return;
-            el.classList.remove('completed','invalid');
-            if (stepIsComplete(s)) el.classList.add('completed');
-            else if (visited.has(s)) el.classList.add('invalid');
-        });
-    }, { passive: true });
+    form.addEventListener('input', () => { refreshIndicators(); }, { passive: true });
 
+    for (let s = 1; s < currentStep; s++) {
+        visited.add(s);
+        if (stepIsComplete(s)) passed.add(s);
+    }
     showStep(currentStep);
     console.log('[Wizard] ready — starting at step', currentStep);
     console.log('[Wizard] LRN length on load:', (form.querySelector('#lrn')?.value || '').length);

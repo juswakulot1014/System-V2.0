@@ -37,12 +37,12 @@ $where_sql = $where ? "WHERE " . implode(" AND ", $where) : "";
 
 /* ═══ Fetch log rows ═══ */
 $stmt = $conn->prepare("
-    SELECT a.id, a.created_at, a.action, a.target_type, a.target_id,
+    SELECT a.audit_id, a.created_at, a.action, a.target_type, a.target_id,
            a.ip_address, a.user_agent, a.meta,
            adm.fullname AS admin_name,
            adm.username AS admin_username
     FROM audit_log a
-    LEFT JOIN admins adm ON a.admin_id = adm.id
+    LEFT JOIN admins adm ON a.admin_id = adm.admin_id
     $where_sql
     ORDER BY a.created_at DESC
     LIMIT {$limit}
@@ -190,9 +190,9 @@ if (!empty($ids_by_type['admin']) || !empty($ids_by_type['account'])) {
     )));
     $ph  = implode(',', array_fill(0, count($ids), '?'));
     $stmt = $conn->prepare("
-        SELECT id, fullname, username, role
+        SELECT admin_id, fullname, username, role
         FROM admins
-        WHERE id IN ($ph)
+        WHERE admin_id IN ($ph)
     ");
     $stmt->bind_param(str_repeat('i', count($ids)), ...$ids);
     $stmt->execute();
@@ -203,8 +203,8 @@ if (!empty($ids_by_type['admin']) || !empty($ids_by_type['account'])) {
             'username' => $a['username'] ?? '',
             'role'     => $a['role'] ?? '',
         ];
-        $lookup['admin'][(int)$a['id']]   = $info;
-        $lookup['account'][(int)$a['id']] = $info;
+        $lookup['admin'][(int)$a['admin_id']]   = $info;
+        $lookup['account'][(int)$a['admin_id']] = $info;
     }
     $stmt->close();
 }
@@ -245,9 +245,9 @@ $action_list = $conn->query("
 ")->fetch_all(MYSQLI_ASSOC) ?: [];
 
 $admin_list = $conn->query("
-    SELECT DISTINCT adm.id, adm.fullname, adm.username
+    SELECT DISTINCT adm.admin_id, adm.fullname, adm.username
     FROM audit_log a
-    INNER JOIN admins adm ON a.admin_id = adm.id
+    INNER JOIN admins adm ON a.admin_id = adm.admin_id
     ORDER BY adm.fullname ASC
 ")->fetch_all(MYSQLI_ASSOC) ?: [];
 
@@ -381,7 +381,6 @@ if (!function_exists('friendly_label')) {
             'email'         => 'Email',
             'reason'        => 'Reason',
             'ip'            => 'IP Address',
-            'reason'        => 'Reason',
             'logout_others' => 'Logout Others',
             'email_sent'    => 'Email Sent',
         ];
@@ -704,7 +703,7 @@ require __DIR__ . '/../partials/sidebar.php';
                         <?php
                         $filtered_name = '';
                         foreach ($admin_list as $adm) {
-                            if ((int)$adm['id'] === $admin_filter) { $filtered_name = $adm['fullname']; break; }
+                            if ((int)$adm['admin_id'] === $admin_filter) { $filtered_name = $adm['fullname']; break; }
                         }
                         ?>
                         · filtered by <strong><?= htmlspecialchars($filtered_name ?: "admin #$admin_filter") ?></strong>
@@ -788,7 +787,7 @@ require __DIR__ . '/../partials/sidebar.php';
                     <select name="admin_id" id="f_admin">
                         <option value="">All admins</option>
                         <?php foreach ($admin_list as $adm): ?>
-                            <option value="<?= (int)$adm['id'] ?>" <?= $admin_filter === (int)$adm['id'] ? 'selected' : '' ?>>
+                            <option value="<?= (int)$adm['admin_id'] ?>" <?= $admin_filter === (int)$adm['admin_id'] ? 'selected' : '' ?>>
                                 <?= htmlspecialchars($adm['fullname']) ?>
                                 <?php if (!empty($adm['username'])): ?>(@<?= htmlspecialchars($adm['username']) ?>)<?php endif; ?>
                             </option>

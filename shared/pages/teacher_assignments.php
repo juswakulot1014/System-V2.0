@@ -3,7 +3,7 @@
 // Registrar / superadmin UI for assigning teachers to section clusters.
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
-require_once __DIR__ . '/../../config/mailer.php';      
+require_once __DIR__ . '/../../config/mailer.php';
 require_once __DIR__ . '/../lib/teacher_scope.php';
 
 $__nav_section = 'system';
@@ -19,11 +19,11 @@ unset($_SESSION['ta_flash']);
 /* ═══ HELPER: FLATTEN LOGO TO TEMP FILE FOR CID ATTACHMENT ═══ */
 if (!function_exists('create_email_logo_temp')) {
     function create_email_logo_temp(string $dir): ?string {
-        if (!extension_loaded('gd')) return null; 
+        if (!extension_loaded('gd')) return null;
 
         $files = glob($dir . 'usat.*');
         if (empty($files)) return null;
-        
+
         $path = $files[0];
         $info = @getimagesize($path);
         if (!$info) return null;
@@ -43,15 +43,15 @@ if (!function_exists('create_email_logo_temp')) {
         $size = 100;
         $new_w = $size;
         $new_h = (int)round(($h / $w) * $size);
-        
+
         $new_im = imagecreatetruecolor($new_w, $new_h);
         $white = imagecolorallocate($new_im, 255, 255, 255);
         imagefill($new_im, 0, 0, $white);
-        
+
         imagecopyresampled($new_im, $im, 0, 0, 0, 0, $new_w, $new_h, $w, $h);
 
         $temp = tempnam(sys_get_temp_dir(), 'email_logo_') . '.jpg';
-        imagejpeg($new_im, $temp, 90); 
+        imagejpeg($new_im, $temp, 90);
 
         imagedestroy($im);
         imagedestroy($new_im);
@@ -77,7 +77,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
                                           $err = 'Section, grade, and school year are required.';
 
     if ($err === '') {
-        $chk = $conn->prepare("SELECT fullname, email, role FROM admins WHERE id = ? LIMIT 1");
+        $chk = $conn->prepare("SELECT fullname, email, role FROM admins WHERE admin_id = ? LIMIT 1");
         if (!$chk) {
             $err = 'System error.';
         } else {
@@ -85,7 +85,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
             $chk->execute();
             $teacher_data = $chk->get_result()->fetch_assoc();
             $chk->close();
-            
+
             if (!$teacher_data) {
                 $err = 'Teacher not found.';
             } elseif ($teacher_data['role'] !== 'teacher') {
@@ -117,7 +117,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
             $actor = (int)($_SESSION['admin_id'] ?? 0);
             $ins->bind_param('issssii', $teacher_id, $section, $grade, $sy, $program, $is_advisory, $actor);
             $ins->execute();
-            
+
             $is_new_assignment = ($ins->affected_rows === 1);
             $ins->close();
 
@@ -130,21 +130,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
                 'program'     => $program,
                 'is_advisory' => $is_advisory
             ]);
-            
+
             $email_note = '';
-            
+
             if ($is_new_assignment && !empty($teacher_data['email']) && filter_var($teacher_data['email'], FILTER_VALIDATE_EMAIL)) {
                 try {
                     $subject = "[USAT] New Class Assignment: {$section} ({$grade})";
-                    
+
                     $prog_html = $program !== '' ? htmlspecialchars($program) : 'N/A';
                     $teacher_name = htmlspecialchars($teacher_data['fullname']);
                     $section_safe = htmlspecialchars($section);
                     $grade_safe = htmlspecialchars($grade);
                     $sy_safe = htmlspecialchars($sy);
-                    
+
                     $dashboard_url = "http://" . ($_SERVER['HTTP_HOST'] ?? 'localhost') . URL_PREFIX . "/dashboard.php";
-                    
+
                     $temp_logo = create_email_logo_temp(__DIR__ . '/../../assets/img/');
                     $logo_html = '';
                     if ($temp_logo) {
@@ -164,7 +164,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
                     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:40px 12px;">
                     <tr><td align="center">
                         <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 4px 20px rgba(15,23,42,.08);border:1px solid #e2e8f0;">
-                            
+
                             <tr><td style="background:#1e3a8a;padding:30px;text-align:center;color:#ffffff;border-bottom:4px solid #fbbf24;">
                                 {$logo_html}
                                 <div style="font-size:12px;letter-spacing:2px;text-transform:uppercase;opacity:.9;font-weight:600;margin-bottom:8px">USAT College Sagay City</div>
@@ -191,7 +191,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
                                         <a href="{$dashboard_url}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:14px 30px;border-radius:6px;font-weight:bold;font-size:15px;">Go to My Dashboard</a>
                                     </td></tr>
                                 </table>
-                                
+
                                 <p style="margin:30px 0 0;font-size:12px;color:#64748b;text-align:center;line-height:1.5;">
                                     If you believe this is an error, please contact the Registrar's Office immediately.
                                 </p>
@@ -210,7 +210,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
 
                     [$mail, $buildErr] = mailer_build();
                     $out = ['ok' => false, 'error' => null];
-                    
+
                     if ($mail === null) {
                         $out['error'] = $buildErr;
                     } else {
@@ -224,7 +224,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
                         if ($temp_logo) {
                             $mail->addEmbeddedImage($temp_logo, 'usat_logo');
                         }
-                        
+
                         try {
                             $mail->send();
                             $out['ok'] = true;
@@ -270,7 +270,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['unassign'])) {
     $id = (int)($_POST['id'] ?? 0);
 
     if ($id > 0) {
-        $del = $conn->prepare("DELETE FROM teacher_sections WHERE id = ?");
+        $del = $conn->prepare("DELETE FROM teacher_sections WHERE assignment_id = ?");
         if ($del) {
             $del->bind_param('i', $id);
             $del->execute();
@@ -300,17 +300,17 @@ $offset = ($page - 1) * $limit;
 
 /* ═══ DATA ═══ */
 $teachers = $conn->query("
-    SELECT id, fullname, username, email
+    SELECT admin_id, fullname, username, email
       FROM admins
      WHERE role = 'teacher'
      ORDER BY fullname
 ")->fetch_all(MYSQLI_ASSOC);
 
 $assignments = $conn->query("
-    SELECT ts.id, ts.teacher_id, ts.section, ts.grade_level, ts.school_year, ts.program, ts.is_advisory,
+    SELECT ts.assignment_id, ts.teacher_id, ts.section, ts.grade_level, ts.school_year, ts.program, ts.is_advisory,
            a.fullname AS teacher_name, a.username
       FROM teacher_sections ts
-      JOIN admins a ON a.id = ts.teacher_id
+      JOIN admins a ON a.admin_id = ts.teacher_id
      ORDER BY a.fullname ASC, ts.grade_level ASC, ts.section ASC
      LIMIT $limit OFFSET $offset
 ")->fetch_all(MYSQLI_ASSOC);
@@ -327,7 +327,7 @@ $page_title = 'Teacher Assignments • USAT Admin';
 $page_css = <<<'CSS'
     .empty-note { padding: 2.5rem 1.5rem; text-align:center; color: var(--text-2); }
     .cluster-pill { display:inline-block; padding:.15rem .55rem; border-radius:6px; font-size:.7rem; font-weight:600; background:var(--surface-2); border:1px solid var(--border); color:var(--text-2); }
-    
+
     /* Pagination */
     .pagination-bar { display: flex; justify-content: space-between; align-items: center; padding: 1.25rem; border-top: 1px solid var(--border); flex-wrap: wrap; gap: 1rem; }
     .page-info { font-size: .85rem; color: var(--text-2); font-weight: 500; }
@@ -389,7 +389,7 @@ require __DIR__ . '/../partials/sidebar.php';
                         <select name="teacher_id" class="form-select" required>
                             <option value="">— Select teacher —</option>
                             <?php foreach ($teachers as $t): ?>
-                                <option value="<?= (int)$t['id'] ?>">
+                                <option value="<?= (int)$t['admin_id'] ?>">
                                     <?= htmlspecialchars($t['fullname']) ?> (@<?= htmlspecialchars($t['username']) ?>)
                                     <?= empty($t['email']) ? ' [No Email]' : '' ?>
                                 </option>
@@ -501,7 +501,7 @@ require __DIR__ . '/../partials/sidebar.php';
                                           onsubmit="return confirm('Remove this assignment?');">
                                         <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
                                         <input type="hidden" name="unassign" value="1">
-                                        <input type="hidden" name="id" value="<?= (int)$a['id'] ?>">
+                                        <input type="hidden" name="id" value="<?= (int)$a['assignment_id'] ?>">
                                         <button class="btn btn-outline-danger btn-xs" title="Remove">
                                             <i class="bi bi-trash3"></i>
                                         </button>
@@ -521,15 +521,15 @@ require __DIR__ . '/../partials/sidebar.php';
                     <div class="pagination">
                         <a href="?page=1" class="page-btn <?= $page <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-left"></i></a>
                         <a href="?page=<?= max(1, $page - 1) ?>" class="page-btn <?= $page <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-left"></i></a>
-                        
-                        <?php 
-                        $start_page = max(1, $page - 2); 
-                        $end_page = min($total_pages, $page + 2); 
-                        for ($i = $start_page; $i <= $end_page; $i++): 
+
+                        <?php
+                        $start_page = max(1, $page - 2);
+                        $end_page = min($total_pages, $page + 2);
+                        for ($i = $start_page; $i <= $end_page; $i++):
                         ?>
                             <a href="?page=<?= $i ?>" class="page-btn <?= $i === $page ? 'active' : '' ?>"><?= $i ?></a>
                         <?php endfor; ?>
-                        
+
                         <a href="?page=<?= min($total_pages, $page + 1) ?>" class="page-btn <?= $page >= $total_pages ? 'disabled' : '' ?>"><i class="bi bi-chevron-right"></i></a>
                         <a href="?page=<?= $total_pages ?>" class="page-btn <?= $page >= $total_pages ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-right"></i></a>
                     </div>

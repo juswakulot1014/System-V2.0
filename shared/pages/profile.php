@@ -39,7 +39,7 @@ try {
 
 /* ── Serve current admin's photo inline ── */
 if (isset($_GET['photo']) && $_GET['photo'] === '1') {
-    $stmt = $conn->prepare("SELECT photo FROM admins WHERE id = ? LIMIT 1");
+    $stmt = $conn->prepare("SELECT photo FROM admins WHERE admin_id = ? LIMIT 1");
     if (!$stmt) { http_response_code(500); exit('Server error'); }
     $stmt->bind_param('i', $admin_id);
     $stmt->execute();
@@ -121,7 +121,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'image_min_h' => 100,
                 ]);
 
-                $oq = $conn->prepare("SELECT photo FROM admins WHERE id = ? LIMIT 1");
+                $oq = $conn->prepare("SELECT photo FROM admins WHERE admin_id = ? LIMIT 1");
                 $oq->bind_param('i', $admin_id);
                 $oq->execute();
                 $old = $oq->get_result()->fetch_assoc();
@@ -149,7 +149,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 @chmod($final, 0640);
 
-                $upd = $conn->prepare("UPDATE admins SET photo = ? WHERE id = ?");
+                $upd = $conn->prepare("UPDATE admins SET photo = ? WHERE admin_id = ?");
                 $upd->bind_param('si', $fn, $admin_id);
                 $upd->execute();
                 $upd->close();
@@ -174,7 +174,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     /* Delete profile photo */
     elseif (isset($_POST['delete_photo'])) {
-        $q = $conn->prepare("SELECT photo FROM admins WHERE id = ? LIMIT 1");
+        $q = $conn->prepare("SELECT photo FROM admins WHERE admin_id = ? LIMIT 1");
         $q->bind_param('i', $admin_id);
         $q->execute();
         $row = $q->get_result()->fetch_assoc();
@@ -182,7 +182,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $old_photo = $row['photo'] ?? null;
 
-        $u = $conn->prepare("UPDATE admins SET photo = NULL WHERE id = ?");
+        $u = $conn->prepare("UPDATE admins SET photo = NULL WHERE admin_id = ?");
         $u->bind_param('i', $admin_id);
         $u->execute();
         $u->close();
@@ -208,6 +208,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $success = 'Profile photo removed.';
     }
 
+    /* Update Email */
+    elseif (isset($_POST['update_email'])) {
+        $new_email = trim((string)($_POST['new_email'] ?? ''));
+        
+        if ($new_email === '') {
+            $error = 'Email address cannot be empty.';
+        } elseif (!filter_var($new_email, FILTER_VALIDATE_EMAIL)) {
+            $error = 'Please enter a valid email address.';
+        } else {
+            $chk = $conn->prepare("SELECT admin_id FROM admins WHERE email = ? AND admin_id != ? LIMIT 1");
+            if ($chk) {
+                $chk->bind_param('si', $new_email, $admin_id);
+                $chk->execute();
+                if ($chk->get_result()->num_rows > 0) {
+                    $error = 'This email address is already in use by another account.';
+                }
+                $chk->close();
+            }
+
+            if ($error === '') {
+                $upd = $conn->prepare("UPDATE admins SET email = ? WHERE admin_id = ?");
+                if ($upd) {
+                    $upd->bind_param('si', $new_email, $admin_id);
+                    if ($upd->execute()) {
+                        audit_log($conn, 'admin.email_update', [
+                            'type'  => 'admin',
+                            'id'    => $admin_id,
+                            'email' => $new_email,
+                        ]);
+                        $success = 'Email address updated successfully.';
+                    } else {
+                        $error = 'Failed to update email address.';
+                    }
+                    $upd->close();
+                } else {
+                    $error = 'System error. Please try again later.';
+                }
+            }
+        }
+    }
+
     /* Change password */
     else {
         $is_locked = (
@@ -227,7 +268,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($current_password === '') {
                 $error = 'Please enter your current password.';
             } else {
-                $stmt = $conn->prepare("SELECT password FROM admins WHERE id = ? LIMIT 1");
+                $stmt = $conn->prepare("SELECT password FROM admins WHERE admin_id = ? LIMIT 1");
                 if (!$stmt) {
                     $error = 'System error. Please try again later.';
                 } else {
@@ -279,9 +320,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $hashed = password_hash($new_password, PASSWORD_BCRYPT, ['cost' => 12]);
 
             if ($logout_others) {
-                $sql = "UPDATE admins SET password = ?, remember_token = NULL, remember_expires = NULL WHERE id = ?";
+                $sql = "UPDATE admins SET password = ?, remember_token = NULL, remember_expires = NULL WHERE admin_id = ?";
             } else {
-                $sql = "UPDATE admins SET password = ? WHERE id = ?";
+                $sql = "UPDATE admins SET password = ? WHERE admin_id = ?";
             }
 
             $upd = $conn->prepare($sql);
@@ -327,12 +368,13 @@ if ($attempts_used >= $max_attempts) {
 $admin_info = [
     'fullname'   => 'Administrator',
     'username'   => '',
+    'email'      => '',
     'role'       => '',
     'photo'      => null,
     'created_at' => null,
 ];
 
-$ai = $conn->prepare("SELECT fullname, username, role, photo, created_at FROM admins WHERE id = ? LIMIT 1");
+$ai = $conn->prepare("SELECT fullname, username, email, role, photo, created_at FROM admins WHERE admin_id = ? LIMIT 1");
 if ($ai) {
     $ai->bind_param('i', $admin_id);
     $ai->execute();
@@ -414,11 +456,19 @@ $page_css = <<<'CSS'
     .pf-info-cell{padding:1rem 1.5rem;border-right:1px solid var(--border);border-bottom:1px solid var(--border)}
     .pf-info-cell:nth-child(even){border-right:none}
     .pf-info-cell:nth-last-child(-n+2){border-bottom:none}
+    .pf-info-cell.span-full{grid-column:1 / -1;border-right:none;border-bottom:1px solid var(--border)}
     .pf-info-cell .lbl{font-size:.66rem;font-weight:700;color:var(--text-2);text-transform:uppercase;letter-spacing:.65px;margin-bottom:.35rem;display:flex;align-items:center;gap:.4rem}
     .pf-info-cell .lbl i{color:var(--accent);font-size:.8rem}
     .pf-info-cell .val{font-weight:600;font-size:.95rem;color:var(--text);word-break:break-word;line-height:1.4}
 
-    .pf-photo-hint{padding:.85rem 1.5rem;font-size:.78rem;color:var(--text-2);background:var(--surface-2);border-top:1px solid var(--border);display:flex;align-items:center;gap:.5rem}
+    /* Email Edit form */
+    .pf-email-form{display:flex;gap:.65rem;align-items:center;margin-top:.35rem}
+    .pf-email-form input{flex:1;padding:.55rem .85rem;border:1.5px solid var(--border);border-radius:10px;background:var(--surface-2);color:var(--text);font-size:.9rem;transition:border-color .15s,box-shadow .15s}
+    .pf-email-form input:focus{outline:none;border-color:var(--accent);background:var(--surface);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent)}
+    .pf-email-form button{padding:.55rem 1.25rem;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;border:none;font-weight:600;font-size:.85rem;cursor:pointer;transition:transform .15s,box-shadow .15s;box-shadow:0 4px 10px rgba(79,70,229,0.2);white-space:nowrap}
+    .pf-email-form button:hover{transform:translateY(-1px);box-shadow:0 6px 14px rgba(79,70,229,0.3)}
+
+    .pf-photo-hint{padding:.85rem 1.5rem;font-size:.78rem;color:var(--text-2);background:var(--surface-2);display:flex;align-items:center;gap:.5rem}
     .pf-photo-hint i{color:var(--accent);font-size:.9rem}
 
     .cw-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-xl);box-shadow:var(--shadow-sm);overflow:hidden}
@@ -485,9 +535,12 @@ $page_css = <<<'CSS'
         .pf-info-cell{padding:.85rem 1.1rem;border-right:none}
         .pf-info-cell:nth-last-child(-n+2){border-bottom:1px solid var(--border)}
         .pf-info-cell:last-child{border-bottom:none}
+        .pf-info-cell.span-full{border-bottom:1px solid var(--border)}
         .pf-stat-val{font-size:1.15rem}
         .cw-card-body{padding:1.25rem}
         .cw-card-head{padding:1.1rem 1.25rem}
+        .pf-email-form{flex-direction:column;align-items:stretch}
+        .pf-email-form button{width:100%}
     }
 CSS;
 
@@ -538,174 +591,190 @@ require __DIR__ . '/../partials/sidebar.php';
 
     <div class="profile-grid">
 
-        <div class="pf-card">
-            <div class="pf-hero">
-                <div class="pf-photo-wrap">
-                    <?php if ($admin_photo_url): ?>
-                        <img src="<?= htmlspecialchars($admin_photo_url, ENT_QUOTES, 'UTF-8') ?>" alt="Profile photo" class="pf-photo">
-                    <?php else: ?>
-                        <div class="pf-photo-fallback"><?= htmlspecialchars($initials, ENT_QUOTES, 'UTF-8') ?></div>
-                    <?php endif; ?>
+        <div>
+            <!-- Profile Card -->
+            <div class="pf-card">
+                <div class="pf-hero">
+                    <div class="pf-photo-wrap">
+                        <?php if ($admin_photo_url): ?>
+                            <img src="<?= htmlspecialchars($admin_photo_url, ENT_QUOTES, 'UTF-8') ?>" alt="Profile photo" class="pf-photo">
+                        <?php else: ?>
+                            <div class="pf-photo-fallback"><?= htmlspecialchars($initials, ENT_QUOTES, 'UTF-8') ?></div>
+                        <?php endif; ?>
 
-                    <form method="POST" enctype="multipart/form-data" id="uploadPhotoForm" style="display:contents">
-                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8') ?>">
-                        <input type="hidden" name="upload_photo" value="1">
-                        <label class="pf-photo-btn pf-btn-upload" title="Change photo" for="adminPhotoInput">
-                            <i class="bi bi-camera-fill"></i>
-                        </label>
-                        <input type="file" id="adminPhotoInput" name="admin_photo"
-                               accept="image/jpeg,image/png" style="display:none"
-                               onchange="if(this.files.length) document.getElementById('uploadPhotoForm').submit();">
-                    </form>
+                        <form method="POST" enctype="multipart/form-data" id="uploadPhotoForm" style="display:contents">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8') ?>">
+                            <input type="hidden" name="upload_photo" value="1">
+                            <label class="pf-photo-btn pf-btn-upload" title="Change photo" for="adminPhotoInput">
+                                <i class="bi bi-camera-fill"></i>
+                            </label>
+                            <input type="file" id="adminPhotoInput" name="admin_photo"
+                                   accept="image/jpeg,image/png" style="display:none"
+                                   onchange="if(this.files.length) document.getElementById('uploadPhotoForm').submit();">
+                        </form>
 
-                    <?php if ($admin_photo_url): ?>
-                    <form method="POST" id="deletePhotoForm" style="display:contents">
-                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8') ?>">
-                        <input type="hidden" name="delete_photo" value="1">
-                        <button type="submit" class="pf-photo-btn pf-btn-delete" title="Remove photo"
-                                onclick="return confirm('Remove your profile photo?');">
-                            <i class="bi bi-trash3-fill"></i>
-                        </button>
-                    </form>
-                    <?php endif; ?>
-                </div>
+                        <?php if ($admin_photo_url): ?>
+                        <form method="POST" id="deletePhotoForm" style="display:contents">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8') ?>">
+                            <input type="hidden" name="delete_photo" value="1">
+                            <button type="submit" class="pf-photo-btn pf-btn-delete" title="Remove photo"
+                                    onclick="return confirm('Remove your profile photo?');">
+                                <i class="bi bi-trash3-fill"></i>
+                            </button>
+                        </form>
+                        <?php endif; ?>
+                    </div>
 
-                <div class="pf-hero-info">
-                    <h1>
-                        <?= htmlspecialchars((string)$admin_info['fullname'], ENT_QUOTES, 'UTF-8') ?>
-                        <span class="pf-role-badge">
-                            <i class="bi bi-shield-fill"></i>
-                            <?= htmlspecialchars((string)$admin_info['role'], ENT_QUOTES, 'UTF-8') ?>
-                        </span>
-                    </h1>
-                    <div class="pf-hero-meta">
-                        <span><i class="bi bi-at"></i><?= htmlspecialchars((string)$admin_info['username'], ENT_QUOTES, 'UTF-8') ?></span>
-                        <span><i class="bi bi-calendar3"></i>Member since <?= htmlspecialchars($member_since, ENT_QUOTES, 'UTF-8') ?></span>
+                    <div class="pf-hero-info">
+                        <h1>
+                            <?= htmlspecialchars((string)$admin_info['fullname'], ENT_QUOTES, 'UTF-8') ?>
+                            <span class="pf-role-badge">
+                                <i class="bi bi-shield-fill"></i>
+                                <?= htmlspecialchars((string)$admin_info['role'], ENT_QUOTES, 'UTF-8') ?>
+                            </span>
+                        </h1>
+                        <div class="pf-hero-meta">
+                            <span><i class="bi bi-at"></i><?= htmlspecialchars((string)$admin_info['username'], ENT_QUOTES, 'UTF-8') ?></span>
+                            <span><i class="bi bi-calendar3"></i>Member since <?= htmlspecialchars($member_since, ENT_QUOTES, 'UTF-8') ?></span>
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <div class="pf-stats">
-                <div class="pf-stat">
-                    <div class="pf-stat-val"><?= number_format($days_member) ?></div>
-                    <div class="pf-stat-lbl"><i class="bi bi-calendar-check"></i>Days Active</div>
+                <div class="pf-stats">
+                    <div class="pf-stat">
+                        <div class="pf-stat-val"><?= number_format($days_member) ?></div>
+                        <div class="pf-stat-lbl"><i class="bi bi-calendar-check"></i>Days Active</div>
+                    </div>
+                    <div class="pf-stat">
+                        <div class="pf-stat-val" style="text-transform:capitalize"><?= htmlspecialchars((string)$admin_info['role'], ENT_QUOTES, 'UTF-8') ?></div>
+                        <div class="pf-stat-lbl"><i class="bi bi-shield-lock"></i>Access Level</div>
+                    </div>
+                    <div class="pf-stat">
+                        <div class="pf-stat-val"><?= $admin_photo_url ? 'Active' : '—' ?></div>
+                        <div class="pf-stat-lbl"><i class="bi bi-image"></i>Profile Photo</div>
+                    </div>
                 </div>
-                <div class="pf-stat">
-                    <div class="pf-stat-val" style="text-transform:capitalize"><?= htmlspecialchars((string)$admin_info['role'], ENT_QUOTES, 'UTF-8') ?></div>
-                    <div class="pf-stat-lbl"><i class="bi bi-shield-lock"></i>Access Level</div>
-                </div>
-                <div class="pf-stat">
-                    <div class="pf-stat-val"><?= $admin_photo_url ? 'Active' : '—' ?></div>
-                    <div class="pf-stat-lbl"><i class="bi bi-image"></i>Profile Photo</div>
-                </div>
-            </div>
 
-            <div class="pf-info-grid">
-                <div class="pf-info-cell">
-                    <div class="lbl"><i class="bi bi-person-badge-fill"></i>Full Name</div>
-                    <div class="val"><?= htmlspecialchars((string)$admin_info['fullname'], ENT_QUOTES, 'UTF-8') ?></div>
+                <div class="pf-info-grid">
+                    <div class="pf-info-cell">
+                        <div class="lbl"><i class="bi bi-person-badge-fill"></i>Full Name</div>
+                        <div class="val"><?= htmlspecialchars((string)$admin_info['fullname'], ENT_QUOTES, 'UTF-8') ?></div>
+                    </div>
+                    <div class="pf-info-cell">
+                        <div class="lbl"><i class="bi bi-at"></i>Username</div>
+                        <div class="val">@<?= htmlspecialchars((string)$admin_info['username'], ENT_QUOTES, 'UTF-8') ?></div>
+                    </div>
+                    <div class="pf-info-cell">
+                        <div class="lbl"><i class="bi bi-shield-lock-fill"></i>Role</div>
+                        <div class="val" style="text-transform:capitalize"><?= htmlspecialchars((string)$admin_info['role'], ENT_QUOTES, 'UTF-8') ?></div>
+                    </div>
+                    <div class="pf-info-cell">
+                        <div class="lbl"><i class="bi bi-calendar-check"></i>Account Created</div>
+                        <div class="val"><?= htmlspecialchars($member_since, ENT_QUOTES, 'UTF-8') ?></div>
+                    </div>
+                    
+                    <!-- NEW: Email Edit Inline -->
+                    <div class="pf-info-cell span-full">
+                        <div class="lbl"><i class="bi bi-envelope-fill"></i>Email Address</div>
+                        <form method="POST" class="pf-email-form">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8') ?>">
+                            <input type="email" name="new_email" value="<?= htmlspecialchars((string)($admin_info['email'] ?? ''), ENT_QUOTES, 'UTF-8') ?>" placeholder="name@example.com" required>
+                            <button type="submit" name="update_email" value="1">Update Email</button>
+                        </form>
+                    </div>
                 </div>
-                <div class="pf-info-cell">
-                    <div class="lbl"><i class="bi bi-at"></i>Username</div>
-                    <div class="val">@<?= htmlspecialchars((string)$admin_info['username'], ENT_QUOTES, 'UTF-8') ?></div>
-                </div>
-                <div class="pf-info-cell">
-                    <div class="lbl"><i class="bi bi-shield-lock-fill"></i>Role</div>
-                    <div class="val" style="text-transform:capitalize"><?= htmlspecialchars((string)$admin_info['role'], ENT_QUOTES, 'UTF-8') ?></div>
-                </div>
-                <div class="pf-info-cell">
-                    <div class="lbl"><i class="bi bi-calendar-check"></i>Account Created</div>
-                    <div class="val"><?= htmlspecialchars($member_since, ENT_QUOTES, 'UTF-8') ?></div>
-                </div>
-            </div>
 
-            <div class="pf-photo-hint">
-                <i class="bi bi-info-circle-fill"></i>
-                <span>Photo: JPG or PNG · Max 2 MB · Min 100×100px</span>
+                <div class="pf-photo-hint">
+                    <i class="bi bi-info-circle-fill"></i>
+                    <span>Photo: JPG or PNG · Max 2 MB · Min 100×100px</span>
+                </div>
             </div>
         </div>
 
-        <div class="cw-card">
-            <div class="cw-card-head">
-                <div class="cw-card-head-icon"><i class="bi bi-shield-lock-fill"></i></div>
-                <div>
-                    <h3>Change Your Password</h3>
-                    <p>Verify with your current password, then choose a new one.</p>
+        <div>
+            <!-- Change Password Card -->
+            <div class="cw-card">
+                <div class="cw-card-head">
+                    <div class="cw-card-head-icon"><i class="bi bi-shield-lock-fill"></i></div>
+                    <div>
+                        <h3>Change Your Password</h3>
+                        <p>Verify with your current password, then choose a new one.</p>
+                    </div>
                 </div>
-            </div>
 
-            <div class="cw-card-body">
-                <form method="POST" id="profileForm" autocomplete="off" novalidate>
-                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8') ?>">
+                <div class="cw-card-body">
+                    <form method="POST" id="profileForm" autocomplete="off" novalidate>
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8') ?>">
 
-                    <div class="cw-field">
-                        <label for="current_password">Current Password</label>
-                        <div class="cw-input-wrap">
-                            <input type="password" id="current_password" name="current_password" placeholder="Enter your current password" required autocomplete="current-password">
-                            <i class="bi bi-shield-lock-fill cw-input-icon"></i>
-                            <button type="button" class="cw-eye" data-toggle-pw="current_password" aria-label="Show password">
-                                <i class="bi bi-eye"></i>
-                            </button>
+                        <div class="cw-field">
+                            <label for="current_password">Current Password</label>
+                            <div class="cw-input-wrap">
+                                <input type="password" id="current_password" name="current_password" placeholder="Enter your current password" required autocomplete="current-password">
+                                <i class="bi bi-shield-lock-fill cw-input-icon"></i>
+                                <button type="button" class="cw-eye" data-toggle-pw="current_password" aria-label="Show password">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                            </div>
                         </div>
-                    </div>
 
-                    <div class="cw-divider"><span><i class="bi bi-arrow-repeat"></i> New Password</span></div>
+                        <div class="cw-divider"><span><i class="bi bi-arrow-repeat"></i> New Password</span></div>
 
-                    <div class="cw-field">
-                        <div class="cw-field-head">
-                            <label for="new_password">New Password</label>
-                            <span class="cw-charcount" id="cwCharCount">0 / 128</span>
+                        <div class="cw-field">
+                            <div class="cw-field-head">
+                                <label for="new_password">New Password</label>
+                                <span class="cw-charcount" id="cwCharCount">0 / 128</span>
+                            </div>
+                            <div class="cw-input-wrap">
+                                <input type="password" id="new_password" name="new_password" placeholder="Enter new password" required minlength="8" maxlength="128" autocomplete="new-password">
+                                <i class="bi bi-lock-fill cw-input-icon"></i>
+                                <button type="button" class="cw-eye" data-toggle-pw="new_password" aria-label="Show password">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                            </div>
+                            <div class="cw-strength" id="cwStrength">
+                                <span class="cw-strength-seg"></span>
+                                <span class="cw-strength-seg"></span>
+                                <span class="cw-strength-seg"></span>
+                                <span class="cw-strength-seg"></span>
+                                <span class="cw-strength-seg"></span>
+                            </div>
+                            <div class="cw-reqs" id="cwReqs">
+                                <span class="cw-req" data-req="length"><i class="bi bi-circle-fill"></i> 8+ chars</span>
+                                <span class="cw-req" data-req="upper"><i class="bi bi-circle-fill"></i> A–Z</span>
+                                <span class="cw-req" data-req="lower"><i class="bi bi-circle-fill"></i> a–z</span>
+                                <span class="cw-req" data-req="num"><i class="bi bi-circle-fill"></i> 0–9</span>
+                                <span class="cw-req" data-req="special"><i class="bi bi-circle-fill"></i> !@#</span>
+                            </div>
                         </div>
-                        <div class="cw-input-wrap">
-                            <input type="password" id="new_password" name="new_password" placeholder="Enter new password" required minlength="8" maxlength="128" autocomplete="new-password">
-                            <i class="bi bi-lock-fill cw-input-icon"></i>
-                            <button type="button" class="cw-eye" data-toggle-pw="new_password" aria-label="Show password">
-                                <i class="bi bi-eye"></i>
-                            </button>
-                        </div>
-                        <div class="cw-strength" id="cwStrength">
-                            <span class="cw-strength-seg"></span>
-                            <span class="cw-strength-seg"></span>
-                            <span class="cw-strength-seg"></span>
-                            <span class="cw-strength-seg"></span>
-                            <span class="cw-strength-seg"></span>
-                        </div>
-                        <div class="cw-reqs" id="cwReqs">
-                            <span class="cw-req" data-req="length"><i class="bi bi-circle-fill"></i> 8+ chars</span>
-                            <span class="cw-req" data-req="upper"><i class="bi bi-circle-fill"></i> A–Z</span>
-                            <span class="cw-req" data-req="lower"><i class="bi bi-circle-fill"></i> a–z</span>
-                            <span class="cw-req" data-req="num"><i class="bi bi-circle-fill"></i> 0–9</span>
-                            <span class="cw-req" data-req="special"><i class="bi bi-circle-fill"></i> !@#</span>
-                        </div>
-                    </div>
 
-                    <div class="cw-field">
-                        <label for="confirm_password">Confirm New Password</label>
-                        <div class="cw-input-wrap">
-                            <input type="password" id="confirm_password" name="confirm_password" placeholder="Re-enter new password" required minlength="8" maxlength="128" autocomplete="new-password">
-                            <i class="bi bi-lock-fill cw-input-icon"></i>
-                            <button type="button" class="cw-eye" data-toggle-pw="confirm_password" aria-label="Show password">
-                                <i class="bi bi-eye"></i>
-                            </button>
+                        <div class="cw-field">
+                            <label for="confirm_password">Confirm New Password</label>
+                            <div class="cw-input-wrap">
+                                <input type="password" id="confirm_password" name="confirm_password" placeholder="Re-enter new password" required minlength="8" maxlength="128" autocomplete="new-password">
+                                <i class="bi bi-lock-fill cw-input-icon"></i>
+                                <button type="button" class="cw-eye" data-toggle-pw="confirm_password" aria-label="Show password">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                            </div>
+                            <p class="cw-hint" id="matchStatus"></p>
                         </div>
-                        <p class="cw-hint" id="matchStatus"></p>
-                    </div>
 
-                    <div class="cw-divider"><span><i class="bi bi-box-arrow-right"></i> Sessions</span></div>
+                        <div class="cw-divider"><span><i class="bi bi-box-arrow-right"></i> Sessions</span></div>
 
-                    <label class="cw-check" for="logout_others">
-                        <input type="checkbox" name="logout_others" id="logout_others" value="1">
-                        <span class="cw-check-txt">
-                            <span class="cw-check-title">Sign out from all other devices</span>
-                            <span class="cw-check-sub">Invalidates any "remember me" cookies on other browsers. You'll stay logged in here.</span>
-                        </span>
-                    </label>
+                        <label class="cw-check" for="logout_others">
+                            <input type="checkbox" name="logout_others" id="logout_others" value="1">
+                            <span class="cw-check-txt">
+                                <span class="cw-check-title">Sign out from all other devices</span>
+                                <span class="cw-check-sub">Invalidates any "remember me" cookies on other browsers. You'll stay logged in here.</span>
+                            </span>
+                        </label>
 
-                    <button type="submit" class="cw-submit" id="pfSubmit" <?= $locked_until > 0 ? 'disabled' : '' ?>>
-                        <i class="bi <?= $locked_until > 0 ? 'bi-lock-fill' : 'bi-check2-circle' ?>"></i>
-                        <span><?= $locked_until > 0 ? "Locked for {$locked_until} min" : 'Update Password' ?></span>
-                    </button>
-                </form>
+                        <button type="submit" class="cw-submit" id="pfSubmit" <?= $locked_until > 0 ? 'disabled' : '' ?>>
+                            <i class="bi <?= $locked_until > 0 ? 'bi-lock-fill' : 'bi-check2-circle' ?>"></i>
+                            <span><?= $locked_until > 0 ? "Locked for {$locked_until} min" : 'Update Password' ?></span>
+                        </button>
+                    </form>
+                </div>
             </div>
         </div>
 

@@ -85,7 +85,14 @@ function bind_params(mysqli_stmt $stmt, array $values): void
             default      => 's',
         };
     }
-    $stmt->bind_param($types, ...$values);
+
+    // FIX: Pass by reference to prevent "Cannot pass parameter by reference" fatal errors
+    $refs = [];
+    foreach ($values as $i => $_) {
+        $refs[$i] = &$values[$i];
+    }
+    
+    $stmt->bind_param($types, ...$refs);
 }
 
 /**
