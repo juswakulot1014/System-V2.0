@@ -5,6 +5,7 @@ require_once __DIR__ . '/../../config/audit.php';
 require_once __DIR__ . '/../../config/crypto.php';
 require_once __DIR__ . '/../../config/security.php';
 require_once __DIR__ . '/../lib/teacher_scope.php'; 
+require_once __DIR__ . '/../print/render.php';
 
 $__nav_section = 'students';
 
@@ -102,7 +103,6 @@ if (!function_exists('store_encrypted_document')) {
         $token = bin2hex(random_bytes(16));
         $stored_name = "doc_{$student_id}_{$entrance_id}_{$token}.{$info['ext']}.enc";
         
-        // FIXED: Safe directory separator
         $abs = rtrim(DOCUMENTS_DIR, '/\\') . DIRECTORY_SEPARATOR . $stored_name;
 
         if (file_put_contents($abs, $blob, LOCK_EX) === false) {
@@ -119,13 +119,16 @@ if (!function_exists('store_encrypted_document')) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   WORD EXPORT (unchanged logic)
+   FORMAL EXPORT (PDF / Word / Print)
    ═══════════════════════════════════════════════════════════ */
-$export_word = isset($_GET['export_word']) && $_GET['export_word'] == 1 && isset($_GET['id']);
+$export_word  = isset($_GET['export_word']) && $_GET['export_word'] == 1 && isset($_GET['id']);
+$export_pdf   = isset($_GET['export_pdf'])  && $_GET['export_pdf']  == 1 && isset($_GET['id']);
+$export_print = isset($_GET['export_print']) && $_GET['export_print'] == 1 && isset($_GET['id']);
 
-if ($export_word) {
+if ($export_word || $export_pdf || $export_print) {
     $student_id = (int)$_GET['id'];
 
+    // 1. Fetch Master Data
     $stmt = $conn->prepare("
         SELECT s.*,
                p.father_name, p.father_occupation, p.father_contact,
@@ -148,39 +151,196 @@ if ($export_word) {
 
     $enrollment = !empty($student['school_year']) ? $student : [];
 
-    $edu_stmt = $conn->prepare("SELECT level, school_name, school_address, year_completed FROM educational_history WHERE student_id = ? ORDER BY level");
+    // 2. Fetch Educational History
+    $edu_stmt = $conn->prepare("SELECT level, school_name, school_address, year_completed FROM educational_history WHERE student_id = ? ORDER BY FIELD(level, 'Elementary', 'JHS', 'Transferred')");
     $edu_stmt->bind_param("i", $student_id); $edu_stmt->execute();
     $education = $edu_stmt->get_result()->fetch_all(MYSQLI_ASSOC); $edu_stmt->close();
 
+    // 3. Fetch Grades
     $grades_stmt = $conn->prepare("
-        SELECT sg.term, sg.grade_level, sg.school_year,
-               sg.subject_code, sg.subject_name, sg.grade, sg.remarks
+        SELECT sg.term, sg.grade_level, sg.school_year, sg.subject_code, sg.subject_name, sg.grade, sg.remarks
         FROM student_grades sg
         WHERE sg.student_id = ?
-        ORDER BY sg.school_year DESC, sg.grade_level ASC, sg.term ASC, sg.subject_name ASC
+        ORDER BY sg.school_year DESC, sg.grade_level ASC, FIELD(sg.term, '1st Term', '2nd Term', '3rd Term'), sg.subject_name ASC
     ");
     $grades_stmt->bind_param("i", $student_id); $grades_stmt->execute();
-    $grades = $grades_stmt->get_result()->fetch_all(MYSQLI_ASSOC); $grades_stmt->close();
+    $grades_raw = $grades_stmt->get_result()->fetch_all(MYSQLI_ASSOC); $grades_stmt->close();
 
-    header("Content-Type: application/msword");
-    header("Content-Disposition: attachment; filename=student_" . ($student['lrn'] ?? 'profile') . "_" . date('Y-m-d') . ".doc");
-    echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Student Profile</title><style>body{font-family:Arial;margin:2cm}h1{color:#1e3c72;text-align:center}h2{color:#2b4c8c;margin-top:20px;border-bottom:2px solid #2b4c8c}table{width:100%;border-collapse:collapse;margin:15px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background:#f2f2f2;width:30%}</style></head><body>';
-    echo '<h1>USAT College - Student Information</h1><p>Generated: '.date('F d, Y h:i A').'</p>';
-    echo '<h2>Personal Info</h2><table>';
-    $f=['Student ID Number'=>$student['student_id_number']??'—','LRN'=>$student['lrn']??'—','Name'=>formatStudentName($student),'Sex'=>$student['sex']??'—','Birth Date'=>$student['birth_date']??'—','Age'=>$student['age']??'—','Civil Status'=>$student['civil_status']??'—','Nationality'=>$student['nationality']??'—','Religion'=>$student['religion']??'—','Email'=>$student['email']??'—','Phone'=>$student['phone']??'—'];
-    foreach($f as $l=>$v) echo "<tr><th>$l</th><td>".htmlspecialchars((string)$v)."</td></tr>";
-    echo '</table>';
-    if(!empty($enrollment)){echo '<h2>Enrollment</h2><table>';foreach(['school_year'=>'School Year','grade_level'=>'Grade Level','term'=>'Term','section'=>'Section','track'=>'Track','strand'=>'Strand','program'=>'Program','status'=>'Status','voucher_status'=>'Voucher'] as $k=>$l)echo "<tr><th>$l</th><td>".htmlspecialchars($enrollment[$k]??'—')."</td></tr>";echo '</table>';}
-    if(!empty($grades)){
-        echo '<h2>Academic Record</h2>';
-        $t=0;$c=0;
-        foreach($grades as $g){
-            echo '<p><strong>'.htmlspecialchars(($g['school_year']??'—').' - '.($g['grade_level']??'—').' - '.($g['term']??'')).'</strong>: '.htmlspecialchars($g['subject_code']).' '.htmlspecialchars($g['subject_name']).' - '.($g['grade']!==null?number_format($g['grade'],2):'—').'</p>';
-            if($g['grade']!==null&&is_numeric($g['grade'])){$t+=(float)$g['grade'];$c++;}
+    $grades_by_term = [];
+    $total_pts = 0; $count_pts = 0;
+    foreach ($grades_raw as $g) {
+        $key = $g['school_year'] . '|' . $g['grade_level'] . '|' . $g['term'];
+        $grades_by_term[$key][] = $g;
+        if ($g['grade'] !== null && is_numeric($g['grade'])) {
+            $total_pts += (float)$g['grade'];
+            $count_pts++;
         }
-        echo '<p><strong>Overall GWA: '.($c>0?number_format($t/$c,2):'N/A').'</strong></p>';
     }
-    echo '</body></html>';
+    $overall_gwa = $count_pts > 0 ? round($total_pts / $count_pts, 2) : null;
+
+    // 4. Fetch Documents
+    $docs_stmt = $conn->prepare("SELECT document_name, submitted, file_path FROM entrance_documents WHERE student_id = ?");
+    $docs_stmt->bind_param("i", $student_id); $docs_stmt->execute();
+    $docs_raw = $docs_stmt->get_result()->fetch_all(MYSQLI_ASSOC); $docs_stmt->close();
+    
+    $uploaded_docs = [];
+    foreach ($docs_raw as $d) {
+        if ($d['submitted'] && !empty($d['file_path'])) {
+            $uploaded_docs[docKey($d['document_name'])] = true;
+        }
+    }
+
+    // 5. Build Document Body
+    $bodyHtml = '';
+    
+    // Photo handling
+    $photoHtml = '';
+    $photo_abs = !empty($student['photo']) ? student_photo_abs_path($student['photo']) : '';
+    if ($photo_abs && is_file($photo_abs)) {
+        $imgData = file_get_contents($photo_abs);
+        $mime = mime_content_type($photo_abs) ?: 'image/jpeg';
+        $b64 = base64_encode($imgData);
+        $photoHtml = '<img src="data:' . $mime . ';base64,' . $b64 . '" width="110" height="110" style="width:110px; height:110px; border-radius:50%; object-fit:cover; border:2pt solid #1e3a8a;">';
+    } else {
+        $initials = strtoupper(substr($student['first_name'] ?? '', 0, 1) . substr($student['last_name'] ?? '', 0, 1));
+        $photoHtml = '<div style="width:110px; height:110px; border-radius:50%; background:#f1f5f9; border:2pt solid #1e3a8a; text-align:center; line-height:110px; font-size:32pt; font-weight:bold; color:#1e3a8a;">' . htmlspecialchars($initials) . '</div>';
+    }
+
+    // Personal Info
+    $bodyHtml .= '<table class="grid" style="margin-top:0;"><tr>';
+    $bodyHtml .= '<td width="140" style="text-align:center; vertical-align:middle; border-right:none;">' . $photoHtml . '</td>';
+    $bodyHtml .= '<td style="border-left:none; vertical-align:middle; padding-left:16pt;">';
+    $bodyHtml .= '<div style="font-size:16pt; font-weight:bold; color:#0f172a; margin-bottom:4pt;">' . htmlspecialchars(formatStudentName($student)) . '</div>';
+    $bodyHtml .= '<div style="font-size:10.5pt; color:#1e3a8a; font-weight:bold; margin-bottom:8pt;">LRN: ' . htmlspecialchars($student['lrn'] ?? '—') . ' &nbsp;|&nbsp; Student ID: ' . htmlspecialchars($student['student_id_number'] ?? '—') . '</div>';
+    
+    $bodyHtml .= '<table style="width:100%; border:0; font-size:9.5pt; line-height:1.5;">';
+    $bodyHtml .= '<tr><td width="30%" style="padding:0; border:0;"><strong>Sex:</strong> ' . htmlspecialchars($student['sex'] ?? '—') . '</td><td width="40%" style="padding:0; border:0;"><strong>Birth Date:</strong> ' . htmlspecialchars($student['birth_date'] ?? '—') . '</td><td width="30%" style="padding:0; border:0;"><strong>Age:</strong> ' . htmlspecialchars($student['age'] ?? '—') . '</td></tr>';
+    $bodyHtml .= '<tr><td style="padding:0; border:0;"><strong>Religion:</strong> ' . htmlspecialchars($student['religion'] ?? '—') . '</td><td style="padding:0; border:0;"><strong>Nationality:</strong> ' . htmlspecialchars($student['nationality'] ?? '—') . '</td><td style="padding:0; border:0;"><strong>Civil Status:</strong> ' . htmlspecialchars($student['civil_status'] ?? '—') . '</td></tr>';
+    $bodyHtml .= '<tr><td colspan="2" style="padding:0; border:0;"><strong>Email:</strong> ' . htmlspecialchars($student['email'] ?? '—') . '</td><td style="padding:0; border:0;"><strong>Phone:</strong> ' . htmlspecialchars($student['phone'] ?? '—') . '</td></tr>';
+    $bodyHtml .= '</table>';
+    $bodyHtml .= '</td></tr></table>';
+
+    // Address & Family
+    $bodyHtml .= '<div class="section-title">Address &amp; Family Background</div>';
+    $bodyHtml .= '<table class="grid"><tbody>';
+    
+    $addr = trim(implode(', ', array_filter([$student['purok_street'], $student['barangay'], $student['town_city'], $student['province'], $student['region'], $student['postal_code']])));
+    $bodyHtml .= '<tr><th style="width:20%">Address</th><td colspan="3">' . htmlspecialchars($addr ?: '—') . '</td></tr>';
+    $bodyHtml .= '<tr><th>Father</th><td style="width:30%">' . htmlspecialchars($student['father_name'] ?? '—') . '</td><th style="width:20%">Occupation</th><td>' . htmlspecialchars($student['father_occupation'] ?? '—') . '</td></tr>';
+    $bodyHtml .= '<tr><th>Mother (Maiden)</th><td>' . htmlspecialchars($student['mother_maiden_name'] ?? '—') . '</td><th>Occupation</th><td>' . htmlspecialchars($student['mother_occupation'] ?? '—') . '</td></tr>';
+    $bodyHtml .= '<tr><th>Guardian</th><td>' . htmlspecialchars($student['guardian_fullname'] ?? '—') . '</td><th>Relation</th><td>' . htmlspecialchars($student['guardian_relation'] ?? '—') . '</td></tr>';
+    $bodyHtml .= '</tbody></table>';
+
+    // Enrollment Details
+    if (!empty($enrollment)) {
+        $bodyHtml .= '<div class="section-title">Current Enrollment</div>';
+        $bodyHtml .= '<table class="grid"><tbody>';
+        $bodyHtml .= '<tr><th style="width:20%">School Year</th><td style="width:30%">' . htmlspecialchars($enrollment['school_year'] ?? '—') . '</td><th style="width:20%">Grade Level</th><td>' . htmlspecialchars($enrollment['grade_level'] ?? '—') . '</td></tr>';
+        $bodyHtml .= '<tr><th>Section</th><td>' . htmlspecialchars($enrollment['section'] ?? '—') . '</td><th>Term</th><td>' . htmlspecialchars($enrollment['term'] ?? '—') . '</td></tr>';
+        $bodyHtml .= '<tr><th>Strand</th><td>' . htmlspecialchars($enrollment['strand'] ?? '—') . '</td><th>Program</th><td>' . htmlspecialchars($enrollment['program'] ?? '—') . '</td></tr>';
+        $bodyHtml .= '<tr><th>Status</th><td><strong>' . htmlspecialchars($enrollment['status'] ?? '—') . '</strong></td><th>Voucher</th><td>' . htmlspecialchars($enrollment['voucher_status'] ?? '—') . '</td></tr>';
+        $bodyHtml .= '</tbody></table>';
+    }
+
+    // Educational History
+    if (!empty($education)) {
+        $bodyHtml .= '<div class="section-title">Educational History</div>';
+        $bodyHtml .= '<table class="grid"><thead><tr><th style="width:20%">Level</th><th>School Name</th><th>Address</th><th style="width:15%">Year</th></tr></thead><tbody>';
+        foreach ($education as $e) {
+            $bodyHtml .= '<tr>';
+            $bodyHtml .= '<td><strong>' . htmlspecialchars($e['level']) . '</strong></td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($e['school_name']) . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($e['school_address'] ?? '—') . '</td>';
+            $bodyHtml .= '<td class="num">' . htmlspecialchars($e['year_completed'] ?? '—') . '</td>';
+            $bodyHtml .= '</tr>';
+        }
+        $bodyHtml .= '</tbody></table>';
+    }
+
+    // Academic Record
+    if (!empty($grades_by_term)) {
+        $bodyHtml .= '<div class="section-title">Academic Record</div>';
+        
+        foreach ($grades_by_term as $key => $subjects) {
+            [$sy, $gl, $term] = explode('|', $key);
+            
+            $term_pts = 0; $term_count = 0;
+            foreach ($subjects as $s) {
+                if ($s['grade'] !== null && is_numeric($s['grade'])) { $term_pts += (float)$s['grade']; $term_count++; }
+            }
+            $term_gwa = $term_count > 0 ? round($term_pts / $term_count, 2) : '—';
+
+            $bodyHtml .= '<div style="font-size:10pt; font-weight:bold; color:#1e3a8a; margin:12pt 0 4pt; border-bottom:1px solid #cbd5e1; padding-bottom:2pt;">';
+            $bodyHtml .= htmlspecialchars($sy) . ' &nbsp;·&nbsp; ' . htmlspecialchars($gl) . ' &nbsp;·&nbsp; ' . htmlspecialchars($term);
+            $bodyHtml .= '<span style="float:right; font-size:9pt; color:#64748b;">Term GWA: <strong>' . $term_gwa . '</strong></span>';
+            $bodyHtml .= '</div>';
+
+            $bodyHtml .= '<table class="grid" style="margin-top:0;"><thead><tr><th style="width:20%">Code</th><th>Subject Title</th><th style="width:15%">Grade</th><th style="width:20%">Remarks</th></tr></thead><tbody>';
+            foreach ($subjects as $s) {
+                $gv = $s['grade'] !== null ? number_format((float)$s['grade'], 2) : '—';
+                $rm = $s['remarks'] ?? derive_remarks($s['grade']);
+                $bodyHtml .= '<tr>';
+                $bodyHtml .= '<td class="num">' . htmlspecialchars($s['subject_code']) . '</td>';
+                $bodyHtml .= '<td>' . htmlspecialchars($s['subject_name']) . '</td>';
+                $bodyHtml .= '<td class="num"><strong>' . $gv . '</strong></td>';
+                $bodyHtml .= '<td class="num">' . htmlspecialchars($rm ?? '—') . '</td>';
+                $bodyHtml .= '</tr>';
+            }
+            $bodyHtml .= '</tbody></table>';
+        }
+
+        if ($overall_gwa !== null) {
+            $bodyHtml .= '<table width="100%" style="margin-top:14pt;"><tr>';
+            $bodyHtml .= '<td style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt; text-align:right; font-weight:bold; font-size:10pt; width:70%;">OVERALL GENERAL WEIGHTED AVERAGE:</td>';
+            $bodyHtml .= '<td style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt; text-align:center; font-weight:bold; font-size:12pt; color:#1e3a8a;">' . $overall_gwa . '</td>';
+            $bodyHtml .= '</tr></table>';
+        }
+    }
+
+    // Document Compliance
+    $bodyHtml .= '<div class="section-title">Document Compliance</div>';
+    $bodyHtml .= '<table class="grid"><tbody><tr>';
+    $cols = 0;
+    foreach ($REQUIRED_DOCS as $req) {
+        if ($cols > 0 && $cols % 2 === 0) echo '</tr><tr>';
+        $has = isset($uploaded_docs[docKey($req)]);
+        $status = $has ? '<span style="color:#059669; font-weight:bold;">Submitted</span>' : '<span style="color:#dc2626; font-weight:bold;">Missing</span>';
+        
+        $bodyHtml .= '<td style="width:50%;"><strong>' . htmlspecialchars($req) . '</strong><br>' . $status . '</td>';
+        $cols++;
+    }
+    $bodyHtml .= '</tr></tbody></table>';
+
+    // 6. Stream
+    $doc = [
+        'title'       => 'Student Profile',
+        'subtitle'    => 'Official Academic Dossier',
+        'paper'       => 'A4',
+        'body'        => $bodyHtml,
+        'signatories' => [],
+        'control_no'  => 'STU-' . $student_id . '-' . date('Ymd'),
+        'copy_label'  => 'Confidential',
+    ];
+    
+    $ident = school_identity();
+    $reg = $ident['signatories']['registrar'] ?? [];
+    if (!empty($reg['name']) || !empty($reg['position'])) {
+        $doc['signatories'][] = [
+            'name'     => $reg['name'] ?? '',
+            'position' => $reg['position'] ?? 'University Registrar',
+            'label'    => 'Issued by',
+        ];
+    }
+
+    $filename = 'Profile_' . preg_replace('/[^A-Za-z0-9]/', '', $student['last_name'] ?? 'Student') . '_' . date('Y-m-d');
+
+    if ($export_word) {
+        output_document_word($doc, $filename . '.doc');
+    } elseif ($export_pdf) {
+        output_document_pdf($doc, $filename . '.pdf');
+    } else {
+        output_document_print($doc);
+    }
     exit;
 }
 
@@ -1151,9 +1311,18 @@ require __DIR__ . '/../partials/sidebar.php';
                 </a>
             <?php endif; ?>
 
-            <button class="btn btn-outline-secondary btn-sm" onclick="window.print()">
-                <i class="bi bi-printer me-1"></i> Print
-            </button>
+            <!-- Formal Export Dropdown -->
+            <div class="dropdown">
+                <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                    <i class="bi bi-printer me-1"></i> Print / Export
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end">
+                    <li><a class="dropdown-item" href="?id=<?= $student_id ?>&export_print=1" target="_blank"><i class="bi bi-printer text-secondary me-2"></i> Print Profile</a></li>
+                    <li><a class="dropdown-item" href="?id=<?= $student_id ?>&export_pdf=1"><i class="bi bi-file-earmark-pdf-fill text-danger me-2"></i> Export PDF</a></li>
+                    <li><a class="dropdown-item" href="?id=<?= $student_id ?>&export_word=1"><i class="bi bi-file-earmark-word-fill text-primary me-2"></i> Export Word</a></li>
+                </ul>
+            </div>
+            
             <button class="theme-btn" id="themeToggle" title="Toggle theme">
                 <i class="bi bi-moon-stars-fill" id="themeIcon"></i>
             </button>

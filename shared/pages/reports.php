@@ -2,11 +2,11 @@
 // shared/pages/reports.php
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
-require_once __DIR__ . '/../lib/teacher_scope.php';   // PATCH 1: helper
+require_once __DIR__ . '/../lib/teacher_scope.php';
+require_once __DIR__ . '/../print/render.php';
 
 $__nav_section = 'reports';
 
-// PATCH 2: teacher scope state
 $__is_teacher = (($_SESSION['admin_role'] ?? '') === 'teacher');
 $__teacher_id = $__is_teacher ? (int)($_SESSION['admin_id'] ?? 0) : 0;
 
@@ -14,7 +14,6 @@ $__teacher_id = $__is_teacher ? (int)($_SESSION['admin_id'] ?? 0) : 0;
 $valid_reports = ['summary','masterlist','by_grade','by_strand','by_section','by_gender','documents','graduated'];
 $report_type = $_GET['report'] ?? 'summary';
 
-// PATCH 3: Teachers can only see the masterlist
 if ($__is_teacher) {
     $report_type = 'masterlist';
 }
@@ -25,7 +24,6 @@ if (!in_array($report_type, $valid_reports, true)) $report_type = 'summary';
 if (isset($_GET['school_year'])) {
     $selected_sy = trim((string)$_GET['school_year']);
 } else {
-    // Default to the latest School Year if not explicitly set
     $latest_sy_q = $conn->query("SELECT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC LIMIT 1");
     $selected_sy = ($latest_sy_q && $row = $latest_sy_q->fetch_assoc()) ? $row['school_year'] : '';
 }
@@ -35,13 +33,13 @@ $grade_filter    = $_GET['grade_filter']  ?? '';
 $section_filter  = $_GET['section_filter']?? '';
 $status_filter   = $_GET['status_filter'] ?? '';
 
-$export_word = isset($_GET['export_word']) && $_GET['export_word'] == 1;
-$export_pdf  = isset($_GET['export_pdf'])  && $_GET['export_pdf']  == 1;
+$export_word  = isset($_GET['export_word']) && $_GET['export_word'] == 1;
+$export_pdf   = isset($_GET['export_pdf'])  && $_GET['export_pdf']  == 1;
+$export_print = isset($_GET['export_print'])&& $_GET['export_print']== 1;
 
-// Pagination Settings
 $page = max(1, (int)($_GET['page'] ?? 1));
-$per_page = 15; // For documents & graduated
-$per_page_sections = 10; // For masterlist (paginate by section blocks)
+$per_page = 15;
+$per_page_sections = 10;
 
 /* ═══ Cascading dropdowns ═══ */
 $dd_build_where = function(array $pairs): array {
@@ -186,7 +184,6 @@ $total_master_sections = 0;
 $total_pages_master = 1;
 
 if ($report_type === 'masterlist') {
-    // 1. Count total students & sections for pagination
     $count_sql = "SELECT COUNT(DISTINCT e.student_id) as total_students, COUNT(DISTINCT e.grade_level, e.strand, e.section) as total_sections FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $sy_filter";
     $stmt = $conn->prepare($count_sql);
     if (!empty($params_main)) $stmt->bind_param($types_main, ...$params_main);
@@ -200,7 +197,6 @@ if ($report_type === 'masterlist') {
     $page_master = max(1, min($total_pages_master, $page));
     $offset_master = ($page_master - 1) * $per_page_sections;
 
-    // 2. Fetch the paginated sections
     $sec_sql = "SELECT e.grade_level, e.strand, e.section FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $sy_filter GROUP BY e.grade_level, e.strand, e.section ORDER BY e.grade_level ASC, e.strand ASC, e.section ASC LIMIT ? OFFSET ?";
     $sec_params = array_merge($params_main, [$per_page_sections, $offset_master]);
     $sec_types = $types_main . "ii";
@@ -212,7 +208,6 @@ if ($report_type === 'masterlist') {
 
     $sec_names = array_column($sec_rows, 'section');
 
-    // 3. Fetch students ONLY for those sections
     if (!empty($sec_names)) {
         $in_placeholders = implode(',', array_fill(0, count($sec_names), '?'));
         $in_types = $types_main . str_repeat('s', count($sec_names));
@@ -260,7 +255,6 @@ $total_pages_doc = 1;
 $doc_complete = 0; $doc_partial = 0; $doc_missing = 0;
 
 if ($report_type === 'documents') {
-    // 1. Global stats
     $doc_stats_sql = "SELECT 
         SUM(CASE WHEN (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) >= (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id) AND (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id) > 0 THEN 1 ELSE 0 END) as complete,
         SUM(CASE WHEN (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) > 0 AND (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) < (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id) THEN 1 ELSE 0 END) as partial,
@@ -281,7 +275,6 @@ if ($report_type === 'documents') {
     $page_doc = max(1, min($total_pages_doc, $page));
     $offset_doc = ($page_doc - 1) * $per_page;
 
-    // 2. Paginated list
     $doc_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, e.grade_level, e.strand, e.section, e.school_year, (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id) AS docs_total, (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) AS docs_uploaded FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $sy_filter ORDER BY e.grade_level ASC, s.last_name ASC LIMIT ? OFFSET ?";
     $doc_params = array_merge($params_main, [$per_page, $offset_doc]);
     $doc_types = $types_main . "ii";
@@ -372,10 +365,10 @@ if ($__is_teacher) {
     $filter_text = 'My Students · ' . $filter_text;
 }
 
-/* ═══ Word + PDF export ═══ */
-if ($export_word || $export_pdf) {
+// ─── FORMAL DOCUMENT EXPORT (REPLACED) ─────────────────────────────────────
+
+if ($export_word || $export_pdf || $export_print) {
     
-    // Check if a specific section was requested for export
     $export_section = trim((string)($_GET['export_section'] ?? ''));
     $exp_sy_filter = $sy_filter;
     $exp_params = $params_main;
@@ -387,7 +380,8 @@ if ($export_word || $export_pdf) {
         $exp_types .= "s";
     }
 
-    // If masterlist, we must fetch ALL matching records (ignoring pagination limit)
+    // 1. Fetch ALL data for the report type (bypassing pagination)
+    
     if ($report_type === 'masterlist') {
         $master_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.ext_name, s.sex, s.birth_date, s.age, s.email, s.phone, e.grade_level, e.strand, e.program, e.section, e.school_year, e.term, e.track, COALESCE(e.status,'Active') AS status FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $exp_sy_filter ORDER BY e.grade_level ASC, e.strand ASC, e.section ASC, s.last_name ASC, s.first_name ASC";
         $stmt = $conn->prepare($master_sql);
@@ -396,7 +390,6 @@ if ($export_word || $export_pdf) {
         $masterlist = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
         $stmt->close();
 
-        // Rebuild grouped masterlist for export
         $grouped_masterlist = [];
         foreach ($masterlist as $m) {
             $gl = $m['grade_level'] ?: 'Unassigned Grade';
@@ -411,87 +404,74 @@ if ($export_word || $export_pdf) {
             return $oa <=> $ob ?: strcmp($a, $b);
         });
     }
-
-    ob_start();
-
-    echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Report</title><style>
-        @page{margin:14mm}
-        body{font-family:Arial;margin:2cm;font-size:11px;color:#000}
-        h1{color:#1e3c72;border-bottom:3px double #1e3c72;padding-bottom:8px}
-        h2{color:#2b4c8c;margin-top:20px;border-bottom:2px solid #2b4c8c;padding-bottom:4px}
-        h3{color:#4f46e5;margin:18px 0 8px;font-size:13px;background:#eef2ff;padding:6px 10px;border-left:4px solid #4f46e5}
-        h4{color:#334155;margin:12px 0 6px;font-size:11.5px;background:#f8fafc;padding:5px 10px;border-left:3px solid #94a3b8}
-        table{width:100%;border-collapse:collapse;margin:8px 0;page-break-inside:auto;table-layout:fixed}
-        tr{page-break-inside:avoid;page-break-after:auto}
-        thead{display:table-header-group}
-        tfoot{display:table-footer-group}
-        h1,h2,h3,h4{page-break-after:avoid}
-        th,td{border:1px solid #ddd;padding:6px;text-align:left;word-break:break-word;overflow-wrap:anywhere}
-        th{background:#eef2ff;color:#1e3a72;font-weight:bold}
-        .meta{background:#f8fafc;padding:10px 14px;border-left:4px solid #4f46e5;margin:10px 0;page-break-inside:avoid}
-        .num{text-align:center;font-variant-numeric:tabular-nums}
-        .section-page{page-break-inside:auto}
-        .section-page + .section-page{page-break-before:always}
-        .section-page .section-page-head{background:#eef2ff;border-left:4px solid #4f46e5;padding:8px 12px;margin:0 0 10px;page-break-after:avoid}
-        .section-page .section-page-title{font-size:14px;font-weight:bold;color:#1e3c72;margin:0 0 3px}
-        .section-page .section-page-meta{font-size:10px;color:#475569;margin:0}
-        .section-page .section-page-meta span{margin-right:10px}
-        .status-badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:9px;font-weight:700;letter-spacing:.3px;white-space:nowrap;border:1px solid}
-        .status-active      {background:#d1fae5;color:#047857;border-color:#10b981}
-        .status-pending     {background:#fef3c7;color:#b45309;border-color:#f59e0b}
-        .status-transferred {background:#dbeafe;color:#1e40af;border-color:#3b82f6}
-        .status-stopped     {background:#e2e8f0;color:#475569;border-color:#94a3b8}
-        .status-dropped     {background:#fee2e2;color:#b91c1c;border-color:#ef4444}
-        .status-graduated   {background:#ede9fe;color:#6d28d9;border-color:#8b5cf6}
-        .status-summary{margin:10px 0 14px;padding:8px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:10px}
-        .status-summary .lbl{font-weight:bold;color:#334155;margin-right:6px}
-        .status-summary .item{display:inline-block;margin-right:10px;font-weight:600}
-    </style></head><body>';
-
-    echo '<h1>USAT College Sagay City Inc.</h1>';
-    echo '<h2 style="border:none;margin:0;font-size:16px;color:#334155">' . htmlspecialchars($reports[$report_type]['title']) . '</h2>';
-    echo '<div class="meta">';
-    echo '<strong>Generated:</strong> ' . date('F d, Y h:i A') . '<br>';
-    echo '<strong>Filters:</strong> ' . htmlspecialchars($filter_text);
-    if ($export_section !== '') {
-        echo ' · <strong>Section:</strong> ' . htmlspecialchars($export_section);
+    
+    elseif ($report_type === 'documents') {
+        $doc_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, e.grade_level, e.strand, e.section, e.school_year, (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id) AS docs_total, (SELECT COUNT(*) FROM entrance_documents d WHERE d.student_id = s.student_id AND d.submitted = 1 AND d.file_path IS NOT NULL) AS docs_uploaded FROM students_info s INNER JOIN enrollment_form e ON e.student_id = s.student_id WHERE 1=1 $exp_sy_filter ORDER BY e.grade_level ASC, s.last_name ASC";
+        $stmt = $conn->prepare($doc_sql);
+        if (!empty($exp_params)) $stmt->bind_param($exp_types, ...$exp_params);
+        $stmt->execute();
+        $doc_report = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $stmt->close();
     }
-    if ($report_type !== 'graduated' && $graduated_excluded) {
-        echo '<br><strong>Note:</strong> Graduated and Pending students are excluded from this report.';
+    
+    elseif ($report_type === 'graduated') {
+        $grad_where = "WHERE e.status = 'Graduated'";
+        $grad_params = []; $grad_types = "";
+        if ($selected_sy !== '')   { $grad_where .= " AND e.school_year = ?"; $grad_params[] = $selected_sy;    $grad_types .= "s"; }
+        if ($strand_filter !== '') { $grad_where .= " AND e.strand = ?";      $grad_params[] = $strand_filter;  $grad_types .= "s"; }
+        if ($grade_filter !== '')  { $grad_where .= " AND e.grade_level = ?"; $grad_params[] = $grade_filter;   $grad_types .= "s"; }
+
+        $grad_sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.sex, e.grade_level, e.strand, e.program, e.section, e.school_year, e.status FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id $grad_where ORDER BY s.last_name ASC, s.first_name ASC";
+        $stmt = $conn->prepare($grad_sql);
+        if (!empty($grad_params)) $stmt->bind_param($grad_types, ...$grad_params);
+        $stmt->execute();
+        $graduated_students = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $stmt->close();
+        $total_graduated = count($graduated_students);
     }
-    echo '</div>';
+
+    // 2. Build the HTML Body
+    
+    $bodyHtml = '';
+    
+    // Helper for Word-compatible stats
+    $buildStatTable = function(array $stats) {
+        $h = '<table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin:6pt 0 14pt;"><tr>';
+        $w = floor(100 / count($stats));
+        foreach ($stats as $s) {
+            $h .= '<td width="' . $w . '%" style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt;">';
+            $h .= '<div style="font-size:7.5pt; font-weight:bold; color:#64748b; text-transform:uppercase; letter-spacing:.4pt;">' . htmlspecialchars($s['label']) . '</div>';
+            $h .= '<div style="font-size:14pt; font-weight:bold; color:#0f172a; margin-top:2pt;">' . htmlspecialchars($s['value']) . '</div>';
+            $h .= '</td>';
+        }
+        $h .= '</tr></table>';
+        return $h;
+    };
 
     if ($report_type === 'summary') {
-        echo '<h2>Summary</h2>';
-        echo '<table><tr><th>Total Students</th><td class="num">' . number_format($total_students) . '</td><th>Total Sections</th><td class="num">' . number_format($total_sections) . '</td></tr>';
-        echo '<tr><th>Male</th><td class="num">' . number_format($boys) . ' (' . $boy_percent . '%)</td><th>Female</th><td class="num">' . number_format($girls) . ' (' . $girl_percent . '%)</td></tr>';
-        echo '<tr><th>Strands</th><td class="num">' . number_format($total_strands) . '</td><th></th><td></td></tr></table>';
-        echo '<h2>By Grade Level</h2><table><tr><th>Grade</th><th class="num">Total</th><th class="num">Male</th><th class="num">Female</th></tr>';
-        foreach($grade_report as $r) echo '<tr><td>'.htmlspecialchars($r['grade_level']).'</td><td class="num">'.number_format($r['total_students']).'</td><td class="num">'.number_format($r['boys']).'</td><td class="num">'.number_format($r['girls']).'</td></tr>';
-        echo '</table>';
-        echo '<h2>By Strand &amp; Program</h2><table><tr><th>Strand</th><th>Program</th><th class="num">Total</th><th class="num">Male</th><th class="num">Female</th></tr>';
-        foreach($strand_report as $r) echo '<tr><td>'.htmlspecialchars($r['strand']).'</td><td>'.htmlspecialchars($r['program']).'</td><td class="num">'.number_format($r['total_students']).'</td><td class="num">'.number_format($r['boys']).'</td><td class="num">'.number_format($r['girls']).'</td></tr>';
-        echo '</table>';
-    }
-    elseif ($report_type === 'masterlist') {
-        echo '<h2>Student Masterlist</h2>';
-        echo '<p style="font-size:10px;color:#64748b;margin:4px 0 8px;font-style:italic">'
-           . count($masterlist) . ' student(s) across '
-           . count($grouped_masterlist) . ' grade level(s). Each section is printed on its own page.</p>';
-
-        if (!empty($masterlist_status_counts)) {
-            echo '<div class="status-summary">';
-            echo '<span class="lbl">Status breakdown:</span>';
-            $total_with_status = 0;
-            foreach ($masterlist_status_counts as $st => $cnt) {
-                $cls = 'status-' . strtolower($st);
-                echo '<span class="item"><span class="status-badge ' . $cls . '">' . htmlspecialchars($st) . '</span> ' . (int)$cnt . '</span>';
-                $total_with_status += (int)$cnt;
-            }
-            echo '<span class="item" style="float:right">Total: ' . (int)$total_with_status . '</span>';
-            echo '</div>';
+        $bodyHtml .= $buildStatTable([
+            ['label' => 'Total Students', 'value' => number_format($total_students)],
+            ['label' => 'Total Sections', 'value' => number_format($total_sections)],
+            ['label' => 'Male', 'value' => number_format($boys) . ' (' . $boy_percent . '%)'],
+            ['label' => 'Female', 'value' => number_format($girls) . ' (' . $girl_percent . '%)'],
+        ]);
+        
+        $bodyHtml .= '<div class="section-title">By Grade Level</div>';
+        $bodyHtml .= '<table class="grid"><thead><tr><th>Grade</th><th class="num" style="width:80px">Total</th><th class="num" style="width:80px">Male</th><th class="num" style="width:80px">Female</th></tr></thead><tbody>';
+        foreach($grade_report as $r) {
+            $bodyHtml .= '<tr><td>' . htmlspecialchars($r['grade_level']) . '</td><td class="num">' . number_format($r['total_students']) . '</td><td class="num">' . number_format($r['boys']) . '</td><td class="num">' . number_format($r['girls']) . '</td></tr>';
         }
+        $bodyHtml .= '</tbody></table>';
 
+        $bodyHtml .= '<div class="section-title">By Strand &amp; Program</div>';
+        $bodyHtml .= '<table class="grid"><thead><tr><th>Strand</th><th>Program</th><th class="num" style="width:80px">Total</th><th class="num" style="width:80px">Male</th><th class="num" style="width:80px">Female</th></tr></thead><tbody>';
+        foreach($strand_report as $r) {
+            $bodyHtml .= '<tr><td>' . htmlspecialchars($r['strand']) . '</td><td>' . htmlspecialchars($r['program']) . '</td><td class="num">' . number_format($r['total_students']) . '</td><td class="num">' . number_format($r['boys']) . '</td><td class="num">' . number_format($r['girls']) . '</td></tr>';
+        }
+        $bodyHtml .= '</tbody></table>';
+    }
+    
+    elseif ($report_type === 'masterlist') {
         $first_page = true;
         foreach ($grouped_masterlist as $grade => $strands) {
             foreach ($strands as $strand => $sections) {
@@ -505,136 +485,170 @@ if ($export_word || $export_pdf) {
                     $break_style = $first_page ? '' : ' style="page-break-before:always;"';
                     $first_page = false;
 
-                    echo '<div class="section-page"' . $break_style . '>';
-                    echo '<div class="section-page-head">';
-                    echo   '<div class="section-page-title">' . htmlspecialchars($section) . '</div>';
-                    echo   '<div class="section-page-meta">';
-                    echo     '<span><strong>Grade:</strong> ' . htmlspecialchars($grade) . '</span>';
-                    echo     '<span><strong>Strand:</strong> ' . htmlspecialchars($strand) . '</span>';
-                    echo     '<span><strong>Total:</strong> ' . count($students) . ' student(s)</span>';
-                    echo     '<span><strong>Male:</strong> ' . $m . '</span>';
-                    echo     '<span><strong>Female:</strong> ' . $f . '</span>';
-                    echo   '</div>';
-                    echo '</div>';
+                    $bodyHtml .= '<div' . $break_style . '>';
+                    
+                    $bodyHtml .= '<div class="section-title" style="margin-top:0;">' . htmlspecialchars($section) . '</div>';
+                    $bodyHtml .= '<div class="meta-block" style="margin-bottom:8pt;">';
+                    $bodyHtml .= '<strong>Grade:</strong> ' . htmlspecialchars($grade) . ' &nbsp;|&nbsp; ';
+                    $bodyHtml .= '<strong>Strand:</strong> ' . htmlspecialchars($strand) . ' &nbsp;|&nbsp; ';
+                    $bodyHtml .= '<strong>Total:</strong> ' . count($students) . ' &nbsp;|&nbsp; ';
+                    $bodyHtml .= '<strong>Male:</strong> ' . $m . ' &nbsp;|&nbsp; ';
+                    $bodyHtml .= '<strong>Female:</strong> ' . $f;
+                    $bodyHtml .= '</div>';
 
-                    echo '<table>';
-                    echo '<thead><tr>';
-                    echo   '<th class="num" style="width:30px">#</th>';
-                    echo   '<th style="width:120px">Student ID</th>';
-                    echo   '<th style="width:120px">LRN</th>';
-                    echo   '<th>Name</th>';
-                    echo   '<th style="width:50px">Sex</th>';
-                    echo   '<th class="num" style="width:40px">Age</th>';
-                    echo   '<th style="width:90px">Status</th>';
-                    echo '</tr></thead><tbody>';
+                    $bodyHtml .= '<table class="grid"><thead><tr>';
+                    $bodyHtml .= '<th style="width:24pt">#</th>';
+                    $bodyHtml .= '<th style="width:78pt">Student ID</th>';
+                    $bodyHtml .= '<th style="width:78pt">LRN</th>';
+                    $bodyHtml .= '<th>Name</th>';
+                    $bodyHtml .= '<th style="width:40pt">Sex</th>';
+                    $bodyHtml .= '<th style="width:36pt">Age</th>';
+                    $bodyHtml .= '<th style="width:64pt">Status</th>';
+                    $bodyHtml .= '</tr></thead><tbody>';
 
                     $i = 1;
                     foreach ($students as $s) {
                         $full_name = trim(($s['last_name'] ?? '') . ', ' . ($s['first_name'] ?? '') . ($s['middle_name'] ? ' ' . $s['middle_name'] : ''));
                         $st = $s['status'] ?? 'Active';
-                        $cls = 'status-' . strtolower($st);
-
-                        echo '<tr>';
-                        echo   '<td class="num">' . $i++ . '</td>';
-                        echo   '<td>' . htmlspecialchars($s['student_id_number'] ?? '—') . '</td>';
-                        echo   '<td>' . htmlspecialchars($s['lrn'] ?? '—') . '</td>';
-                        echo   '<td>' . htmlspecialchars($full_name) . '</td>';
-                        echo   '<td>' . htmlspecialchars($s['sex'] ?? '—') . '</td>';
-                        echo   '<td class="num">' . htmlspecialchars($s['age'] ?? '—') . '</td>';
-                        echo   '<td><span class="status-badge ' . $cls . '">' . htmlspecialchars($st) . '</span></td>';
-                        echo '</tr>';
+                        
+                        $bodyHtml .= '<tr>';
+                        $bodyHtml .= '<td class="num">' . $i++ . '</td>';
+                        $bodyHtml .= '<td>' . htmlspecialchars($s['student_id_number'] ?? '—') . '</td>';
+                        $bodyHtml .= '<td>' . htmlspecialchars($s['lrn'] ?? '—') . '</td>';
+                        $bodyHtml .= '<td>' . htmlspecialchars($full_name) . '</td>';
+                        $bodyHtml .= '<td class="num">' . htmlspecialchars($s['sex'] ?? '—') . '</td>';
+                        $bodyHtml .= '<td class="num">' . htmlspecialchars($s['age'] ?? '—') . '</td>';
+                        $bodyHtml .= '<td class="num">' . htmlspecialchars($st) . '</td>';
+                        $bodyHtml .= '</tr>';
                     }
-                    echo '</tbody></table>';
-                    echo '</div>';
+                    $bodyHtml .= '</tbody></table>';
+                    $bodyHtml .= '</div>';
                 }
             }
         }
     }
+    
     elseif ($report_type === 'by_grade') {
-        echo '<h2>By Grade Level</h2><table><tr><th>Grade</th><th class="num">Total</th><th class="num">Male</th><th class="num">Female</th></tr>';
-        foreach($grade_report as $r) echo '<tr><td>'.htmlspecialchars($r['grade_level']).'</td><td class="num">'.number_format($r['total_students']).'</td><td class="num">'.number_format($r['boys']).'</td><td class="num">'.number_format($r['girls']).'</td></tr>';
-        echo '</table>';
+        $bodyHtml .= '<table class="grid"><thead><tr><th>Grade</th><th class="num" style="width:80px">Total</th><th class="num" style="width:80px">Male</th><th class="num" style="width:80px">Female</th></tr></thead><tbody>';
+        foreach($grade_report as $r) {
+            $bodyHtml .= '<tr><td>' . htmlspecialchars($r['grade_level']) . '</td><td class="num">' . number_format($r['total_students']) . '</td><td class="num">' . number_format($r['boys']) . '</td><td class="num">' . number_format($r['girls']) . '</td></tr>';
+        }
+        $bodyHtml .= '</tbody></table>';
     }
+    
     elseif ($report_type === 'by_strand') {
-        echo '<h2>By Strand &amp; Program</h2><table><tr><th>Strand</th><th>Program</th><th class="num">Total</th><th class="num">Male</th><th class="num">Female</th></tr>';
-        foreach($strand_report as $r) echo '<tr><td>'.htmlspecialchars($r['strand']).'</td><td>'.htmlspecialchars($r['program']).'</td><td class="num">'.number_format($r['total_students']).'</td><td class="num">'.number_format($r['boys']).'</td><td class="num">'.number_format($r['girls']).'</td></tr>';
-        echo '</table>';
+        $bodyHtml .= '<table class="grid"><thead><tr><th>Strand</th><th>Program</th><th class="num" style="width:80px">Total</th><th class="num" style="width:80px">Male</th><th class="num" style="width:80px">Female</th></tr></thead><tbody>';
+        foreach($strand_report as $r) {
+            $bodyHtml .= '<tr><td>' . htmlspecialchars($r['strand']) . '</td><td>' . htmlspecialchars($r['program']) . '</td><td class="num">' . number_format($r['total_students']) . '</td><td class="num">' . number_format($r['boys']) . '</td><td class="num">' . number_format($r['girls']) . '</td></tr>';
+        }
+        $bodyHtml .= '</tbody></table>';
     }
+    
     elseif ($report_type === 'by_section') {
-        echo '<h2>Section Breakdown</h2><table><tr><th>Grade</th><th>Section</th><th class="num">Total</th><th class="num">Male</th><th class="num">Female</th></tr>';
-        foreach($section_report as $r) echo '<tr><td>'.htmlspecialchars($r['grade_level']).'</td><td>'.htmlspecialchars($r['section']).'</td><td class="num">'.number_format($r['total_students']).'</td><td class="num">'.number_format($r['boys']).'</td><td class="num">'.number_format($r['girls']).'</td></tr>';
-        echo '</table>';
+        $bodyHtml .= '<table class="grid"><thead><tr><th>Grade</th><th>Section</th><th class="num" style="width:80px">Total</th><th class="num" style="width:80px">Male</th><th class="num" style="width:80px">Female</th></tr></thead><tbody>';
+        foreach($section_report as $r) {
+            $bodyHtml .= '<tr><td>' . htmlspecialchars($r['grade_level']) . '</td><td>' . htmlspecialchars($r['section']) . '</td><td class="num">' . number_format($r['total_students']) . '</td><td class="num">' . number_format($r['boys']) . '</td><td class="num">' . number_format($r['girls']) . '</td></tr>';
+        }
+        $bodyHtml .= '</tbody></table>';
     }
+    
     elseif ($report_type === 'by_gender') {
-        echo '<h2>Gender Distribution by Grade</h2><table><tr><th>Grade</th><th class="num">Total</th><th class="num">Male</th><th class="num">Female</th><th class="num">M/F Ratio</th></tr>';
+        $bodyHtml .= '<table class="grid"><thead><tr><th>Grade</th><th class="num" style="width:80px">Total</th><th class="num" style="width:80px">Male</th><th class="num" style="width:80px">Female</th><th class="num" style="width:80px">M/F Ratio</th></tr></thead><tbody>';
         foreach($gender_report as $r) {
             $ratio = $r['girls'] > 0 ? round($r['boys']/$r['girls'], 2) . ':1' : '—';
-            echo '<tr><td>'.htmlspecialchars($r['grade_level']).'</td><td class="num">'.number_format($r['total_students']).'</td><td class="num">'.number_format($r['boys']).'</td><td class="num">'.number_format($r['girls']).'</td><td class="num">'.$ratio.'</td></tr>';
+            $bodyHtml .= '<tr><td>' . htmlspecialchars($r['grade_level']) . '</td><td class="num">' . number_format($r['total_students']) . '</td><td class="num">' . number_format($r['boys']) . '</td><td class="num">' . number_format($r['girls']) . '</td><td class="num">' . $ratio . '</td></tr>';
         }
-        echo '</table>';
+        $bodyHtml .= '</tbody></table>';
     }
+    
     elseif ($report_type === 'documents') {
-        echo '<h2>Document Compliance (' . count($doc_report) . ' students)</h2>';
-        echo '<table><tr><th class="num" style="width:30px">#</th><th>Student ID</th><th>Name</th><th>Grade</th><th>Section</th><th class="num">Uploaded</th><th class="num">Status</th></tr>';
-        $i=1;
+        $bodyHtml .= $buildStatTable([
+            ['label' => 'Total Students', 'value' => number_format($total_doc_students)],
+            ['label' => 'Complete', 'value' => number_format($doc_complete)],
+            ['label' => 'Partial', 'value' => number_format($doc_partial)],
+            ['label' => 'Missing All', 'value' => number_format($doc_missing)],
+        ]);
+        
+        $bodyHtml .= '<table class="grid"><thead><tr><th style="width:24pt">#</th><th>Student ID</th><th>Name</th><th>Grade</th><th>Section</th><th class="num">Uploaded</th><th class="num">Status</th></tr></thead><tbody>';
+        $i = 1;
         foreach($doc_report as $d) {
             $status = $d['docs_total'] > 0 && $d['docs_uploaded'] >= $d['docs_total'] ? 'Complete' : ($d['docs_uploaded'] > 0 ? 'Partial' : 'Missing');
-            echo '<tr><td class="num">'.$i++.'</td><td>'.htmlspecialchars($d['student_id_number']??'—').'</td><td>'.htmlspecialchars($d['last_name'].', '.$d['first_name']).'</td><td>'.htmlspecialchars($d['grade_level']??'—').'</td><td>'.htmlspecialchars($d['section']??'—').'</td><td class="num">'.$d['docs_uploaded'].' / '.$d['docs_total'].'</td><td class="num">'.$status.'</td></tr>';
+            $bodyHtml .= '<tr>';
+            $bodyHtml .= '<td class="num">' . $i++ . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($d['student_id_number']??'—') . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($d['last_name'].', '.$d['first_name']) . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($d['grade_level']??'—') . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($d['section']??'—') . '</td>';
+            $bodyHtml .= '<td class="num">' . $d['docs_uploaded'] . ' / ' . $d['docs_total'] . '</td>';
+            $bodyHtml .= '<td class="num">' . $status . '</td>';
+            $bodyHtml .= '</tr>';
         }
-        echo '</table>';
+        $bodyHtml .= '</tbody></table>';
     }
+    
     elseif ($report_type === 'graduated') {
-        echo '<h2>Graduated Students (' . $total_graduated . ')</h2><table><tr><th>Student ID</th><th>LRN</th><th>Name</th><th>Sex</th><th>Strand</th><th>Section</th><th>SY</th></tr>';
-        foreach($graduated_students as $g) echo '<tr><td>'.htmlspecialchars($g['student_id_number']??'—').'</td><td>'.htmlspecialchars($g['lrn']??'—').'</td><td>'.htmlspecialchars($g['last_name'].', '.$g['first_name']).'</td><td>'.htmlspecialchars($g['sex']??'—').'</td><td>'.htmlspecialchars($g['strand']??'—').'</td><td>'.htmlspecialchars($g['section']??'—').'</td><td>'.htmlspecialchars($g['school_year']??'—').'</td></tr>';
-        echo '</table>';
+        $bodyHtml .= $buildStatTable([
+            ['label' => 'Total Graduated', 'value' => number_format($total_graduated)],
+            ['label' => 'School Year', 'value' => $selected_sy ?: 'All Years'],
+        ]);
+        
+        $bodyHtml .= '<table class="grid"><thead><tr><th>Student ID</th><th>LRN</th><th>Name</th><th>Sex</th><th>Strand</th><th>Section</th><th>SY</th></tr></thead><tbody>';
+        foreach($graduated_students as $g) {
+            $bodyHtml .= '<tr>';
+            $bodyHtml .= '<td>' . htmlspecialchars($g['student_id_number']??'—') . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($g['lrn']??'—') . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($g['last_name'].', '.$g['first_name']) . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($g['sex']??'—') . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($g['strand']??'—') . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($g['section']??'—') . '</td>';
+            $bodyHtml .= '<td>' . htmlspecialchars($g['school_year']??'—') . '</td>';
+            $bodyHtml .= '</tr>';
+        }
+        $bodyHtml .= '</tbody></table>';
     }
 
-    echo '<p style="text-align:center;color:#94a3b8;font-size:10px;margin-top:30px;border-top:1px dashed #cbd5e0;padding-top:10px"><em>End of Report · USAT College Sagay City Inc.</em></p>';
-    echo '</body></html>';
+    // 3. Build $doc and stream
+    
+    $doc = [
+        'title'       => $reports[$report_type]['title'],
+        'subtitle'    => $filter_text,
+        'paper'       => 'A4',
+        'body'        => $bodyHtml,
+        'signatories' => [],
+        'control_no'  => 'RPT-' . date('Ymd-His'),
+        'copy_label'  => 'Official Report',
+    ];
+    
+    // Add signatory from config if available
+    $ident = school_identity();
+    $reg = $ident['signatories']['registrar'] ?? [];
+    if (!empty($reg['name']) || !empty($reg['position'])) {
+        $doc['signatories'][] = [
+            'name'     => $reg['name'] ?? '',
+            'position' => $reg['position'] ?? 'University Registrar',
+            'label'    => 'Prepared by',
+        ];
+    }
 
-    $export_html = ob_get_clean();
+    $filename = 'USAT_' . $report_type . ($export_section !== '' ? '_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $export_section) : '') . '_Report_' . date('Y-m-d');
 
     if ($export_word) {
-        $filename = 'usat_' . $report_type . ($export_section !== '' ? '_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $export_section) : '') . '_report_' . date('Y-m-d') . '.doc';
-        header("Content-Type: application/msword");
-        header("Content-Disposition: attachment; filename=\"$filename\"");
-        echo $export_html;
+        output_document_word($doc, $filename . '.doc');
         exit;
     }
 
-    $autoload = __DIR__ . '/../../vendor/autoload.php';
-
-    if (!is_file($autoload)) {
-        header('Content-Type: text/html; charset=UTF-8');
-        echo '<div style="font-family:Arial;padding:1rem;background:#fee2e2;color:#991b1b;border-left:4px solid #dc2626"><strong>PDF library not installed.</strong> Run <code>composer require dompdf/dompdf</code>.</div>';
-        echo $export_html;
+    if ($export_pdf) {
+        output_document_pdf($doc, $filename . '.pdf');
         exit;
     }
 
-    require_once $autoload;
-
-    if (!class_exists('Dompdf\\Dompdf')) {
-        header('Content-Type: text/html; charset=UTF-8');
-        echo '<div style="font-family:Arial;padding:1rem;background:#fee2e2;color:#991b1b;border-left:4px solid #dc2626"><strong>Dompdf class not found.</strong> Run <code>composer dump-autoload</code>.</div>';
-        echo $export_html;
+    if ($export_print) {
+        output_document_print($doc);
         exit;
     }
-
-    $options = new \Dompdf\Options();
-    $options->set('isRemoteEnabled', false);
-    $options->set('isHtml5ParserEnabled', true);
-    $options->set('defaultFont', 'DejaVu Sans');
-    $options->set('dpi', 120);
-
-    $dompdf = new \Dompdf\Dompdf($options);
-    $dompdf->setPaper('A4', 'portrait');
-    $dompdf->loadHtml($export_html, 'UTF-8');
-    $dompdf->render();
-
-    $filename = 'usat_' . $report_type . ($export_section !== '' ? '_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $export_section) : '') . '_report_' . date('Y-m-d') . '.pdf';
-    $dompdf->stream($filename, ['Attachment' => true]);
-    exit;
 }
+
+// ─── END FORMAL DOCUMENT EXPORT ────────────────────────────────────────────
 
 /* ═══ RENDER ═══ */
 $page_title = 'Reports • USAT Admin';
@@ -752,6 +766,24 @@ require __DIR__ . '/../partials/sidebar.php';
 
 <div class="main-content" id="mainContent">
 
+    <!-- Flash Messages (Added to prevent ghost errors) -->
+    <?php if (isset($_SESSION['success'])): ?>
+        <div class="flash success">
+            <i class="bi bi-check-circle-fill"></i>
+            <span><?= htmlspecialchars($_SESSION['success']) ?></span>
+            <button class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        <?php unset($_SESSION['success']); ?>
+    <?php endif; ?>
+    <?php if (isset($_SESSION['error'])): ?>
+        <div class="flash error">
+            <i class="bi bi-exclamation-triangle-fill"></i>
+            <span><?= htmlspecialchars($_SESSION['error']) ?></span>
+            <button class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        <?php unset($_SESSION['error']); ?>
+    <?php endif; ?>
+
     <div class="topbar">
         <div class="d-flex align-items-center gap-3">
             <button class="menu-toggle" id="menuToggle" aria-label="Open menu">
@@ -769,9 +801,9 @@ require __DIR__ . '/../partials/sidebar.php';
             <a href="?<?= http_build_query(array_merge($filter_arr, ['report'=>$report_type,'export_pdf'=>1])) ?>" class="btn btn-outline-danger btn-sm">
                 <i class="bi bi-file-pdf me-1"></i> Export PDF
             </a>
-            <button onclick="window.print()" class="btn btn-outline-secondary btn-sm no-print">
+            <a href="?<?= http_build_query(array_merge($filter_arr, ['report'=>$report_type,'export_print'=>1])) ?>" target="_blank" class="btn btn-outline-secondary btn-sm no-print">
                 <i class="bi bi-printer me-1"></i> Print
-            </button>
+            </a>
             <button class="theme-btn" id="themeToggle" title="Toggle theme">
                 <i class="bi bi-moon-stars-fill" id="themeIcon"></i>
             </button>
@@ -1037,7 +1069,6 @@ require __DIR__ . '/../partials/sidebar.php';
                         <span class="mini-pill"><i class="bi bi-people me-1"></i><?= number_format(count($students)) ?></span>
                         <span class="mini-pill male"><i class="bi bi-gender-male me-1"></i><?= number_format($sec_m) ?></span>
                         <span class="mini-pill female"><i class="bi bi-gender-female me-1"></i><?= number_format($sec_f) ?></span>
-                        <!-- Export Specific Section Button -->
                         <a href="?<?= http_build_query(array_merge($filter_arr, ['report'=>'masterlist', 'export_word'=>1, 'export_section'=>$section])) ?>" class="btn-ghost no-print" onclick="event.stopPropagation();" title="Export just this section to Word">
                             <i class="bi bi-file-word text-primary"></i> Export
                         </a>

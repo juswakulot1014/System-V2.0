@@ -414,6 +414,9 @@ $enrollment_id = (int)($_POST['enrollment_id'] ?? 0);
 $action        = clean_string((string)($_POST['action'] ?? ''), 20);
 $reason        = clean_string((string)($_POST['reason'] ?? ''), 1000);
 
+// FIX: Accept '1', 'on', or any truthy value from the checkbox
+$agree_terms   = !empty($_POST['agree_terms']); 
+
 if ($enrollment_id <= 0 || !in_array($action, ['approve', 'reject'], true)) {
     $_SESSION['error'] = 'Invalid request.';
     header('Location: ' . $__pending_url);
@@ -592,6 +595,13 @@ if ($action === 'reject') {
    5. APPROVE
    ========================================================= */
 
+// Enforce T&C Checkbox
+if (!$agree_terms) {
+    $_SESSION['error'] = 'You must confirm that the student agreed to the Terms & Conditions and Data Privacy Policy before approving.';
+    header('Location: ' . $__pending_url);
+    exit;
+}
+
 try {
     $conn->begin_transaction();
 
@@ -648,6 +658,7 @@ try {
         'enrollment_id' => $enrollment_id,
         'sy'            => $enr['school_year'] ?? null,
         'grade'         => $enr['grade_level'] ?? null,
+        'terms_agreed'  => true, // Log that T&C was checked
     ]);
 } catch (Throwable $e) { }
 

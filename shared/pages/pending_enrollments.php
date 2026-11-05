@@ -99,7 +99,7 @@ $offset = ($page - 1) * $limit;
 
 $pending = array_slice($all_pending, $offset, $limit);
 
-/* ── Fetch Full Data for Modals (Education & Docs) ── */
+/* ── Fetch Full Data for Modals ── */
 $student_data_js = [];
 if (!empty($pending)) {
     $student_ids = array_column($pending, 'student_id');
@@ -279,6 +279,14 @@ $page_css = <<<'CSS'
     .quick-reasons { display:flex; flex-wrap:wrap; gap:.4rem; margin-bottom:1rem; }
     .reason-chip { padding:.35rem .7rem; border-radius:6px; background:var(--surface-2); border:1px solid var(--border); font-size:.75rem; font-weight:600; color:var(--text-2); cursor:pointer; transition:all .15s; font-family:inherit; }
     .reason-chip:hover { background:var(--red-soft); color:var(--red); border-color:color-mix(in srgb, var(--red) 30%, transparent); }
+
+    /* T&C Box */
+    .terms-box { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:1rem; font-size:.8rem; color:var(--text-2); line-height:1.6; max-height:150px; overflow-y:auto; margin-bottom:1rem; }
+    .terms-box p { margin-bottom:.5rem; }
+    .terms-check { display:flex; align-items:flex-start; gap:.6rem; padding:.85rem; background:var(--surface-2); border:1px solid var(--border); border-radius:8px; cursor:pointer; transition:border-color .15s; }
+    .terms-check:hover { border-color:var(--accent); }
+    .terms-check input[type="checkbox"] { margin-top:.2rem; width:18px; height:18px; accent-color:var(--accent); flex-shrink:0; }
+    .terms-check-text { font-size:.85rem; font-weight:600; color:var(--text); line-height:1.4; }
     
     @media (max-width: 768px) {
         .action-group { flex-direction:column; width:100%; }
@@ -569,7 +577,7 @@ require __DIR__ . '/../partials/sidebar.php';
 
 <!-- Approve Modal -->
 <div class="modal fade" id="approveModal" tabindex="-1">
-    <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
             <form method="POST" action="<?= URL_PREFIX ?>/approve_enrollment.php" id="approveForm">
                 
@@ -599,28 +607,24 @@ require __DIR__ . '/../partials/sidebar.php';
                     <input type="hidden" name="enrollment_id" id="approveId">
                     <input type="hidden" name="action" value="approve">
 
+                    <!-- Terms & Conditions Section -->
                     <div style="font-size: 0.75rem; font-weight: 800; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
-                        <i class="bi bi-list-check" style="font-size: 1rem; color: var(--accent);"></i> What happens next
+                        <i class="bi bi-shield-check" style="font-size: 1rem; color: var(--accent);"></i> Legal & Data Privacy Consent
                     </div>
 
-                    <div style="display: flex; flex-direction: column; gap: 0.85rem; margin-bottom: 2rem;">
-                        <div style="display: flex; align-items: flex-start; gap: 1rem; padding: 1rem; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--border);">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: var(--green-soft); color: var(--green); display: flex; align-items: center; justify-content: center; font-size: 1.1rem; flex-shrink: 0;"><i class="bi bi-person-check-fill"></i></div>
-                            <div>
-                                <div style="font-size: 0.9rem; font-weight: 700; color: var(--text); margin-bottom: 0.2rem;">Set status to Active</div>
-                                <div style="font-size: 0.8rem; color: var(--text-2); line-height: 1.5;">The enrollment will be officially activated and appear in the student masterlist.</div>
-                            </div>
-                        </div>
-                        <div style="display: flex; align-items: flex-start; gap: 1rem; padding: 1rem; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--border);">
-                            <div style="width: 38px; height: 38px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 1.1rem; flex-shrink: 0;"><i class="bi bi-envelope-check-fill"></i></div>
-                            <div>
-                                <div style="font-size: 0.9rem; font-weight: 700; color: var(--text); margin-bottom: 0.2rem;">Send confirmation email</div>
-                                <div style="font-size: 0.8rem; color: var(--text-2); line-height: 1.5;">The student will receive an enrollment confirmation with their student ID and section.</div>
-                            </div>
-                        </div>
+                    <div class="terms-box">
+                        <p><strong>Data Privacy Act of 2012 (RA 10173):</strong> I certify that the student has read and agreed to the institution's Data Privacy Policy. The student consents to the collection, processing, and storage of their personal information for academic and administrative purposes.</p>
+                        <p><strong>Terms and Conditions:</strong> The student certifies that all information and documents provided are true, correct, and authentic. Falsification of any record is grounds for immediate disqualification or dismissal. The student agrees to abide by all rules and regulations set forth by the school.</p>
                     </div>
 
-                    <div style="font-size: 0.75rem; font-weight: 800; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                    <label class="terms-check">
+                        <input type="checkbox" name="agree_terms" id="agreeTerms" required>
+                        <span class="terms-check-text">
+                            I have verified the student's information and confirm they have agreed to the Terms & Conditions and Data Privacy Policy.
+                        </span>
+                    </label>
+
+                    <div style="font-size: 0.75rem; font-weight: 800; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.8px; margin-top: 2rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
                         <i class="bi bi-bell-fill" style="font-size: 1rem; color: var(--accent);"></i> Notification
                     </div>
 
@@ -643,7 +647,7 @@ require __DIR__ . '/../partials/sidebar.php';
                 <!-- Footer -->
                 <div style="padding: 1.25rem 2rem; background: var(--surface); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 1rem;">
                     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-confirm" style="background: linear-gradient(135deg, #059669, #047857); border: none; color: #fff; box-shadow: 0 4px 12px -2px rgba(5,150,105,.4); padding: 0.65rem 1.5rem; font-weight: 600; border-radius: 10px;">
+                    <button type="submit" class="btn btn-confirm" id="btnConfirmApprove" disabled style="background: linear-gradient(135deg, #059669, #047857); border: none; color: #fff; box-shadow: 0 4px 12px -2px rgba(5,150,105,.4); padding: 0.65rem 1.5rem; font-weight: 600; border-radius: 10px; opacity: 0.5; cursor: not-allowed;">
                         <i class="bi bi-check-lg me-2"></i> Confirm Approval
                     </button>
                 </div>
@@ -858,6 +862,14 @@ document.querySelectorAll('.view-btn').forEach(btn => {
                 <div class="review-section-title"><i class="bi bi-folder-check"></i> Entrance Documents</div>
                 <div class="doc-checklist">${docsHtml}</div>
             </div>
+            
+            <div class="review-section" style="background:#fffbeb;">
+                <div class="review-section-title" style="color:#92400e;"><i class="bi bi-shield-check" style="color:#d97706;"></i> Legal & Data Privacy</div>
+                <div style="font-size:.8rem; color:#92400e; line-height:1.5;">
+                    <strong>Terms and Conditions:</strong> The student certifies that all information and documents provided are true, correct, and authentic.<br><br>
+                    <strong>Data Privacy:</strong> The student consents to the collection and processing of their personal data in accordance with RA 10173.
+                </div>
+            </div>
         `;
         
         document.getElementById('reviewBody').innerHTML = html;
@@ -897,6 +909,21 @@ function openApprove(d) {
         emailEl.style.fontStyle = 'italic';
         warnEl.style.display = 'flex';
     }
+
+    // Reset T&C Checkbox and Disable Button
+    const agreeCheckbox = document.getElementById('agreeTerms');
+    const confirmBtn = document.getElementById('btnConfirmApprove');
+    agreeCheckbox.checked = false;
+    confirmBtn.disabled = true;
+    confirmBtn.style.opacity = '0.5';
+    confirmBtn.style.cursor = 'not-allowed';
+
+    // Add event listener for the checkbox
+    agreeCheckbox.onchange = function() {
+        confirmBtn.disabled = !this.checked;
+        confirmBtn.style.opacity = this.checked ? '1' : '0.5';
+        confirmBtn.style.cursor = this.checked ? 'pointer' : 'not-allowed';
+    };
 
     new bootstrap.Modal(document.getElementById('approveModal')).show();
 }

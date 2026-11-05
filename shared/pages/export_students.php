@@ -2,6 +2,7 @@
 // shared/pages/export_students.php
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
+require_once __DIR__ . '/../print/render.php';
 
 $__nav_section = 'students';
 
@@ -42,7 +43,7 @@ if ($student_id_filter > 0) {
 
 $where_sql = $where ? "WHERE " . implode(" AND ", $where) : "";
 
-/* ═══ HELPERS (guarded) ═══ */
+/* ═══ HELPERS ═══ */
 if (!function_exists('csvSafe')) {
     function csvSafe($v) {
         $v = (string)$v;
@@ -198,7 +199,7 @@ if (!function_exists('fetchExportData')) {
                 FROM student_grades sg
                 WHERE sg.student_id IN ($ph)
                 ORDER BY sg.student_id, sg.school_year ASC, sg.grade_level ASC,
-                         sg.term ASC, sg.subject_name ASC
+                         FIELD(sg.term, '1st Term', '2nd Term', '3rd Term'), sg.subject_name ASC
             ";
             $gstmt = $conn->prepare($gsql);
             $gstmt->bind_param(str_repeat('i', count($ids)), ...$ids);
@@ -249,16 +250,6 @@ if (!function_exists('buildGradeStructure')) {
                 'school_year' => $g['school_year'],
             ];
         }
-
-        foreach ($structure as $gl => &$terms) {
-            foreach ($terms as $tm => &$subjects) {
-                usort($subjects, function($a, $b) {
-                    return strcasecmp($a['code'] ?: $a['name'], $b['code'] ?: $b['name']);
-                });
-            }
-        }
-        unset($terms, $subjects);
-
         return $structure;
     }
 }
@@ -460,196 +451,157 @@ if ($format === 'csv') {
     exit;
 }
 
-/* ═══ WORD EXPORT ═══ */
-if ($format === 'word') {
+/* ═══ FORMAL DOCUMENT EXPORT (Word / PDF / Print) ═══ */
+if ($format === 'word' || $format === 'pdf' || $format === 'print') {
     set_time_limit(600);
     while (ob_get_level()) ob_end_clean();
 
-    $wfname = $student_id_filter > 0
-        ? 'student_' . $student_id_filter . '_' . date('Y-m-d_His') . '.doc'
-        : 'students_full_export_' . date('Y-m-d_His') . '.doc';
+    $bodyHtml = '';
+    $isFirst = true;
 
-    header('Content-Type: application/msword; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="' . $wfname . '"');
+    if (empty($students)) {
+        $bodyHtml .= '<p style="text-align:center; color:#64748b; font-style:italic; padding:40pt 0;">No students matched the current filters.</p>';
+    } else {
+        foreach ($students as $sid => $s) {
+            $info = $s['info'];
+            $fullName = trim(($info['last_name'] ?? '') . ', ' . ($info['first_name'] ?? '') . ' ' . ($info['middle_name'] ?? ''));
+            $pageBreak = $isFirst ? '' : 'page-break-before: always;';
+            $isFirst = false;
 
-    echo "\xEF\xBB\xBF";
-    echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Students Export</title><style>
-        @page { size: A4; margin: 1.5cm; }
-        body{font-family:Arial,sans-serif;color:#111;font-size:11px;line-height:1.5}
-        h1{color:#1e3c72;border-bottom:3px double #1e3c72;padding-bottom:8px;font-size:22px;margin-bottom:6px}
-        h2{color:#2b4c8c;margin-top:24px;border-bottom:2px solid #2b4c8c;padding-bottom:4px;font-size:15px;page-break-before:always}
-        h3{color:#4f46e5;margin:14px 0 6px;font-size:12px;letter-spacing:0.5px}
-        h4{color:#2b4c8c;margin:10px 0 4px;font-size:11.5px;background:#f0f4f8;padding:4px 8px;border-left:3px solid #2b4c8c}
-        table{width:100%;border-collapse:collapse;margin:6px 0 10px}
-        th,td{border:1px solid #cbd5e0;padding:5px 7px;text-align:left;font-size:10px;vertical-align:top}
-        th{background:#eef2ff;font-weight:bold;color:#1e3a72;text-align:center}
-        .meta{background:#f9f9f9;padding:8px 12px;border-left:4px solid #4f46e5;margin:10px 0;font-size:11px}
-        .badge{padding:2px 8px;border-radius:10px;background:#eef2ff;color:#4338ca;font-size:9px;font-weight:bold;margin-right:6px}
-        .gwa-badge{background:#fef3c7;color:#92400e}
-        .term-header{background:#dbeafe;font-weight:bold;font-size:11px;padding:6px 10px;border:1px solid #93c5fd;color:#1e40af;margin-top:8px}
-        .empty-term{padding:8px 12px;background:#f9fafb;color:#94a3b8;font-style:italic;font-size:10px;border:1px dashed #cbd5e0}
-        .gwa-row{background:#fef3c7;font-weight:bold}
-        .grade-num{text-align:center;font-weight:bold}
-        .pass{color:#059669}.fail{color:#dc2626}
-        .footer{margin-top:30px;padding-top:10px;border-top:1px dashed #cbd5e0;text-align:center;font-size:10px;color:#94a3b8}
-    </style></head><body>';
+            $bodyHtml .= '<div style="' . $pageBreak . '">';
+            
+            // Title
+            $bodyHtml .= '<h2 style="font-size:14pt; color:#0a0a0a; border-bottom:2pt solid #374151; padding-bottom:4pt; margin-bottom:10pt;">' . htmlspecialchars($fullName) . '</h2>';
+            
+            // Personal Info
+            $bodyHtml .= '<div class="section-title" style="margin-top:0;">Personal Information</div>';
+            $bodyHtml .= '<table class="grid"><tbody>';
+            $bodyHtml .= '<tr><th style="width:20%">Student ID</th><td style="width:30%">' . htmlspecialchars(nz($info['student_id_number'])) . '</td><th style="width:20%">LRN</th><td>' . htmlspecialchars(nz($info['lrn'])) . '</td></tr>';
+            $bodyHtml .= '<tr><th>Sex</th><td>' . htmlspecialchars(nz($info['sex'])) . '</td><th>Birth Date</th><td>' . htmlspecialchars(fmtDate($info['birth_date'])) . '</td></tr>';
+            $bodyHtml .= '<tr><th>Email</th><td>' . htmlspecialchars(nz($info['email'])) . '</td><th>Phone</th><td>' . htmlspecialchars(nz($info['phone'])) . '</td></tr>';
+            
+            $addr = trim(implode(', ', array_filter([$info['purok_street'], $info['barangay'], $info['town_city'], $info['province'], $info['region'], $info['postal_code']])));
+            $bodyHtml .= '<tr><th>Address</th><td colspan="3">' . htmlspecialchars(nz($addr)) . '</td></tr>';
+            $bodyHtml .= '</tbody></table>';
 
-    $title = $student_id_filter > 0 ? 'USAT College — Student Record' : 'USAT College — Student Masterlist';
-    echo '<h1>' . $title . '</h1>';
-    echo '<div class="meta">';
-    echo '<strong>Generated:</strong> ' . date('F d, Y h:i A') . '<br>';
-    echo '<strong>Scope:</strong> ' . htmlspecialchars($filter_text) . '<br>';
-    echo '<strong>Total students:</strong> ' . count($students);
-    echo '</div>';
-
-    $idx = 0;
-    foreach ($students as $sid => $s) {
-        $idx++;
-        $info = $s['info'];
-        $fullName = trim(($info['last_name'] ?? '') . ', ' . ($info['first_name'] ?? '') . ' ' . ($info['middle_name'] ?? ''));
-
-        echo '<h2>' . ($student_id_filter > 0 ? '' : $idx . '. ') . htmlspecialchars($fullName) . '</h2>';
-
-        echo '<p>';
-        if ($s['overall_gwa'] !== null) {
-            echo '<span class="badge gwa-badge">Overall GWA: ' . number_format($s['overall_gwa'], 2) . '</span>';
-        }
-        $g11 = gradeLevelGwa($s['grade_structure']['Grade 11']);
-        $g12 = gradeLevelGwa($s['grade_structure']['Grade 12']);
-        if ($g11 !== null) echo '<span class="badge">Grade 11 GWA: ' . number_format($g11, 2) . '</span>';
-        if ($g12 !== null) echo '<span class="badge">Grade 12 GWA: ' . number_format($g12, 2) . '</span>';
-        echo '</p>';
-
-        echo '<h3>Personal Information</h3><table>';
-        $rows = [
-            'Student ID Number' => $info['student_id_number'],
-            'LRN'               => $info['lrn'],
-            'Last Name'         => $info['last_name'],
-            'First Name'        => $info['first_name'],
-            'Middle Name'       => $info['middle_name'],
-            'Nickname'          => $info['nick_name'],
-            'Extension'         => $info['ext_name'],
-            'Sex'               => $info['sex'],
-            'Birth Date'        => fmtDate($info['birth_date']),
-            'Age'               => $info['age'],
-            'Civil Status'      => $info['civil_status'],
-            'Nationality'       => $info['nationality'],
-            'Religion'          => $info['religion'],
-            'Height'            => $info['height'] ? $info['height'] . ' cm' : null,
-            'Weight'            => $info['weight'] ? $info['weight'] . ' kg' : null,
-            'Email'             => $info['email'],
-            'Phone'             => $info['phone'],
-            'Special Skills'    => $info['special_skills'],
-        ];
-        foreach ($rows as $k => $v) echo '<tr><th style="width:24%">' . htmlspecialchars($k) . '</th><td>' . htmlspecialchars(nz($v)) . '</td></tr>';
-        echo '</table>';
-
-        echo '<h3>Parents & Guardian</h3><table>';
-        $prows = [
-            'Father'            => $info['father_name'],
-            'Father Occupation' => $info['father_occupation'],
-            'Father Contact'    => $info['father_contact'],
-            'Mother (Maiden)'   => $info['mother_maiden_name'],
-            'Mother Occupation' => $info['mother_occupation'],
-            'Mother Contact'    => $info['mother_contact'],
-            'Guardian'          => trim(($info['guardian_fullname'] ?? '') . ' (' . ($info['guardian_relation'] ?? '') . ')', ' ()'),
-            'Guardian Contact'  => $info['guardian_contact'],
-            'Family Income'     => $info['ave_family_income'] ? 'PHP ' . number_format((float)$info['ave_family_income'], 2) : null,
-            '4Ps'               => $info['is_4ps'] ? 'Yes' : 'No',
-            'Household ID'      => $info['household_id'],
-        ];
-        foreach ($prows as $k => $v) echo '<tr><th style="width:24%">' . htmlspecialchars($k) . '</th><td>' . htmlspecialchars(nz($v)) . '</td></tr>';
-        echo '</table>';
-
-        $addrParts = array_filter([$info['purok_street'], $info['barangay'], $info['town_city'], $info['province'], $info['region'], $info['district'], $info['postal_code']]);
-        if ($addrParts) {
-            echo '<h3>Address</h3><table><tr><th style="width:24%">Full Address</th><td>' . htmlspecialchars(implode(', ', $addrParts)) . '</td></tr></table>';
-        }
-
-        if (!empty($s['education'])) {
-            echo '<h3>Educational History</h3><table>';
-            echo '<tr><th>Level</th><th>School Name</th><th>School Address</th><th>Year Completed</th></tr>';
-            foreach ($s['education'] as $e) {
-                echo '<tr><td>' . htmlspecialchars(nz($e['level'])) . '</td><td>' . htmlspecialchars(nz($e['school_name'])) . '</td><td>' . htmlspecialchars(nz($e['school_address'])) . '</td><td style="text-align:center">' . htmlspecialchars(nz($e['year_completed'])) . '</td></tr>';
-            }
-            echo '</table>';
-        }
-
-        if (!empty($s['enrollments'])) {
-            echo '<h3>Enrollment Details</h3><table>';
-            echo '<tr><th>School Year</th><th>Grade</th><th>Term</th><th>Section</th><th>Track</th><th>Strand</th><th>Program</th><th>Status</th><th>Voucher</th></tr>';
-            foreach ($s['enrollments'] as $en) {
-                echo '<tr>';
-                foreach (['school_year','grade_level','term','section','track','strand','program','status','voucher_status'] as $k) {
-                    echo '<td>' . htmlspecialchars(nz($en[$k] ?? '—')) . '</td>';
+            // Family Info
+            $bodyHtml .= '<div class="section-title">Family Background</div>';
+            $bodyHtml .= '<table class="grid"><tbody>';
+            $bodyHtml .= '<tr><th style="width:20%">Father</th><td style="width:30%">' . htmlspecialchars(nz($info['father_name'])) . '</td><th style="width:20%">Mother</th><td>' . htmlspecialchars(nz($info['mother_maiden_name'])) . '</td></tr>';
+            $bodyHtml .= '<tr><th>Guardian</th><td>' . htmlspecialchars(nz($info['guardian_fullname'])) . '</td><th>Contact</th><td>' . htmlspecialchars(nz($info['guardian_contact'])) . '</td></tr>';
+            $bodyHtml .= '</tbody></table>';
+            
+            // Educational History
+            if (!empty($s['education'])) {
+                $bodyHtml .= '<div class="section-title">Educational History</div>';
+                $bodyHtml .= '<table class="grid"><thead><tr><th style="width:20%">Level</th><th>School Name</th><th>Address</th><th style="width:15%">Year</th></tr></thead><tbody>';
+                foreach ($s['education'] as $e) {
+                    $bodyHtml .= '<tr>';
+                    $bodyHtml .= '<td><strong>' . htmlspecialchars($e['level']) . '</strong></td>';
+                    $bodyHtml .= '<td>' . htmlspecialchars($e['school_name']) . '</td>';
+                    $bodyHtml .= '<td>' . htmlspecialchars($e['school_address'] ?? '—') . '</td>';
+                    $bodyHtml .= '<td class="num">' . htmlspecialchars($e['year_completed'] ?? '—') . '</td>';
+                    $bodyHtml .= '</tr>';
                 }
-                echo '</tr>';
+                $bodyHtml .= '</tbody></table>';
             }
-            echo '</table>';
-
-            $prevInfo = null;
-            foreach ($s['enrollments'] as $en) {
-                if (!empty($en['previous_school_name'])) { $prevInfo = $en; break; }
-            }
-            if ($prevInfo) {
-                echo '<h4>Transferee — Previous School</h4><table>';
-                echo '<tr><th style="width:24%">Previous School</th><td>' . htmlspecialchars(nz($prevInfo['previous_school_name'])) . '</td></tr>';
-                echo '<tr><th>School Address</th><td>' . htmlspecialchars(nz($prevInfo['previous_school_address'])) . '</td></tr>';
-                echo '<tr><th>Previous Track</th><td>' . htmlspecialchars(nz($prevInfo['previous_track'])) . '</td></tr>';
-                echo '<tr><th>Previous Strand</th><td>' . htmlspecialchars(nz($prevInfo['previous_strand'])) . '</td></tr>';
-                echo '<tr><th>Previous Program</th><td>' . htmlspecialchars(nz($prevInfo['previous_program'])) . '</td></tr>';
-                echo '<tr><th>Year Completed</th><td>' . htmlspecialchars(nz($prevInfo['previous_year_completed'])) . '</td></tr>';
-                echo '</table>';
-            }
-        }
-
-        echo '<h3>Academic Record — Grade 11 &amp; Grade 12</h3>';
-        foreach (['Grade 11', 'Grade 12'] as $gl) {
-            $terms = $s['grade_structure'][$gl];
-            $glGwa = gradeLevelGwa($terms);
-            echo '<div class="term-header">' . htmlspecialchars(strtoupper($gl));
-            if ($glGwa !== null) echo ' &nbsp;·&nbsp; General Average: ' . number_format($glGwa, 2);
-            echo '</div>';
-
-            foreach (['1st Term', '2nd Term', '3rd Term'] as $tm) {
-                $subs = $terms[$tm] ?? [];
-                $tmGwa = termGwa($subs);
-                echo '<h4 style="margin-top:8px">' . htmlspecialchars($tm);
-                if ($tmGwa !== null) echo ' &nbsp;·&nbsp; GWA: ' . number_format($tmGwa, 2);
-                echo '</h4>';
-
-                if (empty($subs)) {
-                    echo '<div class="empty-term">No grades recorded for this term.</div>';
-                    continue;
+            
+            // Enrollment Details
+            if (!empty($s['enrollments'])) {
+                $bodyHtml .= '<div class="section-title">Enrollment Details</div>';
+                $bodyHtml .= '<table class="grid"><thead><tr><th>School Year</th><th>Grade</th><th>Term</th><th>Section</th><th>Strand</th><th>Status</th></tr></thead><tbody>';
+                foreach ($s['enrollments'] as $en) {
+                    $bodyHtml .= '<tr>';
+                    $bodyHtml .= '<td>' . htmlspecialchars(nz($en['school_year'])) . '</td>';
+                    $bodyHtml .= '<td>' . htmlspecialchars(nz($en['grade_level'])) . '</td>';
+                    $bodyHtml .= '<td>' . htmlspecialchars(nz($en['term'])) . '</td>';
+                    $bodyHtml .= '<td>' . htmlspecialchars(nz($en['section'])) . '</td>';
+                    $bodyHtml .= '<td>' . htmlspecialchars(nz($en['strand'])) . '</td>';
+                    $bodyHtml .= '<td>' . htmlspecialchars(nz($en['status'])) . '</td>';
+                    $bodyHtml .= '</tr>';
                 }
-                echo '<table>';
-                echo '<tr><th style="width:18%">Subject Code</th><th style="width:50%">Subject Title</th><th style="width:14%">Final Grade</th><th style="width:18%">Remarks</th></tr>';
-                foreach ($subs as $sub) {
-                    $gv = $sub['grade'] !== null ? number_format((float)$sub['grade'], 2) : '—';
-                    $remark = !empty($sub['remarks']) ? $sub['remarks'] : (($sub['grade'] !== null && $sub['grade'] >= 75) ? 'Passed' : 'Failed');
-                    $cls = ($sub['grade'] !== null && $sub['grade'] >= 75) ? 'pass' : 'fail';
-                    echo '<tr>';
-                    echo '<td style="text-align:center">' . htmlspecialchars(nz($sub['code'])) . '</td>';
-                    echo '<td>' . htmlspecialchars(nz($sub['name'])) . '</td>';
-                    echo '<td class="grade-num ' . $cls . '">' . $gv . '</td>';
-                    echo '<td style="text-align:center">' . htmlspecialchars($remark) . '</td>';
-                    echo '</tr>';
-                }
-                echo '<tr class="gwa-row"><td colspan="2" style="text-align:right">General Average for ' . htmlspecialchars($tm) . ':</td><td class="grade-num">' . ($tmGwa !== null ? number_format($tmGwa, 2) : '—') . '</td><td></td></tr>';
-                echo '</table>';
+                $bodyHtml .= '</tbody></table>';
             }
-        }
 
-        if ($s['overall_gwa'] !== null) {
-            echo '<table style="margin-top:14px">';
-            echo '<tr class="gwa-row"><td style="width:70%"><strong>OVERALL GENERAL WEIGHTED AVERAGE (Grade 11 – Grade 12):</strong></td><td class="grade-num" style="font-size:13px">' . number_format($s['overall_gwa'], 2) . '</td></tr>';
-            echo '</table>';
+            // Academic Record (Full)
+            if (!empty($s['grades'])) {
+                $bodyHtml .= '<div class="section-title">Academic Record</div>';
+                
+                foreach ($s['grade_structure'] as $gl => $terms) {
+                    $hasGrades = false;
+                    foreach ($terms as $subs) { if (!empty($subs)) { $hasGrades = true; break; } }
+                    if (!$hasGrades) continue;
+
+                    $glGwa = gradeLevelGwa($terms);
+                    $bodyHtml .= '<div style="font-size:10pt; font-weight:bold; color:#111827; margin:12pt 0 4pt; border-bottom:1px solid #cbd5e1; padding-bottom:2pt;">';
+                    $bodyHtml .= htmlspecialchars(strtoupper($gl));
+                    if ($glGwa !== null) $bodyHtml .= '<span style="float:right; font-size:9pt; color:#4b5563;">General Average: <strong>' . number_format($glGwa, 2) . '</strong></span>';
+                    $bodyHtml .= '</div>';
+
+                    foreach ($terms as $tm => $subs) {
+                        if (empty($subs)) continue;
+                        $tmGwa = termGwa($subs);
+                        $bodyHtml .= '<div style="font-size:9pt; font-weight:bold; color:#374151; margin:8pt 0 4pt;">' . htmlspecialchars($tm);
+                        if ($tmGwa !== null) $bodyHtml .= ' &nbsp;·&nbsp; GWA: ' . number_format($tmGwa, 2);
+                        $bodyHtml .= '</div>';
+                        
+                        $bodyHtml .= '<table class="grid" style="margin-top:0;"><thead><tr><th style="width:20%">Code</th><th>Subject Title</th><th style="width:15%">Grade</th><th style="width:20%">Remarks</th></tr></thead><tbody>';
+                        foreach ($subs as $sub) {
+                            $gv = $sub['grade'] !== null ? number_format((float)$sub['grade'], 2) : '—';
+                            $rm = $sub['remarks'] ?? (($sub['grade'] !== null && $sub['grade'] >= 75) ? 'Passed' : 'Failed');
+                            $bodyHtml .= '<tr>';
+                            $bodyHtml .= '<td class="num">' . htmlspecialchars($sub['code']) . '</td>';
+                            $bodyHtml .= '<td>' . htmlspecialchars($sub['name']) . '</td>';
+                            $bodyHtml .= '<td class="num"><strong>' . $gv . '</strong></td>';
+                            $bodyHtml .= '<td class="num">' . htmlspecialchars($rm ?? '—') . '</td>';
+                            $bodyHtml .= '</tr>';
+                        }
+                        $bodyHtml .= '</tbody></table>';
+                    }
+                }
+                
+                if ($s['overall_gwa'] !== null) {
+                    $bodyHtml .= '<table width="100%" style="margin-top:14pt;"><tr>';
+                    $bodyHtml .= '<td style="background:#f3f4f6; border-left:3pt solid #374151; padding:6pt 10pt; text-align:right; font-weight:bold; font-size:10pt; width:70%;">OVERALL GENERAL WEIGHTED AVERAGE:</td>';
+                    $bodyHtml .= '<td style="background:#f3f4f6; border-left:3pt solid #374151; padding:6pt 10pt; text-align:center; font-weight:bold; font-size:12pt; color:#111827;">' . number_format($s['overall_gwa'], 2) . '</td>';
+                    $bodyHtml .= '</tr></table>';
+                }
+            }
+
+            $bodyHtml .= '</div>'; // end page break div
         }
     }
 
-    echo '<p class="footer"><em>End of Report — ' . count($students) . ' student(s)</em></p>';
-    audit_log($conn, 'export.word', ['type'=>'batch','scope'=>$filter_text,'students'=>count($students)]);
-    echo '</body></html>';
+    $doc = [
+        'title'       => $student_id_filter > 0 ? 'Student Profile' : 'Student Masterlist',
+        'subtitle'    => $filter_text,
+        'paper'       => 'A4',
+        'body'        => $bodyHtml,
+        'signatories' => [],
+        'control_no'  => 'EXP-' . date('Ymd-His'),
+        'copy_label'  => 'Official Record',
+    ];
+    
+    $ident = school_identity();
+    $reg = $ident['signatories']['registrar'] ?? [];
+    if (!empty($reg['name']) || !empty($reg['position'])) {
+        $doc['signatories'][] = [
+            'name'     => $reg['name'] ?? '',
+            'position' => $reg['position'] ?? 'University Registrar',
+            'label'    => 'Prepared by',
+        ];
+    }
+
+    $filename = 'USAT_Students_' . date('Y-m-d');
+
+    if ($format === 'word') {
+        audit_log($conn, 'export.word', ['type'=>'batch','scope'=>$filter_text,'students'=>count($students)]);
+        output_document_word($doc, $filename . '.doc');
+    } elseif ($format === 'pdf') {
+        output_document_pdf($doc, $filename . '.pdf');
+    } else {
+        output_document_print($doc);
+    }
     exit;
 }
 
@@ -677,7 +629,7 @@ $page_css = <<<'CSS'
     .single-banner .btn-light{background:rgba(255,255,255,.95);color:var(--accent);border:none;font-weight:600;box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:1}
     .single-banner .btn-light:hover{background:#fff;transform:translateY(-1px)}
 
-    .export-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:1rem}
+    .export-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem}
     .export-card{display:flex;gap:1.1rem;padding:1.35rem 1.4rem;border:1.5px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);transition:transform .18s, box-shadow .18s, border-color .18s;align-items:flex-start;height:100%;text-decoration:none;color:inherit;cursor:pointer;position:relative;overflow:hidden}
     .export-card:hover{border-color:var(--accent);box-shadow:var(--shadow-lg);transform:translateY(-3px);color:inherit}
     .export-card .icon{width:56px;height:56px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:1.5rem;flex-shrink:0;transition:transform .2s}
@@ -691,10 +643,15 @@ $page_css = <<<'CSS'
     .export-card:hover .arrow{opacity:1;transform:translateX(0);color:var(--accent)}
 
     .icon-word  {background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:#2563eb}
+    .icon-pdf   {background:linear-gradient(135deg,#fee2e2,#fecaca);color:#dc2626}
+    .icon-print {background:linear-gradient(135deg,#f1f5f9,#e2e8f0);color:#475569}
     .icon-csv   {background:linear-gradient(135deg,#d1fae5,#a7f3d0);color:#059669}
     .icon-grades{background:linear-gradient(135deg,#fef3c7,#fde68a);color:#d97706}
     .icon-full  {background:linear-gradient(135deg,#ede9fe,#ddd6fe);color:#7c3aed}
+    
     [data-bs-theme="dark"] .icon-word  {background:linear-gradient(135deg,#1e3a5f,#1e40af);color:#bfdbfe}
+    [data-bs-theme="dark"] .icon-pdf   {background:linear-gradient(135deg,#7f1d1d,#b91c1c);color:#fecaca}
+    [data-bs-theme="dark"] .icon-print {background:linear-gradient(135deg,#334155,#475569);color:#cbd5e1}
     [data-bs-theme="dark"] .icon-csv   {background:linear-gradient(135deg,#064e3b,#047857);color:#a7f3d0}
     [data-bs-theme="dark"] .icon-grades{background:linear-gradient(135deg,#78350f,#92400e);color:#fde68a}
     [data-bs-theme="dark"] .icon-full  {background:linear-gradient(135deg,#4c1d95,#5b21b6);color:#ddd6fe}
@@ -859,53 +816,67 @@ require __DIR__ . '/../partials/sidebar.php';
         </div>
         <div class="card-body">
             <div class="export-grid">
+                <!-- Formal PDF -->
+                <a href="?<?= http_build_query(array_filter(array_merge($_GET, ['format' => 'pdf']))) ?>" class="export-card">
+                    <div class="icon icon-pdf"><i class="bi bi-file-earmark-pdf-fill"></i></div>
+                    <div class="body">
+                        <h5 class="title">Formal Document (PDF)</h5>
+                        <p class="desc">Official masterlist or full student profile formatted for PDF. Includes letterhead, formal tables, and signature blocks.</p>
+                        <div class="tags">
+                            <span class="tag">Formal</span>
+                            <span class="tag">Print-ready</span>
+                        </div>
+                    </div>
+                    <i class="bi bi-arrow-right arrow"></i>
+                </a>
+
+                <!-- Formal Word -->
                 <a href="?<?= http_build_query(array_filter(array_merge($_GET, ['format' => 'word']))) ?>" class="export-card">
                     <div class="icon icon-word"><i class="bi bi-file-earmark-word-fill"></i></div>
                     <div class="body">
-                        <h5 class="title">Full Student Report — Word (.doc)</h5>
-                        <p class="desc">Complete record per student: personal info, parents, address, educational history, enrollment, and grades for Grade 11 and Grade 12 (all three terms). Best for printing and filing.</p>
+                        <h5 class="title">Formal Document (Word)</h5>
+                        <p class="desc">Editable formal document. Best for printing and filing. Uses the standardized school letterhead and signature blocks.</p>
                         <div class="tags">
-                            <span class="tag">Personal</span>
-                            <span class="tag">Parents</span>
-                            <span class="tag">Grade 11 &amp; 12</span>
-                            <span class="tag">GWA</span>
+                            <span class="tag">Editable</span>
+                            <span class="tag">Formal</span>
                         </div>
                     </div>
                     <i class="bi bi-arrow-right arrow"></i>
                 </a>
 
+                <!-- Formal Print -->
+                <a href="?<?= http_build_query(array_filter(array_merge($_GET, ['format' => 'print']))) ?>" target="_blank" class="export-card">
+                    <div class="icon icon-print"><i class="bi bi-printer-fill"></i></div>
+                    <div class="body">
+                        <h5 class="title">Print Formal Document</h5>
+                        <p class="desc">Opens the formal document in a new tab and automatically triggers the browser print dialog.</p>
+                        <div class="tags">
+                            <span class="tag">Direct Print</span>
+                        </div>
+                    </div>
+                    <i class="bi bi-arrow-right arrow"></i>
+                </a>
+
+                <!-- Full Data CSV -->
                 <a href="?<?= http_build_query(array_filter(array_merge($_GET, ['format' => 'csv', 'mode' => 'full']))) ?>" class="export-card">
                     <div class="icon icon-full"><i class="bi bi-table"></i></div>
                     <div class="body">
-                        <h5 class="title">Full Data — CSV (one row per student)</h5>
-                        <p class="desc">Every field plus grade columns for Grade 11 (3 terms) and Grade 12 (3 terms), each with its own GWA. Includes overall GWA. Great for spreadsheets and analysis.</p>
+                        <h5 class="title">Full Data — CSV</h5>
+                        <p class="desc">Every field plus grade columns for Grade 11 (3 terms) and Grade 12 (3 terms), each with its own GWA.</p>
                         <div class="tags">
                             <span class="tag">All fields</span>
-                            <span class="tag">Grade columns</span>
-                            <span class="tag">Overall GWA</span>
+                            <span class="tag">Spreadsheet</span>
                         </div>
                     </div>
                     <i class="bi bi-arrow-right arrow"></i>
                 </a>
 
-                <a href="?<?= http_build_query(array_filter(array_merge($_GET, ['format' => 'csv', 'mode' => 'students']))) ?>" class="export-card">
-                    <div class="icon icon-csv"><i class="bi bi-file-earmark-spreadsheet-fill"></i></div>
-                    <div class="body">
-                        <h5 class="title">Students &amp; Enrollment — CSV</h5>
-                        <p class="desc">One row per enrollment. Personal info, parents, address, enrollment details, and a concatenated grade summary with GWA per enrollment.</p>
-                        <div class="tags">
-                            <span class="tag">Per enrollment</span>
-                            <span class="tag">Grade summary</span>
-                        </div>
-                    </div>
-                    <i class="bi bi-arrow-right arrow"></i>
-                </a>
-
+                <!-- Grades Only CSV -->
                 <a href="?<?= http_build_query(array_filter(array_merge($_GET, ['format' => 'csv', 'mode' => 'grades']))) ?>" class="export-card">
                     <div class="icon icon-grades"><i class="bi bi-list-columns-reverse"></i></div>
                     <div class="body">
-                        <h5 class="title">Grades Only — CSV (flat)</h5>
-                        <p class="desc">One row per grade. School Year, Grade Level, Term, Subject Code, Subject Name, Grade, Remarks. Ideal for pivot tables and grade analysis.</p>
+                        <h5 class="title">Grades Only — CSV</h5>
+                        <p class="desc">One row per grade. Ideal for pivot tables, data analysis, and importing into other systems.</p>
                         <div class="tags">
                             <span class="tag">Flat format</span>
                             <span class="tag">Per grade</span>

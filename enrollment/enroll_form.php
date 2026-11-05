@@ -3,14 +3,6 @@ declare(strict_types=1);
 
 /**
  * enroll_form.php — Public student enrollment wizard.
- *
- * FIXES APPLIED:
- *   - secure_session_start() used instead of raw session_start() (fixes CSRF loss).
- *   - Cache headers and 413 checks moved AFTER secure session start.
- *   - Review mode strictly disables the submit button if JHS or 2x2 docs mismatch.
- *   - JS interceptor added to disabled button to explain the mismatch.
- *   - Privacy: LRN and name checks no longer disclose any student's name, ID,
- *     grade, or enrollment data to the public form.
  */
 
 /* ── 1. Load configs FIRST (no output yet) ── */
@@ -2611,9 +2603,21 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
             <?php endif; ?>
 
             <form method="POST" action="process_enroll.php" class="text-center mt-5" id="confirmForm">
+                <section class="review-section" style="background:#f8fafc; border-left-color:#d97706; text-align:left; margin-bottom: 2rem;">
+                    <h2 style="font-size:1.1rem; color:#92400e; margin-bottom:1rem;"><i class="fas fa-shield-alt me-2"></i>Terms & Conditions and Data Privacy</h2>
+                    <div style="max-height:150px; overflow-y:auto; padding:1rem; background:#fff; border:1px solid #e2e8f0; border-radius:8px; font-size:0.85rem; color:#475569; margin-bottom:1rem; line-height:1.6;">
+                        <p style="margin-bottom:0.75rem;"><strong>Data Privacy Act of 2012 (RA 10173):</strong> I hereby consent to the collection, processing, and storage of my personal data by USAT College Sagay City Inc. for academic, administrative, and legitimate institutional purposes.</p>
+                        <p><strong>Terms and Conditions:</strong> I certify that all information and documents provided in this form are true, correct, and authentic. I understand that any false statement or falsified document will result in the automatic disqualification of my application or dismissal if already enrolled. I agree to abide by the rules and regulations of the institution.</p>
+                    </div>
+                    <label class="d-flex align-items-start gap-3 p-3 rounded" style="background:#fff; border:2px solid #e2e8f0; cursor:pointer; transition: border-color 0.2s;">
+                        <input type="checkbox" name="agree_terms" id="agreeTerms" value="1" style="width:20px; height:20px; margin-top:2px; accent-color:#1e88e5; flex-shrink:0;" required>
+                        <span style="font-weight:600; font-size:0.9rem; color:#1e293b; line-height:1.4;">I have read and agree to the Terms & Conditions and Data Privacy Policy.</span>
+                    </label>
+                </section>
+
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($_SESSION['csrf_token'], ENT_QUOTES, 'UTF-8') ?>">
                 <?php
-                $skip_keys = ['existing_file', 'keep_existing_file', 'camera_data', 'entrance_files', 'csrf_token'];
+                $skip_keys = ['existing_file', 'keep_existing_file', 'camera_data', 'entrance_files', 'csrf_token', 'agree_terms'];
                 foreach ($_POST as $k => $v):
                     if (in_array($k, $skip_keys, true)) continue;
                     if (is_array($v)):
@@ -2634,16 +2638,10 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
                 <button type="submit"
                         class="btn-custom"
                         id="confirmSaveBtn"
-                        <?= $docs_valid ? '' : 'disabled aria-disabled="true"' ?>
-                        <?= $docs_valid ? '' : 'title="Documents must be verified before submitting."' ?>
-                        style="background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;padding:.9rem 2rem;border-radius:50px;font-weight:600;<?= $docs_valid ? '' : 'opacity:0.5;cursor:not-allowed;filter:grayscale(60%);' ?>">
+                        style="background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;padding:.9rem 2rem;border-radius:50px;font-weight:600;opacity:0.5;cursor:not-allowed;filter:grayscale(60%);">
                     <i class="fas fa-save me-2"></i> <?= htmlspecialchars($t[$lang]['confirm_save'], ENT_QUOTES, 'UTF-8') ?>
                 </button>
             </form>
-
-            <?php if (!$docs_valid): ?>
-                <p class="text-center mt-3" style="color:#991b1b;font-weight:600;font-size:0.9rem;"><i class="fas fa-circle-exclamation me-1"></i>Submission is disabled until the documents are corrected.</p>
-            <?php endif; ?>
 
             <div class="text-center mt-3">
                 <a href="enroll_form.php?edit=1" id="editEnrollmentBtn" class="btn-custom" style="background:linear-gradient(135deg,#6c757d,#5a6268);color:#fff;text-decoration:none;padding:.8rem 1.75rem;border-radius:50px;font-weight:600;display:inline-block;cursor:pointer">
@@ -2656,26 +2654,55 @@ $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_AP
         (function(){
             const form = document.getElementById('confirmForm');
             const btn  = document.getElementById('confirmSaveBtn');
-            if (!form || !btn || !btn.disabled) return;
-            form.addEventListener('submit', function(e){
-                e.preventDefault();
-                e.stopPropagation();
-                if (typeof Swal !== 'undefined' && Swal.fire) {
-                    Swal.fire({ icon: 'error', title: 'Documents not verified', html: 'Please go back and re-upload the highlighted documents before submitting.', confirmButtonColor: '#dc3545' }).then(() => setTimeout(ensurePageUnfrozen, 250));
-                } else { alert('Documents must be verified before submitting.'); }
-                return false;
-            }, true);
+            const agreeTerms = document.getElementById('agreeTerms');
+            
+            if (!form || !btn || !agreeTerms) return;
 
-            // Also intercept clicks on the disabled button
-            btn.addEventListener('click', function(e) {
-                e.preventDefault();
-                if (typeof Swal !== 'undefined' && Swal.fire) {
-                    Swal.fire({
-                        icon: 'error',
-                        title: 'Verification Failed',
-                        html: 'The uploaded documents do not match your information.<br><br>Please click <strong>Edit</strong> below and re-upload the correct files.',
-                        confirmButtonColor: '#dc3545'
-                    });
+            const docsValid = <?= $docs_valid ? 'true' : 'false' ?>;
+
+            function updateSubmitBtn() {
+                // Just change visual state, don't disable the button directly
+                if (docsValid && agreeTerms.checked) {
+                    btn.style.opacity = '1';
+                    btn.style.cursor = 'pointer';
+                    btn.style.filter = 'none';
+                    btn.dataset.ready = '1';
+                } else {
+                    btn.style.opacity = '0.5';
+                    btn.style.cursor = 'not-allowed';
+                    btn.style.filter = 'grayscale(60%)';
+                    btn.dataset.ready = '0';
+                }
+            }
+
+            // Listen to checkbox changes
+            agreeTerms.addEventListener('change', updateSubmitBtn);
+            
+            // Initial check on load
+            updateSubmitBtn();
+
+            // Intercept form submit
+            form.addEventListener('submit', function(e) {
+                if (btn.dataset.ready !== '1') {
+                    e.preventDefault(); // Stop submission
+                    
+                    if (typeof Swal !== 'undefined' && Swal.fire) {
+                        if (!docsValid) {
+                            Swal.fire({
+                                icon: 'error',
+                                title: 'Verification Failed',
+                                html: 'The uploaded documents do not match your information.<br><br>Please click <strong>Edit</strong> below and re-upload the correct files.',
+                                confirmButtonColor: '#dc3545'
+                            });
+                        } else if (!agreeTerms.checked) {
+                            Swal.fire({
+                                icon: 'warning',
+                                title: 'Agreement Required',
+                                html: 'You must check the box to agree to the <strong>Terms & Conditions and Data Privacy Policy</strong> before submitting.',
+                                confirmButtonColor: '#d97706'
+                            });
+                        }
+                    }
                 }
             });
         })();

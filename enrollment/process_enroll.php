@@ -62,6 +62,13 @@ if (!isset($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'] ?? '', 
     exit();
 }
 
+/* ── Terms & Conditions Check ─────────────────────────────────── */
+if (empty($_POST['agree_terms']) || $_POST['agree_terms'] !== '1') {
+    $_SESSION['error'] = 'You must agree to the Terms & Conditions and Data Privacy Policy before submitting.';
+    header('Location: enroll_form.php?review=1');
+    exit();
+}
+
 /**
  * Auto-detect types and bind params safely.
  */
@@ -86,7 +93,7 @@ function bind_params(mysqli_stmt $stmt, array $values): void
         };
     }
 
-    // FIX: Pass by reference to prevent "Cannot pass parameter by reference" fatal errors
+    // Pass by reference to prevent "Cannot pass parameter by reference" fatal errors
     $refs = [];
     foreach ($values as $i => $_) {
         $refs[$i] = &$values[$i];

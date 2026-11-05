@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
 require_once __DIR__ . '/../lib/teacher_scope.php';
+require_once __DIR__ . '/../print/render.php';
 
 $__nav_section = 'students';
 
@@ -10,8 +11,9 @@ $__is_teacher = (($_SESSION['admin_role'] ?? '') === 'teacher');
 $__teacher_id = $__is_teacher ? (int)($_SESSION['admin_id'] ?? 0) : 0;
 
 /* ═══ EXPORT MODES ═══ */
-$export_word = isset($_GET['export_word']) && $_GET['export_word'] == 1;
-$export_pdf  = isset($_GET['export_pdf'])  && $_GET['export_pdf']  == 1;
+$export_word  = isset($_GET['export_word']) && $_GET['export_word'] == 1;
+$export_pdf   = isset($_GET['export_pdf'])  && $_GET['export_pdf']  == 1;
+$export_print = isset($_GET['export_print'])&& $_GET['export_print']== 1;
 
 /* ═══ FILTERS ═══ */
 $school_year = trim($_GET['school_year'] ?? '');
@@ -66,7 +68,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_section'])) {
         exit;
     }
 
-    // FIX: Verify the cluster actually exists before touching anything.
     if ($err === '') {
         $verify = $conn->prepare("
             SELECT 1 FROM enrollment_form
@@ -89,7 +90,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_section'])) {
         }
     }
 
-    // Verify new name doesn't already exist in this cluster
     if ($err === '') {
         $chk = $conn->prepare("
             SELECT COUNT(*) AS c FROM enrollment_form
@@ -132,7 +132,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_section'])) {
                 $conn->rollback();
                 $err = 'No records found matching that section and cluster.';
             } else {
-                // FIX: COALESCE on teacher_sections cascade so NULL columns don't skip the row.
                 $cascade = $conn->prepare("
                     UPDATE teacher_sections
                        SET section = ?
@@ -162,7 +161,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_section'])) {
                     ]);
                 }
 
-                $_SESSION['success'] = "Section renamed: \"{$old_name}\" → \"{$new_name}\" ({$affected} record" . ($affected === 1 ? '' : 's') . " updated in the selected cluster).";
+                $_SESSION['success'] = "Section renamed: \"{$old_name}\" → \"{$new_name}\" ({$affected} record" . ($affected === 1 ? '' : "s") . " updated in the selected cluster).";
 
                 if ($show_student_list && $section === $old_name) {
                     $redirect_params['section']     = $new_name;
@@ -372,238 +371,188 @@ if ($program)     $filter_desc[] = "Program: $program";
 if ($section)     $filter_desc[] = "Section: $section";
 $filter_text = $filter_desc ? implode(' · ', $filter_desc) : 'All Records (excl. Graduated & Pending)';
 
-/* ═══ EXPORT BUILDER ═══ */
-if (!function_exists('build_export_html')) {
-    function build_export_html(
-        bool $show_student_list,
-        array $section_result,
-        array $section_clusters,
-        array $students_result,
+// ─── FORMAL DOCUMENT EXPORT (REPLACED) ─────────────────────────────────────
+
+if (!function_exists('build_export_doc')) {
+    function build_export_doc(
+        bool   $show_student_list,
+        array  $section_result,
+        array  $section_clusters,
+        array  $students_result,
         string $filter_text,
         string $sec_title,
-        int $sec_count,
-        int $sec_boys,
-        int $sec_girls,
-        int $stat_total_sections,
-        int $stat_total_students,
-        int $stat_boys,
-        int $stat_girls
-    ): string {
-        $now  = date('F d, Y h:i A');
-        $year = date('Y');
+        int    $sec_count,
+        int    $sec_boys,
+        int    $sec_girls,
+        int    $stat_total_sections,
+        int    $stat_total_students,
+        int    $stat_boys,
+        int    $stat_girls
+    ): array {
+        $ident   = school_identity();
+        $title   = $show_student_list ? 'Section Student Roster' : 'Sections Summary Report';
+        $subtitle = $show_student_list
+            ? ($sec_title !== '' ? $sec_title : 'Section')
+            : ($ident['school'] ?? '');
 
-        $css = "
-            @page { margin: 14mm; }
-            * { box-sizing: border-box; }
-            body { font-family: Arial, Helvetica, sans-serif; margin: 0; color: #1a1a1a; font-size: 11px; line-height: 1.5; }
-            h1 { color: #1e3c72; font-size: 20px; margin: 0 0 4px; letter-spacing: 0.5px; }
-            h2 { color: #2b4c8c; font-size: 15px; margin: 22px 0 8px; border-bottom: 2px solid #2b4c8c; padding-bottom: 5px; }
-            h3 { color: #334155; font-size: 13px; margin: 14px 0 6px; }
-            .header { text-align: center; padding-bottom: 14px; border-bottom: 3px double #1e3c72; margin-bottom: 16px; }
-            .header .sub { font-size: 11px; color: #64748b; margin-top: 3px; }
-            .header .school { font-size: 17px; font-weight: bold; color: #1e3c72; letter-spacing: 1.5px; margin: 5px 0 2px; }
-            .meta { background: #f8fafc; border-left: 4px solid #4f46e5; padding: 9px 14px; margin: 10px 0 16px; font-size: 10.5px; }
-            .meta strong { color: #1e3c72; }
-            table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; page-break-inside: auto; }
-            tr { page-break-inside: avoid; }
-            thead { display: table-header-group; }
-            th { background: #eef2ff; color: #1e3a72; font-size: 10px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; padding: 8px 8px; text-align: left; border-bottom: 2px solid #c7d2fe; }
-            td { padding: 7px 8px; font-size: 10.5px; border-bottom: 1px solid #e5e7eb; }
-            tr:nth-child(even) td { background: #f9fafb; }
-            .num { text-align: center; font-variant-numeric: tabular-nums; }
-            .male { color: #1e40af; font-weight: bold; text-align: center; }
-            .female { color: #be185d; font-weight: bold; text-align: center; }
-            .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; background: #eef2ff; color: #4338ca; font-size: 9.5px; font-weight: bold; }
-            .badge-male { background: #dbeafe; color: #1e40af; }
-            .badge-female { background: #fce7f3; color: #9d174d; }
-            .stats-grid { display: table; width: 100%; margin: 10px 0 18px; border-collapse: separate; border-spacing: 8px 0; }
-            .stat { display: table-cell; background: #f8fafc; border-left: 3px solid #4f46e5; padding: 10px 12px; border-radius: 6px; width: 25%; }
-            .stat .label { font-size: 9px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; font-weight: bold; }
-            .stat .value { font-size: 18px; font-weight: bold; color: #0f172a; margin-top: 2px; }
-            .footer { margin-top: 30px; padding-top: 10px; border-top: 1px dashed #cbd5e0; text-align: center; font-size: 9px; color: #94a3b8; letter-spacing: 0.3px; }
-            .hero { background: #eef2ff; border-left: 4px solid #4f46e5; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
-            .hero h2 { border: none; margin: 0 0 6px; padding: 0; color: #1e3c72; font-size: 16px; }
-            .hero .chips { margin-top: 4px; }
-            .hero .chip { display: inline-block; padding: 2px 9px; border-radius: 20px; background: #fff; color: #4338ca; font-size: 9.5px; font-weight: bold; margin-right: 4px; border: 1px solid #c7d2fe; }
-            .cluster-cell { font-size: 10px; color: #475569; }
-            .cluster-pill { display: inline-block; padding: 1px 7px; border-radius: 12px; background: #f1f5f9; color: #334155; font-size: 9px; margin: 1px 2px 1px 0; border: 1px solid #cbd5e1; }
-            .section-row-cell { font-weight: bold; color: #1e3c72; }
-        ";
+        /* ── Stats strip (Now a real table for Word compatibility) ── */
+        $statsHtml = '<table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin:6pt 0 14pt;"><tr>';
+        if ($show_student_list) {
+            $ratio = $sec_girls > 0 ? round($sec_boys / $sec_girls, 2) . ':1' : '—';
+            $statsHtml .= '<td width="25%" style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt;"><div style="font-size:7.5pt; font-weight:bold; color:#64748b; text-transform:uppercase; letter-spacing:.4pt;">Total Students</div><div style="font-size:14pt; font-weight:bold; color:#0f172a; margin-top:2pt;">' . (int)$sec_count . '</div></td>';
+            $statsHtml .= '<td width="25%" style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt;"><div style="font-size:7.5pt; font-weight:bold; color:#64748b; text-transform:uppercase; letter-spacing:.4pt;">Male</div><div style="font-size:14pt; font-weight:bold; color:#0f172a; margin-top:2pt;">' . (int)$sec_boys . '</div></td>';
+            $statsHtml .= '<td width="25%" style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt;"><div style="font-size:7.5pt; font-weight:bold; color:#64748b; text-transform:uppercase; letter-spacing:.4pt;">Female</div><div style="font-size:14pt; font-weight:bold; color:#0f172a; margin-top:2pt;">' . (int)$sec_girls . '</div></td>';
+            $statsHtml .= '<td width="25%" style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt;"><div style="font-size:7.5pt; font-weight:bold; color:#64748b; text-transform:uppercase; letter-spacing:.4pt;">M / F Ratio</div><div style="font-size:14pt; font-weight:bold; color:#0f172a; margin-top:2pt;">' . htmlspecialchars($ratio) . '</div></td>';
+        } else {
+            $statsHtml .= '<td width="25%" style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt;"><div style="font-size:7.5pt; font-weight:bold; color:#64748b; text-transform:uppercase; letter-spacing:.4pt;">Total Sections</div><div style="font-size:14pt; font-weight:bold; color:#0f172a; margin-top:2pt;">' . (int)$stat_total_sections . '</div></td>';
+            $statsHtml .= '<td width="25%" style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt;"><div style="font-size:7.5pt; font-weight:bold; color:#64748b; text-transform:uppercase; letter-spacing:.4pt;">Total Students</div><div style="font-size:14pt; font-weight:bold; color:#0f172a; margin-top:2pt;">' . (int)$stat_total_students . '</div></td>';
+            $statsHtml .= '<td width="25%" style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt;"><div style="font-size:7.5pt; font-weight:bold; color:#64748b; text-transform:uppercase; letter-spacing:.4pt;">Male</div><div style="font-size:14pt; font-weight:bold; color:#0f172a; margin-top:2pt;">' . (int)$stat_boys . '</div></td>';
+            $statsHtml .= '<td width="25%" style="background:#f8fafc; border-left:3pt solid #1e3a8a; padding:6pt 10pt;"><div style="font-size:7.5pt; font-weight:bold; color:#64748b; text-transform:uppercase; letter-spacing:.4pt;">Female</div><div style="font-size:14pt; font-weight:bold; color:#0f172a; margin-top:2pt;">' . (int)$stat_girls . '</div></td>';
+        }
+        $statsHtml .= '</tr></table>';
 
-        $html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Sections Report</title><style>' . $css . '</style></head><body>';
+        /* ── Filter meta block ── */
+        $metaHtml  = '<div class="meta-block">';
+        $metaHtml .= '<strong>Filters:</strong> ' . htmlspecialchars($filter_text) . '<br>';
+        $metaHtml .= '<strong>Note:</strong> Graduated and Pending students are excluded from this report.';
+        $metaHtml .= '</div>';
 
-        $html .= '<div class="header">';
-        $html .= '<div class="school">USAT COLLEGE SAGAY CITY INC.</div>';
-        $html .= '<h1>' . ($show_student_list ? 'Section Student Roster' : 'Sections Summary Report') . '</h1>';
-        $html .= '<div class="sub">Sagay City, Negros Occidental</div>';
-        $html .= '</div>';
+        /* ── Table header repeat + row-break control for multi-page tables ── */
+        $bodyCss  = '<style>';
+        $bodyCss .= 'table.grid thead { display: table-header-group; }';
+        $bodyCss .= 'table.grid tr { page-break-inside: avoid; mso-row-break: avoid; }';
+        $bodyCss .= 'table.grid td { word-break: break-word; }';
+        $bodyCss .= '</style>';
 
-        $html .= '<div class="meta">';
-        $html .= '<strong>Generated:</strong> ' . htmlspecialchars($now) . ' &nbsp;·&nbsp; ';
-        $html .= '<strong>Filters:</strong> ' . htmlspecialchars($filter_text);
-        $html .= '<br><strong>Note:</strong> Graduated and Pending students are excluded from this report.';
-        $html .= '</div>';
+        $bodyHtml = $bodyCss . $statsHtml . $metaHtml;
 
         if ($show_student_list && !empty($students_result)) {
-            $ratio = $sec_girls > 0 ? round($sec_boys / $sec_girls, 2) . ':1' : '—';
-
-            $html .= '<div class="hero">';
-            $html .= '<h2>' . htmlspecialchars($sec_title) . '</h2>';
-            $html .= '<div class="chips">';
-            $html .= '</div></div>';
-
-            $html .= '<div class="stats-grid">';
-            $html .= '<div class="stat"><div class="label">Total Students</div><div class="value">' . $sec_count . '</div></div>';
-            $html .= '<div class="stat"><div class="label">Male</div><div class="value">' . $sec_boys . '</div></div>';
-            $html .= '<div class="stat"><div class="label">Female</div><div class="value">' . $sec_girls . '</div></div>';
-            $html .= '<div class="stat"><div class="label">M / F Ratio</div><div class="value">' . $ratio . '</div></div>';
-            $html .= '</div>';
-
-            $html .= '<h2>Student Roster</h2>';
-            $html .= '<table><thead><tr>';
-            $html .= '<th style="width:30px">#</th>';
-            $html .= '<th style="width:130px">Student ID</th>';
-            $html .= '<th>Name</th>';
-            $html .= '<th style="width:120px">LRN</th>';
-            $html .= '<th style="width:120px">Grade · SY</th>';
-            $html .= '<th style="width:70px">Sex</th>';
-            $html .= '</tr></thead><tbody>';
+            $bodyHtml .= '<div class="section-title">Student Roster</div>';
+            $bodyHtml .= '<table class="grid"><thead><tr>';
+            $bodyHtml .= '<th style="width:24pt">#</th>';
+            $bodyHtml .= '<th style="width:78pt">Student ID</th>';
+            $bodyHtml .= '<th>Name</th>';
+            $bodyHtml .= '<th style="width:78pt">LRN</th>';
+            $bodyHtml .= '<th style="width:80pt">Grade · SY</th>';
+            $bodyHtml .= '<th style="width:44pt">Sex</th>';
+            $bodyHtml .= '</tr></thead><tbody>';
 
             $i = 1;
             foreach ($students_result as $r) {
                 $name = trim(($r['last_name'] ?? '') . ', ' . ($r['first_name'] ?? '') . ' ' . ($r['middle_name'] ?? ''));
-                $sex_class = $r['sex'] === 'Male' ? 'badge badge-male' : ($r['sex'] === 'Female' ? 'badge badge-female' : 'badge');
                 $cluster_label = trim(($r['grade_level'] ?? '—') . ' · ' . ($r['school_year'] ?? '—'));
-
-                $html .= '<tr>';
-                $html .= '<td class="num">' . $i++ . '</td>';
-                $html .= '<td><strong>' . htmlspecialchars($r['student_id_number'] ?? '—') . '</strong></td>';
-                $html .= '<td>' . htmlspecialchars($name) . '</td>';
-                $html .= '<td>' . htmlspecialchars($r['lrn'] ?? '—') . '</td>';
-                $html .= '<td class="cluster-cell">' . htmlspecialchars($cluster_label) . '</td>';
-                $html .= '<td><span class="' . $sex_class . '">' . htmlspecialchars($r['sex'] ?: '—') . '</span></td>';
-                $html .= '</tr>';
+                $bodyHtml .= '<tr>';
+                $bodyHtml .= '<td class="num">' . $i++ . '</td>';
+                $bodyHtml .= '<td><strong>' . htmlspecialchars($r['student_id_number'] ?? '—') . '</strong></td>';
+                $bodyHtml .= '<td>' . htmlspecialchars($name) . '</td>';
+                $bodyHtml .= '<td>' . htmlspecialchars($r['lrn'] ?? '—') . '</td>';
+                $bodyHtml .= '<td>' . htmlspecialchars($cluster_label) . '</td>';
+                $bodyHtml .= '<td class="num">' . htmlspecialchars($r['sex'] ?? '—') . '</td>';
+                $bodyHtml .= '</tr>';
             }
+            $bodyHtml .= '</tbody></table>';
 
-            $html .= '</tbody></table>';
-        } elseif (!empty($section_result)) {
-            $html .= '<div class="stats-grid">';
-            $html .= '<div class="stat"><div class="label">Total Sections</div><div class="value">' . $stat_total_sections . '</div></div>';
-            $html .= '<div class="stat"><div class="label">Total Students</div><div class="value">' . $stat_total_students . '</div></div>';
-            $html .= '<div class="stat"><div class="label">Male</div><div class="value">' . $stat_boys . '</div></div>';
-            $html .= '<div class="stat"><div class="label">Female</div><div class="value">' . $stat_girls . '</div></div>';
-            $html .= '</div>';
-
-            $html .= '<h2>Sections Summary</h2>';
-            $html .= '<table><thead><tr>';
-            $html .= '<th>Section</th>';
-            $html .= '<th style="width:90px">Grade</th>';
-            $html .= '<th style="width:70px">Total</th>';
-            $html .= '<th style="width:60px">Male</th>';
-            $html .= '<th style="width:60px">Female</th>';
-            $html .= '<th>Clusters (SY · Program)</th>';
-            $html .= '</tr></thead><tbody>';
+        } elseif (!$show_student_list && !empty($section_result)) {
+            $bodyHtml .= '<div class="section-title">Sections Summary</div>';
+            $bodyHtml .= '<table class="grid"><thead><tr>';
+            $bodyHtml .= '<th>Section</th>';
+            $bodyHtml .= '<th style="width:55pt">Grade</th>';
+            $bodyHtml .= '<th style="width:42pt">Total</th>';
+            $bodyHtml .= '<th style="width:42pt">Male</th>';
+            $bodyHtml .= '<th style="width:46pt">Female</th>';
+            $bodyHtml .= '<th style="width:140pt">Clusters (SY · Program)</th>';
+            $bodyHtml .= '</tr></thead><tbody>';
 
             foreach ($section_result as $s) {
-                $clusters = $section_clusters[$s['section'] . '|' . $s['grade_level']] ?? [];
-                $cluster_html = '';
+                $cluster_key = $s['section'] . '|' . $s['grade_level'];
+                $clusters    = $section_clusters[$cluster_key] ?? [];
+                $clusterBits = [];
                 foreach ($clusters as $c) {
                     $label = trim(
                         ($c['school_year'] ?: '—') .
                         ($c['program'] !== '' ? ' · ' . $c['program'] : '')
                     );
-                    $cluster_html .= '<span class="cluster-pill">' . htmlspecialchars($label) . ' (' . (int)$c['total'] . ')</span>';
+                    $clusterBits[] = htmlspecialchars($label) . ' (' . (int)$c['total'] . ')';
                 }
 
-                $html .= '<tr>';
-                $html .= '<td class="section-row-cell">' . htmlspecialchars($s['section']) . '</td>';
-                $html .= '<td class="cluster-cell">' . htmlspecialchars($s['grade_level'] ?: '—') . '</td>';
-                $html .= '<td class="num"><strong>' . (int)$s['total'] . '</strong></td>';
-                $html .= '<td class="male">' . (int)$s['boys'] . '</td>';
-                $html .= '<td class="female">' . (int)$s['girls'] . '</td>';
-                $html .= '<td class="cluster-cell">' . ($cluster_html ?: '—') . '</td>';
-                $html .= '</tr>';
+                $bodyHtml .= '<tr>';
+                $bodyHtml .= '<td><strong>' . htmlspecialchars($s['section']) . '</strong></td>';
+                $bodyHtml .= '<td>' . htmlspecialchars($s['grade_level'] ?: '—') . '</td>';
+                $bodyHtml .= '<td class="num"><strong>' . (int)$s['total'] . '</strong></td>';
+                $bodyHtml .= '<td class="num">' . (int)$s['boys'] . '</td>';
+                $bodyHtml .= '<td class="num">' . (int)$s['girls'] . '</td>';
+                $bodyHtml .= '<td style="font-size:8.5pt">' . ($clusterBits ? implode('<br>', $clusterBits) : '—') . '</td>';
+                $bodyHtml .= '</tr>';
             }
-
-            $html .= '</tbody></table>';
+            $bodyHtml .= '</tbody></table>';
         } else {
-            $html .= '<p style="text-align:center;color:#94a3b8;font-style:italic;padding:40px 0">No data available for the selected filters.</p>';
+            $bodyHtml .= '<p style="text-align:center;color:#94a3b8;font-style:italic;padding:40pt 0;">No data available for the selected filters.</p>';
         }
 
-        $html .= '<div class="footer">End of Report &nbsp;·&nbsp; USAT College Sagay City Inc. &nbsp;·&nbsp; © ' . $year . '</div>';
-        $html .= '</body></html>';
+        /* ── Signatories — pull from config/school.php, fall back to blank lines ── */
+        $signatories = [];
+        $reg  = $ident['signatories']['registrar'] ?? [];
+        $head = $ident['signatories']['principal'] ?? [];
 
-        return $html;
+        if (!empty($reg['name']) || !empty($reg['position'])) {
+            $signatories[] = [
+                'name'     => $reg['name']     ?? '',
+                'position' => $reg['position'] ?? 'University Registrar',
+                'label'    => 'Prepared by',
+            ];
+        }
+        if (!empty($head['name']) || !empty($head['position'])) {
+            $signatories[] = [
+                'name'     => $head['name']     ?? '',
+                'position' => $head['position'] ?? 'School President',
+                'label'    => 'Approved by',
+            ];
+        }
+
+        return [
+            'title'       => $title,
+            'subtitle'    => $subtitle,
+            'paper'       => 'A4',
+            'body'        => $bodyHtml,
+            'signatories' => $signatories,
+            'control_no'  => 'SEC-' . date('Ymd-His'),
+            'copy_label'  => $show_student_list ? 'Registrar Copy' : 'Official Report',
+        ];
     }
 }
 
-/* ═══ WORD EXPORT ═══ */
-if ($export_word) {
+/* ═══ EXPORT HANDLERS ═══ */
+if ($export_word || $export_pdf || $export_print) {
     while (ob_get_level()) ob_end_clean();
 
-    $html = build_export_html(
-        $show_student_list, $section_result ?? [], $section_clusters ?? [], $students_result ?? [],
-        $filter_text, $sec_title, $sec_count, $sec_boys, $sec_girls,
-        $stat_total_sections, $stat_total_students, $stat_boys, $stat_girls
+    $doc = build_export_doc(
+        $show_student_list,
+        $section_result ?? [],
+        $section_clusters ?? [],
+        $students_result ?? [],
+        $filter_text,
+        $sec_title,
+        $sec_count,
+        $sec_boys,
+        $sec_girls,
+        $stat_total_sections,
+        $stat_total_students,
+        $stat_boys,
+        $stat_girls
     );
 
-    $filename = 'USAT_Sections_' . ($show_student_list ? preg_replace('/[^A-Za-z0-9_-]/', '_', $sec_title) : 'Summary') . '_' . date('Y-m-d') . '.doc';
+    $filename = 'USAT_Sections_' . ($show_student_list ? preg_replace('/[^A-Za-z0-9_-]/', '_', $sec_title) : 'Summary') . '_' . date('Y-m-d');
 
-    header('Content-Type: application/msword; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="' . $filename . '"');
-    header('Cache-Control: no-cache, must-revalidate');
-    header('Pragma: no-cache');
-
-    echo "\xEF\xBB\xBF";
-    echo str_replace('<!DOCTYPE html>', '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">', $html);
-    exit;
+    if ($export_word) {
+        output_document_word($doc, $filename . '.doc');
+    } elseif ($export_pdf) {
+        output_document_pdf($doc, $filename . '.pdf');
+    } elseif ($export_print) {
+        output_document_print($doc);
+    }
 }
 
-/* ═══ PDF EXPORT ═══ */
-if ($export_pdf) {
-    while (ob_get_level()) ob_end_clean();
-
-    $html = build_export_html(
-        $show_student_list, $section_result ?? [], $section_clusters ?? [], $students_result ?? [],
-        $filter_text, $sec_title, $sec_count, $sec_boys, $sec_girls,
-        $stat_total_sections, $stat_total_students, $stat_boys, $stat_girls
-    );
-
-    $autoload = __DIR__ . '/../../vendor/autoload.php';
-
-    if (!is_file($autoload)) {
-        header('Content-Type: text/html; charset=UTF-8');
-        echo '<div style="font-family:Arial;padding:1rem;background:#fee2e2;color:#991b1b;border-left:4px solid #dc2626;border-radius:8px">';
-        echo '<strong>PDF library not installed.</strong> Run <code>composer require dompdf/dompdf</code> in the project root.';
-        echo '</div>';
-        exit;
-    }
-
-    require_once $autoload;
-
-    if (!class_exists('Dompdf\\Dompdf')) {
-        header('Content-Type: text/html; charset=UTF-8');
-        echo '<div style="font-family:Arial;padding:1rem;background:#fee2e2;color:#991b1b;border-left:4px solid #dc2626;border-radius:8px">';
-        echo '<strong>Dompdf class not found.</strong> Run <code>composer dump-autoload</code>.';
-        echo '</div>';
-        exit;
-    }
-
-    $options = new \Dompdf\Options();
-    $options->set('isRemoteEnabled', false);
-    $options->set('isHtml5ParserEnabled', true);
-    $options->set('defaultFont', 'DejaVu Sans');
-    $options->set('dpi', 120);
-
-    $dompdf = new \Dompdf\Dompdf($options);
-    $dompdf->setPaper('A4', 'portrait');
-    $dompdf->loadHtml($html, 'UTF-8');
-    $dompdf->render();
-
-    $filename = 'USAT_Sections_' . ($show_student_list ? preg_replace('/[^A-Za-z0-9_-]/', '_', $sec_title) : 'Summary') . '_' . date('Y-m-d') . '.pdf';
-    $dompdf->stream($filename, ['Attachment' => true]);
-    exit;
-}
+// ─── END FORMAL DOCUMENT EXPORT ────────────────────────────────────────────
 
 /* ═══ HELPERS FOR RENDER ═══ */
 if (!function_exists('_cluster_chip_label')) {
@@ -842,9 +791,10 @@ require __DIR__ . '/../partials/sidebar.php';
                     </li>
                     <li><hr class="dropdown-divider"></li>
                     <li>
-                        <a class="dropdown-item" href="#" onclick="window.print();return false;">
+                        <?php $wp_print = ['export_print'=>1,'school_year'=>$school_year,'grade_level'=>$grade_level,'program'=>$program,'section'=>$section]; ?>
+                        <a class="dropdown-item" href="?<?= http_build_query(array_filter($wp_print)) ?>" target="_blank">
                             <i class="bi bi-printer text-secondary"></i>
-                            Print
+                            Print Formal Document
                             <span class="ext-hint">Ctrl+P</span>
                         </a>
                     </li>
@@ -1335,7 +1285,6 @@ require __DIR__ . '/../partials/sidebar.php';
     const clusterSelect = document.getElementById('rs_cluster');
     const warningText = document.getElementById('rs_warning_text');
 
-    // FIX: Auto-open when arriving via "?open_rename=1" from the summary table pencil button.
     if (new URLSearchParams(location.search).get('open_rename') === '1') {
         new bootstrap.Modal(modalEl).show();
     }
