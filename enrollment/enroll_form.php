@@ -537,18 +537,26 @@ if (isset($_GET['action'])) {
    VALIDATION RULES
    ========================================================= */
 $errors = [];
+
+/* ── Canonical enums (single source of truth for the whole request) ── */
+$ALLOWED_GRADE_LEVELS = ['Grade 11', 'Grade 12'];
+$ALLOWED_TERMS        = ['1st Term', '2nd Term', '3rd Term'];
+$ALLOWED_SEX          = ['Male', 'Female'];
+$ALLOWED_IS_4PS       = ['0', '1'];
+
 $fields = [
-    'lrn' => ['required' => true, 'pattern' => '/^\d{12}$/', 'msg' => 'invalid_lrn'],
-    'last_name'  => ['required' => true, 'pattern' => "/^[A-Za-zÀ-ÿ\s\-'.]{2,}$/u", 'msg' => 'invalid_name'],
-    'first_name' => ['required' => true, 'pattern' => "/^[A-Za-zÀ-ÿ\s\-'.]{2,}$/u", 'msg' => 'invalid_name'],
-    'sex' => ['required' => true],
-    'birth_date' => ['required' => true],
+    'lrn'         => ['required' => true,  'pattern' => '/^\d{12}$/',                 'msg' => 'invalid_lrn'],
+    'last_name'   => ['required' => true,  'pattern' => "/^[A-Za-zÀ-ÿ\s\-'.]{2,}$/u", 'msg' => 'invalid_name'],
+    'first_name'  => ['required' => true,  'pattern' => "/^[A-Za-zÀ-ÿ\s\-'.]{2,}$/u", 'msg' => 'invalid_name'],
+    'middle_name' => ['required' => false, 'pattern' => "/^[A-Za-zÀ-ÿ\s\-'.]{2,}$/u", 'msg' => 'invalid_name'],
+    'sex'         => ['required' => true],
+    'birth_date'  => ['required' => true],
     'school_year' => ['required' => true],
     'grade_level' => ['required' => true],
-    'term' => ['required' => true],
-    'strand' => ['required' => true],
-    'program' => ['required' => true],
-    'is_4ps' => ['required' => true]
+    'term'        => ['required' => true],
+    'strand'      => ['required' => true],
+    'program'     => ['required' => true],
+    'is_4ps'      => ['required' => true],
 ];
 
 const HEIGHT_MIN = 100;
@@ -674,6 +682,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_POST['lrn'] = preg_replace('/\D/', '', (string)$_POST['lrn']);
     }
 
+    /* ── Per-field required + pattern ── */
     foreach ($fields as $f => $rules) {
         $val = $_POST[$f] ?? '';
         if ($f === 'is_4ps') {
@@ -683,6 +692,74 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($rules['required'] && empty($val)) $errors[$f] = $t[$lang]['required'];
             elseif (!empty($val) && isset($rules['pattern']) && !preg_match($rules['pattern'], $val)) $errors[$f] = $t[$lang][$rules['msg']];
         }
+    }
+
+    /* ── Enum: grade_level ── */
+    if (empty($errors['grade_level']) && !in_array($_POST['grade_level'] ?? '', $ALLOWED_GRADE_LEVELS, true)) {
+        $errors['grade_level'] = 'Grade level must be Grade 11 or Grade 12.';
+    }
+
+    /* ── Enum: term ── */
+    if (empty($errors['term']) && !in_array($_POST['term'] ?? '', $ALLOWED_TERMS, true)) {
+        $errors['term'] = 'Term must be 1st Term, 2nd Term, or 3rd Term.';
+    }
+
+    /* ── Enum: sex ── */
+    if (empty($errors['sex']) && !in_array($_POST['sex'] ?? '', $ALLOWED_SEX, true)) {
+        $errors['sex'] = 'Please select a valid sex.';
+    }
+
+    /* ── Enum: is_4ps ── */
+    if (empty($errors['is_4ps']) && !in_array((string)($_POST['is_4ps'] ?? ''), $ALLOWED_IS_4PS, true)) {
+        $errors['is_4ps'] = 'Please answer the CCT/4Ps question.';
+    }
+
+    /* ── Strand ↔ Program pairing ── */
+    if (empty($errors['strand']) && empty($errors['program'])) {
+        $strand_v  = trim((string)($_POST['strand']  ?? ''));
+        $program_v = trim((string)($_POST['program'] ?? ''));
+        if (!isset($STRAND_PROGRAMS[$strand_v])) {
+            $errors['strand'] = 'Invalid strand selection.';
+        } elseif (!in_array($program_v, $STRAND_PROGRAMS[$strand_v], true)) {
+            $errors['program'] = 'Selected program does not belong to the chosen strand.';
+        }
+    }
+
+    /* ── School year format + consecutive years ── */
+    if (empty($errors['school_year'])) {
+        $sy_v = trim((string)($_POST['school_year'] ?? ''));
+        if (!preg_match('/^(\d{4})-(\d{4})$/', $sy_v, $m_sy)) {
+            $errors['school_year'] = 'School year must be in YYYY-YYYY format.';
+        } elseif ((int)$m_sy[2] !== (int)$m_sy[1] + 1) {
+            $errors['school_year'] = 'School year must span consecutive years.';
+        }
+    }
+
+    /* ── Optional enums (only validate if non-empty) ── */
+    if (!empty($_POST['civil_status']) && !in_array((string)$_POST['civil_status'], $CIVIL_STATUS_OPTIONS, true)) {
+        $errors['civil_status'] = 'Invalid civil status.';
+    }
+    if (!empty($_POST['nationality']) && !in_array((string)$_POST['nationality'], $NATIONALITY_OPTIONS, true)) {
+        $errors['nationality'] = 'Invalid nationality.';
+    }
+
+    /* ── Previous strand/program pairing (transferee) ── */
+    if (!empty($_POST['previous_strand'])) {
+        $ps = trim((string)$_POST['previous_strand']);
+        if (!isset($STRAND_PROGRAMS[$ps])) {
+            $errors['previous_strand'] = 'Invalid previous strand.';
+        } elseif (!empty($_POST['previous_program'])) {
+            $pp = trim((string)$_POST['previous_program']);
+            if (!in_array($pp, $STRAND_PROGRAMS[$ps], true)) {
+                $errors['previous_program'] = 'Previous program does not belong to the previous strand.';
+            }
+        }
+    }
+
+    /* ── Voucher status (transferee) ── */
+    if (isset($_POST['voucher_qualified']) && $_POST['voucher_qualified'] !== ''
+        && !in_array((string)$_POST['voucher_qualified'], ['0', '1'], true)) {
+        $errors['voucher_qualified'] = 'Invalid voucher status.';
     }
 
     if (($_POST['religion'] ?? '') === '__other__') {
@@ -701,10 +778,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (!empty($_POST['birth_date'])) {
-        $birth = DateTime::createFromFormat('Y-m-d', (string)$_POST['birth_date']);
-        if (!$birth) $errors['birth_date'] = $t[$lang]['required'];
-        else {
-            $age = (new DateTime())->diff($birth)->y;
+        $bd_raw = (string)$_POST['birth_date'];
+        $birth  = DateTime::createFromFormat('Y-m-d', $bd_raw);
+        $now    = new DateTime();
+        if (!$birth || $birth->format('Y-m-d') !== $bd_raw) {
+            $errors['birth_date'] = 'Invalid birth date.';
+        } elseif ($birth > $now) {
+            $errors['birth_date'] = 'Birth date cannot be in the future.';
+        } else {
+            $age = $now->diff($birth)->y;
             if ($age < 14 || $age > 25) $errors['birth_date'] = $t[$lang]['invalid_age'];
             $_POST['age'] = (string)$age;
         }

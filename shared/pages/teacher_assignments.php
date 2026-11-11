@@ -16,6 +16,33 @@ if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true))
 $flash = $_SESSION['ta_flash'] ?? null;
 unset($_SESSION['ta_flash']);
 
+/* ═══ COLUMN LIMITS ═══
+   Keep in sync with the teacher_sections schema. If you widen the columns,
+   update both the ALTER TABLE migration and these constants. */
+const TA_SECTION_MAXLEN = 255;
+const TA_GRADE_MAXLEN   = 64;
+const TA_SY_MAXLEN      = 20;
+const TA_PROGRAM_MAXLEN = 128;
+
+/* ═══ HELPER: dashboard URL without trusting Host header ═══ */
+if (!function_exists('ta_dashboard_url')) {
+    function ta_dashboard_url(): string {
+        // Preferred: a configured absolute base URL, e.g.
+        //   define('APP_BASE_URL', 'https://usat.example.edu');
+        if (defined('APP_BASE_URL') && APP_BASE_URL !== '') {
+            return rtrim(APP_BASE_URL, '/') . '/dashboard.php';
+        }
+        // Fallback: SERVER_NAME comes from web-server config, not the Host header.
+        $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host   = $_SERVER['SERVER_NAME'] ?? 'localhost';
+        $port   = $_SERVER['SERVER_PORT'] ?? '';
+        if ($port !== '' && !(($scheme === 'http' && $port === '80') || ($scheme === 'https' && $port === '443'))) {
+            $host .= ':' . $port;
+        }
+        return $scheme . '://' . $host . URL_PREFIX . '/dashboard.php';
+    }
+}
+
 /* ═══ HELPER: FLATTEN LOGO TO TEMP FILE FOR CID ATTACHMENT ═══ */
 if (!function_exists('create_email_logo_temp')) {
     function create_email_logo_temp(string $dir): ?string {
@@ -24,7 +51,10 @@ if (!function_exists('create_email_logo_temp')) {
         $files = glob($dir . 'usat.*');
         if (empty($files)) return null;
 
+        // Prefer the newest logo rather than an arbitrary filesystem pick.
+        usort($files, static fn($a, $b) => @filemtime($b) <=> @filemtime($a));
         $path = $files[0];
+
         $info = @getimagesize($path);
         if (!$info) return null;
 
@@ -47,16 +77,25 @@ if (!function_exists('create_email_logo_temp')) {
         $new_im = imagecreatetruecolor($new_w, $new_h);
         $white = imagecolorallocate($new_im, 255, 255, 255);
         imagefill($new_im, 0, 0, $white);
-
         imagecopyresampled($new_im, $im, 0, 0, 0, 0, $new_w, $new_h, $w, $h);
 
-        $temp = tempnam(sys_get_temp_dir(), 'email_logo_') . '.jpg';
-        imagejpeg($new_im, $temp, 90);
+        // tempnam() already created the extensionless file; remove it so
+        // imagejpeg() writes a fresh .jpg and we don't leak the original.
+        $temp = tempnam(sys_get_temp_dir(), 'email_logo_');
+        if ($temp === false) {
+            imagedestroy($im);
+            imagedestroy($new_im);
+            return null;
+        }
+        @unlink($temp);
+        $temp .= '.jpg';
+
+        $ok = imagejpeg($new_im, $temp, 90);
 
         imagedestroy($im);
         imagedestroy($new_im);
 
-        return $temp;
+        return $ok ? $temp : null;
     }
 }
 
@@ -72,52 +111,73 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
     $is_advisory = isset($_POST['is_advisory']) ? 1 : 0;
 
     $err = '';
-    if ($teacher_id <= 0)                $err = 'Pick a teacher.';
-    elseif ($section === '' || $grade === '' || $sy === '')
-                                          $err = 'Section, grade, and school year are required.';
+    if ($teacher_id <= 0) {
+        $err = 'Pick a teacher.';
+    } elseif ($section === '' || $grade === '' || $sy === '') {
+        $err = 'Section, grade, and school year are required.';
+    } elseif (mb_strlen($section) > TA_SECTION_MAXLEN) {
+        $err = 'Section name is too long.';
+    } elseif (mb_strlen($grade) > TA_GRADE_MAXLEN) {
+        $err = 'Grade level is too long.';
+    } elseif (mb_strlen($sy) > TA_SY_MAXLEN) {
+        $err = 'School year is too long.';
+    } elseif (mb_strlen($program) > TA_PROGRAM_MAXLEN) {
+        $err = 'Program name is too long.';
+    }
 
+    $teacher_data = null;
     if ($err === '') {
-        $chk = $conn->prepare("SELECT fullname, email, role FROM admins WHERE admin_id = ? LIMIT 1");
-        if (!$chk) {
-            $err = 'System error.';
-        } else {
+        try {
+            $chk = $conn->prepare("SELECT fullname, email, role FROM admins WHERE admin_id = ? LIMIT 1");
             $chk->bind_param('i', $teacher_id);
             $chk->execute();
             $teacher_data = $chk->get_result()->fetch_assoc();
             $chk->close();
+        } catch (\mysqli_sql_exception $e) {
+            error_log('teacher.assign lookup failed: ' . $e->getMessage());
+            $teacher_data = null;
+        }
 
-            if (!$teacher_data) {
-                $err = 'Teacher not found.';
-            } elseif ($teacher_data['role'] !== 'teacher') {
-                $err = 'Selected user is not a teacher.';
-            }
+        if (!$teacher_data) {
+            $err = 'Teacher not found.';
+        } elseif ($teacher_data['role'] !== 'teacher') {
+            $err = 'Selected user is not a teacher.';
         }
     }
 
+    $is_new_assignment = false;
     if ($err === '') {
-        // If making this teacher advisory, remove advisory status from any other teacher in this exact cluster
-        if ($is_advisory) {
-            $clear = $conn->prepare("UPDATE teacher_sections SET is_advisory = 0 WHERE section = ? AND grade_level = ? AND school_year = ? AND program = ? AND teacher_id != ?");
-            if ($clear) {
+        $actor = (int)($_SESSION['admin_id'] ?? 0);
+        try {
+            $conn->begin_transaction();
+
+            // Advisory clear and insert share one transaction so a failed
+            // insert never leaves the cluster without an advisory teacher.
+            // This is still check-then-act against a concurrent session; for a
+            // hard invariant add a unique key on
+            // (section, grade_level, school_year, program) filtered on is_advisory=1.
+            if ($is_advisory) {
+                $clear = $conn->prepare("
+                    UPDATE teacher_sections
+                       SET is_advisory = 0
+                     WHERE section = ? AND grade_level = ? AND school_year = ?
+                       AND COALESCE(program,'') = ? AND teacher_id != ?
+                ");
                 $clear->bind_param('ssssi', $section, $grade, $sy, $program, $teacher_id);
                 $clear->execute();
                 $clear->close();
             }
-        }
 
-        $ins = $conn->prepare("
-            INSERT INTO teacher_sections
-                (teacher_id, section, grade_level, school_year, program, is_advisory, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE is_advisory = VALUES(is_advisory), created_by = VALUES(created_by)
-        ");
-        if (!$ins) {
-            $err = 'System error.';
-        } else {
-            $actor = (int)($_SESSION['admin_id'] ?? 0);
+            $ins = $conn->prepare("
+                INSERT INTO teacher_sections
+                    (teacher_id, section, grade_level, school_year, program, is_advisory, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE is_advisory = VALUES(is_advisory), created_by = VALUES(created_by)
+            ");
             $ins->bind_param('issssii', $teacher_id, $section, $grade, $sy, $program, $is_advisory, $actor);
             $ins->execute();
-
+            // affected_rows: 1 = inserted, 2 = updated, 0 = matched unchanged.
+            // Only brand-new inserts trigger the notification email.
             $is_new_assignment = ($ins->affected_rows === 1);
             $ins->close();
 
@@ -128,135 +188,138 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
                 'grade'       => $grade,
                 'sy'          => $sy,
                 'program'     => $program,
-                'is_advisory' => $is_advisory
+                'is_advisory' => $is_advisory,
             ]);
 
-            $email_note = '';
-
-            if ($is_new_assignment && !empty($teacher_data['email']) && filter_var($teacher_data['email'], FILTER_VALIDATE_EMAIL)) {
-                try {
-                    $subject = "[USAT] New Class Assignment: {$section} ({$grade})";
-
-                    $prog_html = $program !== '' ? htmlspecialchars($program) : 'N/A';
-                    $teacher_name = htmlspecialchars($teacher_data['fullname']);
-                    $section_safe = htmlspecialchars($section);
-                    $grade_safe = htmlspecialchars($grade);
-                    $sy_safe = htmlspecialchars($sy);
-
-                    $dashboard_url = "http://" . ($_SERVER['HTTP_HOST'] ?? 'localhost') . URL_PREFIX . "/dashboard.php";
-
-                    $temp_logo = create_email_logo_temp(__DIR__ . '/../../assets/img/');
-                    $logo_html = '';
-                    if ($temp_logo) {
-                        $logo_html = '<img src="cid:usat_logo" width="100" height="auto" alt="USAT Logo" style="display:block;margin:0 auto 15px;border-radius:50%;border:3px solid #ffffff;background:#ffffff;box-shadow:0 4px 6px rgba(0,0,0,0.1);object-fit:contain;">';
-                    }
-
-                    $advisory_badge = '';
-                    if ($is_advisory) {
-                        $advisory_badge = '<div style="background:#fef3c7;color:#b45309;padding:10px;border-radius:6px;font-weight:bold;text-align:center;margin-bottom:20px;border:1px solid #fcd34d;">⭐ You have been assigned as the ADVISORY teacher for this section.</div>';
-                    }
-
-                    $html = <<<HTML
-                    <!DOCTYPE html>
-                    <html>
-                    <head><meta charset="UTF-8"></head>
-                    <body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Arial,sans-serif;color:#1e293b;">
-                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:40px 12px;">
-                    <tr><td align="center">
-                        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 4px 20px rgba(15,23,42,.08);border:1px solid #e2e8f0;">
-
-                            <tr><td style="background:#1e3a8a;padding:30px;text-align:center;color:#ffffff;border-bottom:4px solid #fbbf24;">
-                                {$logo_html}
-                                <div style="font-size:12px;letter-spacing:2px;text-transform:uppercase;opacity:.9;font-weight:600;margin-bottom:8px">USAT College Sagay City</div>
-                                <div style="font-family:Georgia,serif;font-size:24px;font-weight:bold;margin-top:4px;">New Class Assignment</div>
-                            </td></tr>
-
-                            <tr><td style="padding:40px 40px 30px;">
-                                <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">Dear <strong>{$teacher_name}</strong>,</p>
-                                <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#334155;">
-                                    You have been assigned to handle a new section for this academic term. Please review the details below and visit your dashboard to manage your students.
-                                </p>
-
-                                {$advisory_badge}
-
-                                <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;margin-bottom:30px;">
-                                    <tr><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#475569;font-weight:600;width:35%;">Section</td><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-weight:700;font-size:16px;">{$section_safe}</td></tr>
-                                    <tr><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#475569;font-weight:600;">Grade Level</td><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-weight:600;">{$grade_safe}</td></tr>
-                                    <tr><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#475569;font-weight:600;">School Year</td><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-weight:600;">{$sy_safe}</td></tr>
-                                    <tr><td style="padding:16px;color:#475569;font-weight:600;">Program</td><td style="padding:16px;color:#0f172a;font-weight:600;">{$prog_html}</td></tr>
-                                </table>
-
-                                <table width="100%" cellpadding="0" cellspacing="0">
-                                    <tr><td align="center">
-                                        <a href="{$dashboard_url}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:14px 30px;border-radius:6px;font-weight:bold;font-size:15px;">Go to My Dashboard</a>
-                                    </td></tr>
-                                </table>
-
-                                <p style="margin:30px 0 0;font-size:12px;color:#64748b;text-align:center;line-height:1.5;">
-                                    If you believe this is an error, please contact the Registrar's Office immediately.
-                                </p>
-                            </td></tr>
-
-                            <tr><td style="background:#f8fafc;padding:20px 40px;text-align:center;font-size:11px;color:#64748b;border-top:1px solid #e2e8f0;">
-                                This is an automated message from the USAT Enrollment System.<br>
-                                &copy; 2026 USAT College Sagay City Inc.
-                            </td></tr>
-                        </table>
-                    </td></tr>
-                    </table>
-                    </body>
-                    </html>
-                    HTML;
-
-                    [$mail, $buildErr] = mailer_build();
-                    $out = ['ok' => false, 'error' => null];
-
-                    if ($mail === null) {
-                        $out['error'] = $buildErr;
-                    } else {
-                        $mail->addAddress($teacher_data['email']);
-                        $mail->isHTML(true);
-                        $mail->Subject = $subject;
-                        $mail->Body    = $html;
-                        $mail->AltBody = strip_tags(str_replace(['<br>', '<br/>', '<br />', '</p>', '</tr>', '</h2>', '</div>'], "\n", $html));
-                        $mail->addCustomHeader('X-Entity-Ref-ID', uniqid('usat_', true));
-
-                        if ($temp_logo) {
-                            $mail->addEmbeddedImage($temp_logo, 'usat_logo');
-                        }
-
-                        try {
-                            $mail->send();
-                            $out['ok'] = true;
-                        } catch (\Throwable $e) {
-                            $out['error'] = $mail->ErrorInfo ?: $e->getMessage();
-                        }
-                    }
-
-                    if ($temp_logo && is_file($temp_logo)) {
-                        @unlink($temp_logo);
-                    }
-
-                    if (!$out['ok']) {
-                        error_log("Teacher assignment email failed: " . ($out['error'] ?? 'unknown'));
-                        $email_note = " (Warning: Email failed to send.)";
-                    } else {
-                        $email_note = " A notification email was sent to {$teacher_data['email']}.";
-                    }
-
-                } catch (Throwable $e) {
-                    error_log("Teacher assignment email exception: " . $e->getMessage());
-                    $email_note = " (Warning: Email exception occurred.)";
-                }
-            } elseif ($is_new_assignment) {
-                $email_note = " (No valid email on file — teacher was not notified.)";
-            }
-
-            $_SESSION['ta_flash'] = ['type' => 'success', 'msg' => 'Assignment saved.' . $email_note];
+            $conn->commit();
+        } catch (\mysqli_sql_exception $e) {
+            try { $conn->rollback(); } catch (\Throwable $_) {}
+            error_log('teacher.section_assign failed: ' . $e->getMessage());
+            $err = 'Could not save the assignment. Please try again.';
+        } catch (\Throwable $e) {
+            try { $conn->rollback(); } catch (\Throwable $_) {}
+            error_log('teacher.section_assign unexpected: ' . $e->getMessage());
+            $err = 'Could not save the assignment. Please try again.';
         }
     }
 
-    if ($err !== '') {
+    // Email is sent only after commit. A mail failure never rolls back the DB
+    // write; it just downgrades the flash message to a warning.
+    $email_note = '';
+    if ($err === '' && $is_new_assignment && !empty($teacher_data['email'])
+        && filter_var($teacher_data['email'], FILTER_VALIDATE_EMAIL)) {
+        $temp_logo = null;
+        try {
+            $subject = "[USAT] New Class Assignment: {$section} ({$grade})";
+
+            $prog_html     = $program !== '' ? htmlspecialchars($program) : 'N/A';
+            $teacher_name  = htmlspecialchars($teacher_data['fullname']);
+            $section_safe  = htmlspecialchars($section);
+            $grade_safe    = htmlspecialchars($grade);
+            $sy_safe       = htmlspecialchars($sy);
+            $dashboard_url = htmlspecialchars(ta_dashboard_url(), ENT_QUOTES);
+
+            $temp_logo = create_email_logo_temp(__DIR__ . '/../../assets/img/');
+            $logo_html = '';
+            if ($temp_logo) {
+                $logo_html = '<img src="cid:usat_logo" width="100" height="auto" alt="USAT Logo" style="display:block;margin:0 auto 15px;border-radius:50%;border:3px solid #ffffff;background:#ffffff;box-shadow:0 4px 6px rgba(0,0,0,0.1);object-fit:contain;">';
+            }
+
+            $advisory_badge = '';
+            if ($is_advisory) {
+                $advisory_badge = '<div style="background:#fef3c7;color:#b45309;padding:10px;border-radius:6px;font-weight:bold;text-align:center;margin-bottom:20px;border:1px solid #fcd34d;">⭐ You have been assigned as the ADVISORY teacher for this section.</div>';
+            }
+
+            $html = <<<HTML
+            <!DOCTYPE html>
+            <html>
+            <head><meta charset="UTF-8"></head>
+            <body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Arial,sans-serif;color:#1e293b;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:40px 12px;">
+            <tr><td align="center">
+                <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 4px 20px rgba(15,23,42,.08);border:1px solid #e2e8f0;">
+
+                    <tr><td style="background:#1e3a8a;padding:30px;text-align:center;color:#ffffff;border-bottom:4px solid #fbbf24;">
+                        {$logo_html}
+                        <div style="font-size:12px;letter-spacing:2px;text-transform:uppercase;opacity:.9;font-weight:600;margin-bottom:8px">USAT College Sagay City</div>
+                        <div style="font-family:Georgia,serif;font-size:24px;font-weight:bold;margin-top:4px;">New Class Assignment</div>
+                    </td></tr>
+
+                    <tr><td style="padding:40px 40px 30px;">
+                        <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">Dear <strong>{$teacher_name}</strong>,</p>
+                        <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#334155;">
+                            You have been assigned to handle a new section for this academic term. Please review the details below and visit your dashboard to manage your students.
+                        </p>
+
+                        {$advisory_badge}
+
+                        <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;margin-bottom:30px;">
+                            <tr><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#475569;font-weight:600;width:35%;">Section</td><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-weight:700;font-size:16px;">{$section_safe}</td></tr>
+                            <tr><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#475569;font-weight:600;">Grade Level</td><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-weight:600;">{$grade_safe}</td></tr>
+                            <tr><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#475569;font-weight:600;">School Year</td><td style="padding:16px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-weight:600;">{$sy_safe}</td></tr>
+                            <tr><td style="padding:16px;color:#475569;font-weight:600;">Program</td><td style="padding:16px;color:#0f172a;font-weight:600;">{$prog_html}</td></tr>
+                        </table>
+
+                        <table width="100%" cellpadding="0" cellspacing="0">
+                            <tr><td align="center">
+                                <a href="{$dashboard_url}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:14px 30px;border-radius:6px;font-weight:bold;font-size:15px;">Go to My Dashboard</a>
+                            </td></tr>
+                        </table>
+
+                        <p style="margin:30px 0 0;font-size:12px;color:#64748b;text-align:center;line-height:1.5;">
+                            If you believe this is an error, please contact the Registrar's Office immediately.
+                        </p>
+                    </td></tr>
+
+                    <tr><td style="background:#f8fafc;padding:20px 40px;text-align:center;font-size:11px;color:#64748b;border-top:1px solid #e2e8f0;">
+                        This is an automated message from the USAT Enrollment System.<br>
+                        &copy; 2026 USAT College Sagay City Inc.
+                    </td></tr>
+                </table>
+            </td></tr>
+            </table>
+            </body>
+            </html>
+            HTML;
+
+            [$mail, $buildErr] = mailer_build();
+            if ($mail === null) {
+                throw new \RuntimeException($buildErr ?: 'mailer_build() returned null');
+            }
+
+            $mail->addAddress($teacher_data['email']);
+            $mail->isHTML(true);
+            $mail->Subject = $subject;
+            $mail->Body    = $html;
+            $mail->AltBody = strip_tags(str_replace(['<br>', '<br/>', '<br />', '</p>', '</tr>', '</h2>', '</div>'], "\n", $html));
+            $mail->addCustomHeader('X-Entity-Ref-ID', uniqid('usat_', true));
+
+            if ($temp_logo) {
+                $mail->addEmbeddedImage($temp_logo, 'usat_logo');
+            }
+
+            // PHPMailer only throws when ExceptionMode is on; check the return
+            // value so a silent send failure is not reported as success.
+            if (!$mail->send()) {
+                throw new \RuntimeException($mail->ErrorInfo ?: 'send() returned false');
+            }
+
+            $email_note = " A notification email was sent to {$teacher_data['email']}.";
+        } catch (\Throwable $e) {
+            error_log('Teacher assignment email failed: ' . $e->getMessage());
+            $email_note = ' (Warning: Email failed to send.)';
+        } finally {
+            if ($temp_logo && is_file($temp_logo)) {
+                @unlink($temp_logo);
+            }
+        }
+    } elseif ($err === '' && $is_new_assignment) {
+        $email_note = ' (No valid email on file — teacher was not notified.)';
+    }
+
+    if ($err === '') {
+        $_SESSION['ta_flash'] = ['type' => 'success', 'msg' => 'Assignment saved.' . $email_note];
+    } else {
         $_SESSION['ta_flash'] = ['type' => 'error', 'msg' => $err];
     }
 
@@ -270,58 +333,80 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['unassign'])) {
     $id = (int)($_POST['id'] ?? 0);
 
     if ($id > 0) {
-        $del = $conn->prepare("DELETE FROM teacher_sections WHERE assignment_id = ?");
-        if ($del) {
+        try {
+            $del = $conn->prepare("DELETE FROM teacher_sections WHERE assignment_id = ?");
             $del->bind_param('i', $id);
             $del->execute();
+            $deleted = $del->affected_rows;
             $del->close();
-            audit_log($conn, 'teacher.section_unassign', [
-                'type' => 'teacher_section',
-                'id'   => $id,
-            ]);
-            $_SESSION['ta_flash'] = ['type' => 'success', 'msg' => 'Assignment removed.'];
-        } else {
-            $_SESSION['ta_flash'] = ['type' => 'error', 'msg' => 'System error.'];
+
+            if ($deleted > 0) {
+                audit_log($conn, 'teacher.section_unassign', [
+                    'type' => 'teacher_section',
+                    'id'   => $id,
+                ]);
+                $_SESSION['ta_flash'] = ['type' => 'success', 'msg' => 'Assignment removed.'];
+            } else {
+                $_SESSION['ta_flash'] = ['type' => 'error', 'msg' => 'Assignment not found.'];
+            }
+        } catch (\mysqli_sql_exception $e) {
+            error_log('teacher.section_unassign failed: ' . $e->getMessage());
+            $_SESSION['ta_flash'] = ['type' => 'error', 'msg' => 'Could not remove the assignment. Please try again.'];
         }
     }
     header('Location: ' . URL_PREFIX . '/teacher_assignments.php');
     exit;
 }
 
-/* ═══ PAGINATION LOGIC ═══ */
-$page = max(1, (int)($_GET['page'] ?? 1));
+/* ═══ PAGINATION + DATA ═══ */
+$page  = max(1, (int)($_GET['page'] ?? 1));
 $limit = 10;
-$offset = ($page - 1) * $limit;
 
-$total_assignments = (int)$conn->query("SELECT COUNT(*) FROM teacher_sections")->fetch_row()[0];
-$total_pages = max(1, (int)ceil($total_assignments / $limit));
-$page = min($page, $total_pages);
-$offset = ($page - 1) * $limit;
+$total_assignments = 0;
+$total_pages       = 1;
+$offset            = 0;
+$teachers          = [];
+$assignments       = [];
+$clusters          = [];
 
-/* ═══ DATA ═══ */
-$teachers = $conn->query("
-    SELECT admin_id, fullname, username, email
-      FROM admins
-     WHERE role = 'teacher'
-     ORDER BY fullname
-")->fetch_all(MYSQLI_ASSOC);
+try {
+    $total_assignments = (int)($conn->query("SELECT COUNT(*) FROM teacher_sections")->fetch_row()[0] ?? 0);
+    $total_pages       = max(1, (int)ceil($total_assignments / $limit));
+    $page              = min($page, $total_pages);
+    $offset            = ($page - 1) * $limit;
 
-$assignments = $conn->query("
-    SELECT ts.assignment_id, ts.teacher_id, ts.section, ts.grade_level, ts.school_year, ts.program, ts.is_advisory,
-           a.fullname AS teacher_name, a.username
-      FROM teacher_sections ts
-      JOIN admins a ON a.admin_id = ts.teacher_id
-     ORDER BY a.fullname ASC, ts.grade_level ASC, ts.section ASC
-     LIMIT $limit OFFSET $offset
-")->fetch_all(MYSQLI_ASSOC);
+    $teachers = $conn->query("
+        SELECT admin_id, fullname, username, email
+          FROM admins
+         WHERE role = 'teacher'
+         ORDER BY fullname
+    ")->fetch_all(MYSQLI_ASSOC);
 
-$clusters = $conn->query("
-    SELECT DISTINCT section, grade_level, school_year, COALESCE(program,'') AS program
-      FROM enrollment_form
-     WHERE section IS NOT NULL AND section <> ''
-       AND COALESCE(status,'Active') NOT IN ('Graduated','Pending')
-     ORDER BY school_year DESC, grade_level ASC, section ASC
-")->fetch_all(MYSQLI_ASSOC);
+    $assignments = $conn->query("
+        SELECT ts.assignment_id, ts.teacher_id, ts.section, ts.grade_level, ts.school_year, ts.program, ts.is_advisory,
+               a.fullname AS teacher_name, a.username
+          FROM teacher_sections ts
+          JOIN admins a ON a.admin_id = ts.teacher_id
+         ORDER BY a.fullname ASC, ts.grade_level ASC, ts.section ASC
+         LIMIT $limit OFFSET $offset
+    ")->fetch_all(MYSQLI_ASSOC);
+
+    $clusters = $conn->query("
+        SELECT DISTINCT section, grade_level, school_year, COALESCE(program,'') AS program
+          FROM enrollment_form
+         WHERE section IS NOT NULL AND section <> ''
+           AND COALESCE(status,'Active') NOT IN ('Graduated','Pending')
+         ORDER BY school_year DESC, grade_level ASC, section ASC
+    ")->fetch_all(MYSQLI_ASSOC);
+} catch (\mysqli_sql_exception $e) {
+    error_log('teacher_assignments load failed: ' . $e->getMessage());
+    $flash = ['type' => 'error', 'msg' => 'Could not load assignments right now. Please try again shortly.'];
+    $teachers = $assignments = $clusters = [];
+    $total_assignments = 0;
+    $total_pages = 1;
+    $offset = 0;
+    $page = 1;
+}
 
 $page_title = 'Teacher Assignments • USAT Admin';
 $page_css = <<<'CSS'
@@ -524,7 +609,7 @@ require __DIR__ . '/../partials/sidebar.php';
 
                         <?php
                         $start_page = max(1, $page - 2);
-                        $end_page = min($total_pages, $page + 2);
+                        $end_page   = min($total_pages, $page + 2);
                         for ($i = $start_page; $i <= $end_page; $i++):
                         ?>
                             <a href="?page=<?= $i ?>" class="page-btn <?= $i === $page ? 'active' : '' ?>"><?= $i ?></a>

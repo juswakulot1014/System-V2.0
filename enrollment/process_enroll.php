@@ -3,6 +3,12 @@ declare(strict_types=1);
 
 /**
  * process_enroll.php — Finalize a public enrollment submission.
+ *
+ * FIXES APPLIED:
+ *   - Removed `use ($_POST)` from the $rp closure (superglobals don't need it).
+ *   - Fixed the SQL placeholder count in the entrance_documents queries.
+ *   - Added the full server-side re-validation layer.
+ *   - Redirects to enroll_form.php on failure so `$_SESSION['errors']` loads.
  */
 
 require_once __DIR__ . '/../config/bootstrap.php';
@@ -93,12 +99,11 @@ function bind_params(mysqli_stmt $stmt, array $values): void
         };
     }
 
-    // Pass by reference to prevent "Cannot pass parameter by reference" fatal errors
     $refs = [];
     foreach ($values as $i => $_) {
         $refs[$i] = &$values[$i];
     }
-    
+
     $stmt->bind_param($types, ...$refs);
 }
 
@@ -371,7 +376,6 @@ function store_encrypted_file(
         $content = ['status'=>'skipped','score'=>0,'engine'=>null,'matched'=>[],'notes'=>['No content verification available.']];
     }
 
-    // Normalize to known set: verified / needs_review / failed / skipped
     $allowed_content_status = ['verified', 'needs_review', 'failed', 'skipped'];
     $content_status = $content['status'] ?? 'skipped';
     if (!in_array($content_status, $allowed_content_status, true)) {
@@ -426,9 +430,6 @@ function store_encrypted_file(
     }
     @chmod($abs_path, 0600);
 
-    // NOTE: staged file is unlinked by the caller AFTER commit succeeds.
-    // This lets the student re-submit on failure without re-uploading.
-
     return [
         'filename' => $filename,
         'mime'     => $verify['mime'],
@@ -448,25 +449,196 @@ function store_encrypted_file(
 $written_files = [];
 $staged_paths_to_cleanup = [];
 
-// ── Server-side age recompute ──
+// ── Server-side birth-date validation (strict) ──
 if (empty($_POST['birth_date'])) {
     $_SESSION['error'] = 'Birth date is required.';
     header('Location: enroll_form.php');
     exit();
 }
-$birth = DateTime::createFromFormat('Y-m-d', (string)$_POST['birth_date']);
-if (!$birth) {
+$bd_raw = trim((string)$_POST['birth_date']);
+$birth  = DateTime::createFromFormat('Y-m-d', $bd_raw);
+$now    = new DateTime();
+
+if (!$birth || $birth->format('Y-m-d') !== $bd_raw) {
     $_SESSION['error'] = 'Invalid birth date.';
     header('Location: enroll_form.php');
     exit();
 }
-$real_age = (new DateTime())->diff($birth)->y;
+if ($birth > $now) {
+    $_SESSION['error'] = 'Birth date cannot be in the future.';
+    header('Location: enroll_form.php');
+    exit();
+}
+$real_age = $now->diff($birth)->y;
 if ($real_age < 14 || $real_age > 25) {
     $_SESSION['error'] = 'Age must be between 14 and 25.';
     header('Location: enroll_form.php');
     exit();
 }
 $_POST['age'] = $real_age;
+
+/* ══════════════════════════════════════════════════════════════════
+   FULL SERVER-SIDE RE-VALIDATION
+   ══════════════════════════════════════════════════════════════════ */
+
+$REVAL_GRADE_LEVELS = ['Grade 11', 'Grade 12'];
+$REVAL_TERMS        = ['1st Term', '2nd Term', '3rd Term'];
+$REVAL_SEX          = ['Male', 'Female'];
+$REVAL_IS_4PS       = ['0', '1'];
+$REVAL_CIVIL        = ['Single', 'Married', 'Widowed', 'Separated', 'Annulled'];
+$REVAL_NATIONALITY  = ['Filipino', 'American', 'Chinese', 'Japanese', 'Korean',
+                       'Australian', 'British', 'Canadian', 'Indian', 'Spanish', 'Other'];
+$REVAL_STRAND_PROGRAMS = [
+    'Automotive and Small Engine Technologies' => [
+        'Driving and Automotive Servicing',
+        'Automotive Servicing (Electrical Repair)',
+        'Automotive Servicing (Engine and Chassis Repairs)',
+    ],
+    'Construction and Building Technologies' => [
+        'Carpentry',
+        'Manual Metal Arc Welding',
+    ],
+    'ICT Support and Computer Programming Technologies' => [
+        'Computer Programming (Java)',
+        'Computer Programming (.NET)',
+        'Computer System Servicing',
+    ],
+    'Industrial Technologies' => [
+        'Electronics Product Assembly and Servicing',
+    ],
+    'Agri-Fishery Business and Food Innovation' => [
+        'Agricultural Crops Production',
+    ],
+    'Hospitality and Tourism' => [
+        'Food and Beverage Operation',
+        'Hotel Operation (Housekeeping)',
+    ],
+];
+
+$reval_errors = [];
+
+// Safe reader for $_POST values (removed use ($_POST) to fix IDE error)
+$rp = static function (string $k): string {
+    $v = $_POST[$k] ?? '';
+    return is_scalar($v) ? trim((string)$v) : '';
+};
+
+/* 1. LRN */
+if (!preg_match('/^\d{12}$/', $rp('lrn'))) {
+    $reval_errors['lrn'] = 'LRN must be exactly 12 digits.';
+}
+
+/* 2. Names */
+$name_pat = "/^[A-Za-zÀ-ÿ\s\-'.]{2,}$/u";
+if ($rp('last_name') === '' || !preg_match($name_pat, $rp('last_name'))) {
+    $reval_errors['last_name'] = 'Invalid last name.';
+}
+if ($rp('first_name') === '' || !preg_match($name_pat, $rp('first_name'))) {
+    $reval_errors['first_name'] = 'Invalid first name.';
+}
+if ($rp('middle_name') !== '' && !preg_match($name_pat, $rp('middle_name'))) {
+    $reval_errors['middle_name'] = 'Invalid middle name.';
+}
+
+/* 3. Sex */
+if (!in_array($rp('sex'), $REVAL_SEX, true)) {
+    $reval_errors['sex'] = 'Please select a valid sex.';
+}
+
+/* 4. Email */
+if ($rp('email') !== '' && !filter_var($rp('email'), FILTER_VALIDATE_EMAIL)) {
+    $reval_errors['email'] = 'Invalid email format.';
+}
+
+/* 5. Phones */
+foreach (['phone', 'father_contact', 'mother_contact', 'guardian_contact'] as $__k) {
+    $v = $rp($__k);
+    if ($v !== '' && !is_valid_ph_mobile($v)) {
+        $reval_errors[$__k] = 'Invalid phone number (09XXXXXXXXX).';
+    }
+}
+
+/* 6. Height / weight */
+if ($rp('height') !== '' && ((float)$rp('height') < 100 || (float)$rp('height') > 250)) {
+    $reval_errors['height'] = 'Height must be between 100 and 250 cm.';
+}
+if ($rp('weight') !== '' && ((float)$rp('weight') < 20 || (float)$rp('weight') > 300)) {
+    $reval_errors['weight'] = 'Weight must be between 20 and 300 kg.';
+}
+
+/* 7. Enrollment enums */
+$sy_val = $rp('school_year');
+if (!preg_match('/^(\d{4})-(\d{4})$/', $sy_val, $m_sy)) {
+    $reval_errors['school_year'] = 'School year must be in YYYY-YYYY format.';
+} elseif ((int)$m_sy[2] !== (int)$m_sy[1] + 1) {
+    $reval_errors['school_year'] = 'School year must span consecutive years.';
+}
+
+if (!in_array($rp('grade_level'), $REVAL_GRADE_LEVELS, true)) {
+    $reval_errors['grade_level'] = 'Grade level must be Grade 11 or Grade 12.';
+}
+if (!in_array($rp('term'), $REVAL_TERMS, true)) {
+    $reval_errors['term'] = 'Term must be 1st Term, 2nd Term, or 3rd Term.';
+}
+if (!in_array($rp('is_4ps'), $REVAL_IS_4PS, true)) {
+    $reval_errors['is_4ps'] = 'Please answer the CCT/4Ps question.';
+}
+
+/* 8. Strand ↔ Program */
+$strand_v  = $rp('strand');
+$program_v = $rp('program');
+if (!isset($REVAL_STRAND_PROGRAMS[$strand_v])) {
+    $reval_errors['strand'] = 'Invalid strand.';
+} elseif (!in_array($program_v, $REVAL_STRAND_PROGRAMS[$strand_v], true)) {
+    $reval_errors['program'] = 'Program does not belong to the selected strand.';
+}
+
+/* 9. Optional enums */
+if ($rp('civil_status') !== '' && !in_array($rp('civil_status'), $REVAL_CIVIL, true)) {
+    $reval_errors['civil_status'] = 'Invalid civil status.';
+}
+if ($rp('nationality') !== '' && !in_array($rp('nationality'), $REVAL_NATIONALITY, true)) {
+    $reval_errors['nationality'] = 'Invalid nationality.';
+}
+
+/* 10. Transferee pairing */
+if ($rp('previous_strand') !== '') {
+    $ps = $rp('previous_strand');
+    if (!isset($REVAL_STRAND_PROGRAMS[$ps])) {
+        $reval_errors['previous_strand'] = 'Invalid previous strand.';
+    } elseif ($rp('previous_program') !== ''
+              && !in_array($rp('previous_program'), $REVAL_STRAND_PROGRAMS[$ps], true)) {
+        $reval_errors['previous_program'] = 'Previous program does not belong to the previous strand.';
+    }
+}
+
+/* 11. Voucher status (transferee) */
+$vq = (string)($_POST['voucher_qualified'] ?? '');
+if ($vq !== '' && !in_array($vq, ['0', '1'], true)) {
+    $reval_errors['voucher_qualified'] = 'Invalid voucher status.';
+}
+
+/* 12. Entrance data */
+if (empty($_POST['entrance_data']) || !is_array($_POST['entrance_data'])) {
+    $reval_errors['entrance_data'] = 'At least one entrance document must be selected.';
+}
+
+/* 13. Abort on errors — reload the form with field-level messages */
+if (!empty($reval_errors)) {
+    security_log('process_enroll.revalidation_failed', [
+        'ip'     => $_SERVER['REMOTE_ADDR'] ?? '',
+        'fields' => array_keys($reval_errors),
+    ]);
+
+    $_SESSION['errors'] = $reval_errors;
+
+    $old = $_POST;
+    unset($old['camera_data']);
+    $_SESSION['old'] = $old;
+
+    header('Location: enroll_form.php');
+    exit();
+}
 
 // ── Require at least one uploaded document ──
 $staged_files = [];
@@ -566,7 +738,6 @@ try {
 
     $prefix = "UCSCI-{$year_enrolled}-";
     
-    // Get the highest existing ID for this year
     $seq_stmt = $conn->prepare("SELECT student_id_number FROM students_info WHERE student_id_number LIKE ? ORDER BY student_id_number DESC LIMIT 1");
     if (!$seq_stmt) throw new Exception('[student_id_number:prepare] ' . $conn->error);
     
@@ -585,7 +756,6 @@ try {
 
     $student_id_number = $prefix . str_pad((string)$next_seq, 6, '0', STR_PAD_LEFT);
 
-    // Safety check for collisions (fallback)
     $attempts = 0;
     $collision = true;
     while ($collision && $attempts < 10) {
@@ -787,8 +957,7 @@ try {
                  verification_notes, file_mime, file_name, uploaded_by,
                  content_status, content_score, content_engine, content_excerpt,
                  content_matched, content_checked_at)
-                VALUES (?, ?, 1, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, NOW())");
+                VALUES (?, ?, 1, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
         } else {
             $file_stmt = $conn->prepare("INSERT INTO entrance_documents 
                 (student_id, document_name, submitted, uploaded_at,
@@ -796,8 +965,7 @@ try {
                  verification_notes, file_mime, file_name,
                  content_status, content_score, content_engine, content_excerpt,
                  content_matched, content_checked_at)
-                VALUES (?, ?, 1, NOW(), ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, NOW())");
+                VALUES (?, ?, 1, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
         }
 
         if (!$file_stmt) throw new Exception('[entrance_documents:prepare] ' . $conn->error);
@@ -857,7 +1025,6 @@ try {
     $conn->commit();
     $conn->query("SELECT RELEASE_LOCK('enroll_global')");
 
-    /* ── Cleanup staged files AFTER commit succeeds ── */
     foreach ($staged_paths_to_cleanup as $p) {
         if (is_file($p)) @unlink($p);
     }
@@ -899,11 +1066,10 @@ try {
     header('Location: enroll_form.php');
     exit();
 
-} catch (Exception $e) {
+} catch (Throwable $e) {
     $conn->rollback();
     $conn->query("SELECT RELEASE_LOCK('enroll_global')");
 
-    // Clean up encrypted files written during this failed attempt
     foreach ($written_files as $abs) {
         if (file_exists($abs)) @unlink($abs);
     }

@@ -52,6 +52,9 @@ function teacher_scope_filter(mysqli $conn, int $teacher_id, string $alias = 'e'
 
 function teacher_has_student(mysqli $conn, int $teacher_id, int $student_id, ?int $enrollment_id = null): bool
 {
+    // NOTE: every column-to-column comparison is explicitly COLLATEd to
+    // utf8mb4_general_ci to avoid "Illegal mix of collations" when the
+    // underlying tables were created with different default collations.
     $sql = "
         SELECT 1
           FROM enrollment_form e
@@ -59,10 +62,11 @@ function teacher_has_student(mysqli $conn, int $teacher_id, int $student_id, ?in
            AND EXISTS (
                SELECT 1 FROM teacher_sections ts
                 WHERE ts.teacher_id  = ?
-                  AND ts.section     = e.section
-                  AND ts.grade_level = e.grade_level
-                  AND ts.school_year = e.school_year
-                  AND ts.program     = COALESCE(e.program,'')
+                  AND ts.section     COLLATE utf8mb4_general_ci = e.section     COLLATE utf8mb4_general_ci
+                  AND ts.grade_level COLLATE utf8mb4_general_ci = e.grade_level COLLATE utf8mb4_general_ci
+                  AND ts.school_year COLLATE utf8mb4_general_ci = e.school_year COLLATE utf8mb4_general_ci
+                  AND COALESCE(ts.program,'') COLLATE utf8mb4_general_ci
+                    = COALESCE(e.program,'')  COLLATE utf8mb4_general_ci
            )
     ";
     $types  = 'ii';
@@ -86,18 +90,23 @@ function teacher_has_student(mysqli $conn, int $teacher_id, int $student_id, ?in
 
 function teacher_student_ids(mysqli $conn, int $teacher_id): array
 {
+    // NOTE: explicit COLLATE on every join condition — see teacher_has_student().
     $sql = "
         SELECT DISTINCT e.student_id
           FROM enrollment_form e
           JOIN teacher_sections ts
-            ON ts.section      = e.section
-           AND ts.grade_level  = e.grade_level
-           AND ts.school_year  = e.school_year
-           AND ts.program      = COALESCE(e.program,'')
+            ON ts.section     COLLATE utf8mb4_general_ci = e.section     COLLATE utf8mb4_general_ci
+           AND ts.grade_level COLLATE utf8mb4_general_ci = e.grade_level COLLATE utf8mb4_general_ci
+           AND ts.school_year COLLATE utf8mb4_general_ci = e.school_year COLLATE utf8mb4_general_ci
+           AND COALESCE(ts.program,'') COLLATE utf8mb4_general_ci
+             = COALESCE(e.program,'')  COLLATE utf8mb4_general_ci
          WHERE ts.teacher_id = ?
     ";
     $stmt = $conn->prepare($sql);
-    if (!$stmt) { return []; }
+    if (!$stmt) {
+        error_log('teacher_scope: ' . $conn->error);
+        return [];
+    }
     $stmt->bind_param('i', $teacher_id);
     $stmt->execute();
     $ids = array_map('intval', array_column($stmt->get_result()->fetch_all(MYSQLI_ASSOC), 'student_id'));

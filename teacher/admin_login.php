@@ -4,6 +4,6 @@
 
 // FIXED: Allow registrar, superadmin, and teacher to log in here.
 $LOGIN_ROLE     = ['registrar', 'superadmin', 'teacher'];
-$LOGIN_REDIRECT = 'dashboard.php';
+$LOGIN_REDIRECT = 'teacher_dashboard.php';
 
 require __DIR__ . '/../shared/auth/login_page.php';
