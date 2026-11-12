@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS `audit_log` (
   CONSTRAINT `audit_log_chk_1` CHECK (json_valid(`meta`))
 ) ENGINE=InnoDB AUTO_INCREMENT=703 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
--- Dumping data for table enrollment_profiling_db.audit_log: ~541 rows (approximately)
+-- Dumping data for table enrollment_profiling_db.audit_log: ~541 rows 
 DELETE FROM `audit_log`;
 INSERT INTO `audit_log` (`audit_id`, `admin_id`, `action`, `target_type`, `target_id`, `ip_address`, `user_agent`, `meta`, `created_at`) VALUES
 	(68, 1, 'admin.login', 'admin', 1, '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36', '{"type":"admin","id":1}', '2026-09-28 11:19:23'),
