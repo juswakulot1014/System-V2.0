@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
 require_once __DIR__ . '/../../config/security.php';
+require_once __DIR__ . '/../lib/view_toggle.php';
 
 $__nav_section = 'grading';
 
@@ -460,7 +461,8 @@ require __DIR__ . '/../partials/sidebar.php';
                 <p class="sub">Advance Grade 11 to Grade 12, or mark Grade 12 as Graduated</p>
             </div>
         </div>
-        <div class="d-flex gap-2 align-items-center">
+        <div class="d-flex gap-2 align-items-center flex-wrap">
+            <?= view_toggle('promote_stats', 'grid') ?>
             <a href="<?= URL_PREFIX ?>/graduates.php" class="btn btn-outline-secondary btn-sm">
                 <i class="bi bi-mortarboard me-1"></i> View Graduates
             </a>
@@ -561,6 +563,7 @@ require __DIR__ . '/../partials/sidebar.php';
         </a>
     </nav>
 
+    <div class="<?= view_container_class('promote_stats', 'grid') ?>">
     <div class="stat-grid">
         <div class="stat-card">
             <div class="stat-icon"><i class="bi bi-people-fill"></i></div>
@@ -591,6 +594,7 @@ require __DIR__ . '/../partials/sidebar.php';
             </div>
         </div>
     </div>
+    </div><!-- /view-container -->
 
     <form method="POST" id="promoteForm">
         <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">

@@ -3,6 +3,8 @@
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
 require_once __DIR__ . '/../lib/teacher_scope.php';
+require_once __DIR__ . '/../lib/dir_view.php';
+require_once __DIR__ . '/../lib/card_helper.php';
 require_once __DIR__ . '/../print/render.php';
 
 $__nav_section = 'students';
@@ -22,6 +24,10 @@ $program     = trim($_GET['program'] ?? '');
 $section     = trim($_GET['section'] ?? '');
 
 $show_student_list = !empty($section);
+
+/* ═══ VIEW MODE ═══ */
+$__view_sections = dir_view('sections');
+$__view_roster   = dir_view('section_roster');
 
 /* ═══ ROLE / CSRF ═══ */
 $can_edit_section = in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true);
@@ -306,7 +312,7 @@ if (!$show_student_list) {
     $cstmt->close();
 }
 
-/* ═══ Dropdowns (scoped for teachers) ═══ */
+/* ═══ Dropdowns ═══ */
 if ($__is_teacher) {
     $ts = teacher_scope_filter($conn, $__teacher_id, 'enrollment_form');
 
@@ -371,8 +377,7 @@ if ($program)     $filter_desc[] = "Program: $program";
 if ($section)     $filter_desc[] = "Section: $section";
 $filter_text = $filter_desc ? implode(' · ', $filter_desc) : 'All Records (excl. Graduated & Pending)';
 
-// ─── FORMAL DOCUMENT EXPORT (REPLACED) ─────────────────────────────────────
-
+// ─── FORMAL DOCUMENT EXPORT ─────────────────────────────────────
 if (!function_exists('build_export_doc')) {
     function build_export_doc(
         bool   $show_student_list,
@@ -395,7 +400,6 @@ if (!function_exists('build_export_doc')) {
             ? ($sec_title !== '' ? $sec_title : 'Section')
             : ($ident['school'] ?? '');
 
-        /* ── Stats strip (Now a real table for Word compatibility) ── */
         $statsHtml = '<table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin:6pt 0 14pt;"><tr>';
         if ($show_student_list) {
             $ratio = $sec_girls > 0 ? round($sec_boys / $sec_girls, 2) . ':1' : '—';
@@ -411,13 +415,11 @@ if (!function_exists('build_export_doc')) {
         }
         $statsHtml .= '</tr></table>';
 
-        /* ── Filter meta block ── */
         $metaHtml  = '<div class="meta-block">';
         $metaHtml .= '<strong>Filters:</strong> ' . htmlspecialchars($filter_text) . '<br>';
         $metaHtml .= '<strong>Note:</strong> Graduated and Pending students are excluded from this report.';
         $metaHtml .= '</div>';
 
-        /* ── Table header repeat + row-break control for multi-page tables ── */
         $bodyCss  = '<style>';
         $bodyCss .= 'table.grid thead { display: table-header-group; }';
         $bodyCss .= 'table.grid tr { page-break-inside: avoid; mso-row-break: avoid; }';
@@ -489,7 +491,6 @@ if (!function_exists('build_export_doc')) {
             $bodyHtml .= '<p style="text-align:center;color:#94a3b8;font-style:italic;padding:40pt 0;">No data available for the selected filters.</p>';
         }
 
-        /* ── Signatories — pull from config/school.php, fall back to blank lines ── */
         $signatories = [];
         $reg  = $ident['signatories']['registrar'] ?? [];
         $head = $ident['signatories']['principal'] ?? [];
@@ -552,8 +553,6 @@ if ($export_word || $export_pdf || $export_print) {
     }
 }
 
-// ─── END FORMAL DOCUMENT EXPORT ────────────────────────────────────────────
-
 /* ═══ HELPERS FOR RENDER ═══ */
 if (!function_exists('_cluster_chip_label')) {
     function _cluster_chip_label(array $c): string {
@@ -569,7 +568,6 @@ if (!function_exists('_cluster_chip_label')) {
 $page_title = ($show_student_list ? 'Section Students' : 'Sections') . ' • USAT Admin';
 
 $page_css = <<<'CSS'
-    /* Section rows (clickable) */
     .section-row { cursor: pointer; transition: background .15s ease; }
     .section-row:hover td { background: color-mix(in srgb, var(--accent) 6%, var(--surface)) !important; }
     .section-row:active td { background: color-mix(in srgb, var(--accent) 10%, var(--surface)) !important; }
@@ -583,7 +581,6 @@ $page_css = <<<'CSS'
     .section-total{font-size:.72rem;color:var(--text-2);margin-top:.15rem}
     .section-total strong{color:var(--text);font-weight:700}
 
-    /* Cluster chips */
     .cluster-chips { display: flex; flex-wrap: wrap; gap: .3rem; }
     .cluster-chip {
         display: inline-flex; align-items: center; gap: .35rem;
@@ -631,7 +628,6 @@ $page_css = <<<'CSS'
         border: 1px dashed var(--border);
     }
 
-    /* Hero */
     .section-hero{
         display:flex;align-items:center;gap:1.25rem;padding:1.5rem 1.75rem;
         background:linear-gradient(135deg,#5b54e8 0%, #7c78f0 100%);
@@ -676,7 +672,6 @@ $page_css = <<<'CSS'
     .export-dropdown .dropdown-item i{width:20px;text-align:center;font-size:1rem}
     .export-dropdown .dropdown-item .ext-hint{font-size:.72rem;color:var(--text-2);margin-left:auto}
 
-    /* Rename modal */
     .rename-modal .modal-content{border-radius:var(--radius-lg);border:none;overflow:hidden;box-shadow:0 24px 64px -12px rgba(0,0,0,.35)}
     .rename-modal .modal-header{background:linear-gradient(135deg,var(--amber),#d97706);color:#fff;border-bottom:none;padding:1.15rem 1.35rem}
     .rename-modal .modal-header .modal-title{font-size:.95rem;font-weight:700;display:flex;align-items:center;gap:.5rem}
@@ -934,63 +929,97 @@ require __DIR__ . '/../partials/sidebar.php';
                         <i class="bi bi-people"></i> Student Roster
                         <span class="cell-muted" style="font-weight:500;font-size:.85rem">(<?= number_format($sec_count) ?>)</span>
                     </h3>
+                    <?= dir_view_toggle($__view_roster) ?>
                 </div>
-                <div class="card-body no-padding">
-                    <div class="table-scroll">
-                        <table class="table-admin">
-                            <thead>
-                                <tr>
-                                    <th style="width:44px">#</th>
-                                    <th style="width:180px">Student ID</th>
-                                    <th>Name</th>
-                                    <th style="width:160px">LRN</th>
-                                    <th style="width:180px">Grade · SY</th>
-                                    <th style="width:110px">Sex</th>
-                                    <th style="width:90px;text-align:right">Action</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php $i = 1; foreach($students_result as $r):
-                                    $name = trim($r['last_name'].', '.$r['first_name'].' '.($r['middle_name']??''));
-                                    $initials = strtoupper(substr($r['first_name'] ?? '', 0, 1) . substr($r['last_name'] ?? '', 0, 1));
-                                ?>
-                                <tr class="clickable" onclick="window.location='<?= URL_PREFIX ?>/view_student.php?id=<?= (int)$r['student_id'] ?>'">
-                                    <td class="cell-muted"><?= $i++ ?></td>
-                                    <td class="cell-strong"><?= htmlspecialchars($r['student_id_number'] ?? '—') ?></td>
-                                    <td>
-                                        <div class="student-cell">
-                                            <div class="student-avatar"><?= htmlspecialchars($initials) ?></div>
-                                            <div class="student-info">
-                                                <div class="student-name"><?= htmlspecialchars($name) ?></div>
-                                                <div class="student-meta"><?= htmlspecialchars($r['ext_name'] ?? '') ?></div>
+                <div class="card-body no-padding <?= dir_view_class($__view_roster) ?>" data-page-key="section_roster">
+                    <div class="dir-table-wrap">
+                        <div class="table-scroll">
+                            <table class="table-admin">
+                                <thead>
+                                    <tr>
+                                        <th style="width:44px">#</th>
+                                        <th style="width:180px">Student ID</th>
+                                        <th>Name</th>
+                                        <th style="width:160px">LRN</th>
+                                        <th style="width:180px">Grade · SY</th>
+                                        <th style="width:110px">Sex</th>
+                                        <th style="width:90px;text-align:right">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php $i = 1; foreach($students_result as $r):
+                                        $name = trim($r['last_name'].', '.$r['first_name'].' '.($r['middle_name']??''));
+                                        $initials = strtoupper(substr($r['first_name'] ?? '', 0, 1) . substr($r['last_name'] ?? '', 0, 1));
+                                    ?>
+                                    <tr class="clickable" onclick="window.location='<?= URL_PREFIX ?>/view_student.php?id=<?= (int)$r['student_id'] ?>'">
+                                        <td class="cell-muted"><?= $i++ ?></td>
+                                        <td class="cell-strong"><?= htmlspecialchars($r['student_id_number'] ?? '—') ?></td>
+                                        <td>
+                                            <div class="student-cell">
+                                                <div class="student-avatar"><?= htmlspecialchars($initials) ?></div>
+                                                <div class="student-info">
+                                                    <div class="student-name"><?= htmlspecialchars($name) ?></div>
+                                                    <div class="student-meta"><?= htmlspecialchars($r['ext_name'] ?? '') ?></div>
+                                                </div>
                                             </div>
-                                        </div>
-                                    </td>
-                                    <td class="cell-muted"><?= htmlspecialchars($r['lrn'] ?? '—') ?></td>
-                                    <td class="cell-muted">
-                                        <?= htmlspecialchars(($r['grade_level'] ?? '—') . ' · ' . ($r['school_year'] ?? '—')) ?>
-                                    </td>
-                                    <td>
-                                        <?php if($r['sex'] === 'Male'): ?>
-                                            <span class="pill male"><i class="bi bi-gender-male"></i>Male</span>
-                                        <?php elseif($r['sex'] === 'Female'): ?>
-                                            <span class="pill female"><i class="bi bi-gender-female"></i>Female</span>
-                                        <?php else: ?>
-                                            <span class="pill muted">—</span>
-                                        <?php endif; ?>
-                                    </td>
-                                    <td style="text-align:right">
-                                        <a href="<?= URL_PREFIX ?>/view_student.php?id=<?= (int)$r['student_id'] ?>"
-                                           class="btn btn-icon btn-outline-primary"
-                                           onclick="event.stopPropagation()"
-                                           title="View profile">
-                                            <i class="bi bi-arrow-right-short" style="font-size:1.15rem"></i>
-                                        </a>
-                                    </td>
-                                </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
+                                        </td>
+                                        <td class="cell-muted"><?= htmlspecialchars($r['lrn'] ?? '—') ?></td>
+                                        <td class="cell-muted">
+                                            <?= htmlspecialchars(($r['grade_level'] ?? '—') . ' · ' . ($r['school_year'] ?? '—')) ?>
+                                        </td>
+                                        <td>
+                                            <?php if($r['sex'] === 'Male'): ?>
+                                                <span class="pill male"><i class="bi bi-gender-male"></i>Male</span>
+                                            <?php elseif($r['sex'] === 'Female'): ?>
+                                                <span class="pill female"><i class="bi bi-gender-female"></i>Female</span>
+                                            <?php else: ?>
+                                                <span class="pill muted">—</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td style="text-align:right">
+                                            <a href="<?= URL_PREFIX ?>/view_student.php?id=<?= (int)$r['student_id'] ?>"
+                                               class="btn btn-icon btn-outline-primary"
+                                               onclick="event.stopPropagation()"
+                                               title="View profile">
+                                                <i class="bi bi-arrow-right-short" style="font-size:1.15rem"></i>
+                                            </a>
+                                        </td>
+                                    </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="dir-cards-wrap">
+                        <div class="student-cards-grid">
+                            <?php foreach($students_result as $r):
+                                $name = trim($r['last_name'].', '.$r['first_name'].' '.($r['middle_name']??''));
+                                $initials = strtoupper(substr($r['first_name'] ?? '', 0, 1) . substr($r['last_name'] ?? '', 0, 1));
+                                $sex_class = $r['sex'] === 'Male' ? 'male' : ($r['sex'] === 'Female' ? 'female' : 'muted');
+                                $sex_icon  = $r['sex'] === 'Male' ? 'bi-gender-male' : ($r['sex'] === 'Female' ? 'bi-gender-female' : 'bi-dash');
+                            ?>
+                                <?= render_dir_card([
+                                    'title'    => $name,
+                                    'initials' => $initials,
+                                    'meta'     => [
+                                        'ID: '  . ($r['student_id_number'] ?? '—'),
+                                        'LRN: ' . ($r['lrn'] ?? '—'),
+                                    ],
+                                    'badge'    => ['label' => $r['sex'] ?? '—', 'class' => $sex_class],
+                                    'tags'     => [
+                                        ['icon' => 'bi-mortarboard', 'label' => $r['grade_level'] ?? '—', 'class' => 'grade'],
+                                        ['icon' => 'bi-calendar3',   'label' => 'SY ' . ($r['school_year'] ?? '—'), 'class' => 'grade'],
+                                    ],
+                                    'footer_left' => $r['ext_name'] ?? '',
+                                    'action'      => [
+                                        'href'  => URL_PREFIX . '/view_student.php?id=' . (int)$r['student_id'],
+                                        'label' => 'Profile',
+                                        'icon'  => 'bi-person',
+                                    ],
+                                ]) ?>
+                            <?php endforeach; ?>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1001,7 +1030,7 @@ require __DIR__ . '/../partials/sidebar.php';
                     <div class="empty">
                         <div class="empty-icon"><i class="bi bi-search"></i></div>
                         <div class="empty-title">No students found</div>
-                        <div class="empty-sub">No students match the section "<strong><?= htmlspecialchars($section) ?></strong>" with the current filters.</div>
+                        <div class="empty-sub">No students match the current section filter.</div>
                     </div>
                 </div>
             </div>
@@ -1009,19 +1038,20 @@ require __DIR__ . '/../partials/sidebar.php';
 
     <?php else: ?>
         <?php if(!empty($section_result)): ?>
+
             <div class="stat-grid">
                 <div class="stat-card">
-                    <div class="stat-icon"><i class="bi bi-diagram-3"></i></div>
+                    <div class="stat-icon"><i class="bi bi-diagram-3-fill"></i></div>
                     <div>
                         <div class="stat-value"><?= number_format($stat_total_sections) ?></div>
                         <div class="stat-label">Total Sections</div>
                     </div>
                 </div>
-                <div class="stat-card tone-purple">
+                <div class="stat-card tone-green">
                     <div class="stat-icon"><i class="bi bi-people-fill"></i></div>
                     <div>
                         <div class="stat-value"><?= number_format($stat_total_students) ?></div>
-                        <div class="stat-label">Total Students</div>
+                        <div class="stat-label">Students</div>
                     </div>
                 </div>
                 <div class="stat-card">
@@ -1039,327 +1069,183 @@ require __DIR__ . '/../partials/sidebar.php';
                     </div>
                 </div>
             </div>
-        <?php endif; ?>
 
-        <div class="card">
-            <div class="card-header">
-                <h3>
-                    <i class="bi bi-diagram-3"></i> Sections
-                    <span class="cell-muted" style="font-weight:500;font-size:.85rem">(<?= count($section_result ?? []) ?>)</span>
-                </h3>
-                <?php if (!empty($section_result)): ?>
-                    <span class="cell-muted" style="font-size:.75rem">
-                        <i class="bi bi-hand-index-thumb me-1"></i> Row → full roster · chip → that grade / year only<?= $can_edit_section ? ' · pencil → rename' : '' ?>
-                    </span>
-                <?php endif; ?>
-            </div>
-            <div class="card-body no-padding">
-                <?php if(!empty($section_result)): ?>
-                <div class="table-scroll">
-                    <table class="table-admin">
-                        <thead>
-                            <tr>
-                                <th>Section</th>
-                                <th class="cell-center" style="width:80px">Total</th>
-                                <th class="cell-center" style="width:70px">Male</th>
-                                <th class="cell-center" style="width:80px">Female</th>
-                                <th>Clusters</th>
-                                <th style="width:110px"></th>
-                            </tr>
-                        </thead>
-                        <tbody>
+            <div class="card">
+                <div class="card-header">
+                    <h3>
+                        <i class="bi bi-diagram-3"></i> Sections Overview
+                        <span class="cell-muted" style="font-weight:500;font-size:.85rem">(<?= number_format($stat_total_sections) ?>)</span>
+                    </h3>
+                    <?= dir_view_toggle($__view_sections) ?>
+                </div>
+                <div class="card-body no-padding <?= dir_view_class($__view_sections) ?>" data-page-key="sections">
+                    <div class="dir-table-wrap">
+                        <div class="table-scroll">
+                            <table class="table-admin">
+                                <thead>
+                                    <tr>
+                                        <th style="width:280px">Section</th>
+                                        <th style="width:130px">Grade</th>
+                                        <th style="width:80px;text-align:right">Total</th>
+                                        <th style="width:80px;text-align:right">Male</th>
+                                        <th style="width:80px;text-align:right">Female</th>
+                                        <th>Clusters (SY · Program)</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach($section_result as $s):
+                                        $cluster_key = $s['section'] . '|' . $s['grade_level'];
+                                        $clusters    = $section_clusters[$cluster_key] ?? [];
+                                        $open_url = URL_PREFIX . '/sections_list.php?' . http_build_query(array_filter([
+                                            'section'     => $s['section'],
+                                            'school_year' => $school_year,
+                                            'grade_level' => $s['grade_level'],
+                                            'program'     => $program,
+                                        ]));
+                                    ?>
+                                    <tr class="section-row" onclick="window.location='<?= htmlspecialchars($open_url) ?>'">
+                                        <td>
+                                            <div class="section-cell">
+                                                <div class="section-badge"><i class="bi bi-columns-gap"></i></div>
+                                                <div>
+                                                    <a class="section-name" href="<?= htmlspecialchars($open_url) ?>" onclick="event.stopPropagation()">
+                                                        <?= htmlspecialchars($s['section']) ?>
+                                                        <i class="bi bi-chevron-right row-chevron"></i>
+                                                    </a>
+                                                    <div class="section-total"><strong><?= (int)$s['total'] ?></strong> student<?= (int)$s['total'] === 1 ? '' : 's' ?></div>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td class="cell-muted"><?= htmlspecialchars($s['grade_level'] ?: '—') ?></td>
+                                        <td class="cell-strong" style="text-align:right"><?= (int)$s['total'] ?></td>
+                                        <td class="cell-muted" style="text-align:right"><?= (int)$s['boys'] ?></td>
+                                        <td class="cell-muted" style="text-align:right"><?= (int)$s['girls'] ?></td>
+                                        <td>
+                                            <div class="cluster-chips">
+                                                <?php foreach (array_slice($clusters, 0, 3) as $c):
+                                                    $label = trim(($c['school_year'] ?: '—') . ($c['program'] !== '' ? ' · ' . $c['program'] : ''));
+                                                    $chip_url = URL_PREFIX . '/sections_list.php?' . http_build_query(array_filter([
+                                                        'section'     => $s['section'],
+                                                        'school_year' => $c['school_year'],
+                                                        'grade_level' => $c['grade_level'],
+                                                        'program'     => $c['program'],
+                                                    ]));
+                                                ?>
+                                                    <a href="<?= htmlspecialchars($chip_url) ?>" class="cluster-chip" onclick="event.stopPropagation()">
+                                                        <span class="cluster-label"><?= htmlspecialchars($label) ?></span>
+                                                        <span class="cluster-count"><?= (int)$c['total'] ?></span>
+                                                    </a>
+                                                <?php endforeach; ?>
+                                                <?php if (count($clusters) > 3): ?>
+                                                    <span class="cluster-more">+<?= count($clusters) - 3 ?> more</span>
+                                                <?php endif; ?>
+                                                <?php if (empty($clusters)): ?>
+                                                    <span class="cell-muted" style="font-style:italic;font-size:.78rem">No clusters</span>
+                                                <?php endif; ?>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="dir-cards-wrap">
+                        <div class="student-cards-grid">
                             <?php foreach($section_result as $s):
-                                $roster_url = URL_PREFIX . '/sections_list.php?' . http_build_query(array_filter([
+                                $cluster_key = $s['section'] . '|' . $s['grade_level'];
+                                $clusters    = $section_clusters[$cluster_key] ?? [];
+                                $open_url = URL_PREFIX . '/sections_list.php?' . http_build_query(array_filter([
                                     'section'     => $s['section'],
-                                    'grade_level' => $s['grade_level'],
                                     'school_year' => $school_year,
+                                    'grade_level' => $s['grade_level'],
                                     'program'     => $program,
                                 ]));
-
-                                $cluster_key = $s['section'] . '|' . $s['grade_level'];
-                                $clusters = $section_clusters[$cluster_key] ?? [];
-                                $visible_chips = array_slice($clusters, 0, 6);
-                                $hidden_chips  = array_slice($clusters, 6);
                             ?>
-                            <tr class="section-row"
-                                tabindex="0"
-                                role="link"
-                                aria-label="Open full roster for section <?= htmlspecialchars($s['section']) ?>"
-                                data-href="<?= htmlspecialchars($roster_url, ENT_QUOTES, 'UTF-8') ?>"
-                                onclick="window.location=this.dataset.href"
-                                onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.location=this.dataset.href;}">
-                                <td>
-                                    <div class="section-cell">
-                                        <div class="section-badge"><i class="bi bi-columns-gap"></i></div>
-                                        <div>
-                                            <div class="section-name">
-                                                <?= htmlspecialchars($s['section']) ?>
-                                                <span class="pill info" style="font-size:.65rem; padding: 0.15rem 0.4rem; border-radius: 4px;">
-                                                    <?= htmlspecialchars($s['grade_level'] ?: 'No Grade') ?>
-                                                </span>
-                                            </div>
-                                            <div class="section-total"><strong><?= number_format((int)$s['total']) ?></strong> student<?= (int)$s['total'] === 1 ? '' : 's' ?> across <?= count($clusters) ?> cluster<?= count($clusters) === 1 ? '' : 's' ?></div>
-                                        </div>
-                                    </div>
-                                </td>
-                                <td class="cell-center cell-num" style="font-weight:700;color:var(--text)"><?= number_format((int)$s['total']) ?></td>
-                                <td class="cell-center cell-male"><?= number_format((int)$s['boys']) ?></td>
-                                <td class="cell-center cell-female"><?= number_format((int)$s['girls']) ?></td>
-                                <td>
-                                    <?php if (!empty($clusters)): ?>
-                                        <div class="cluster-chips">
-                                            <?php foreach ($visible_chips as $c):
-                                                $chip_url = URL_PREFIX . '/sections_list.php?' . http_build_query(array_filter([
-                                                    'section'     => $s['section'],
-                                                    'grade_level' => $c['grade_level'],
-                                                    'school_year' => $c['school_year'],
-                                                    'program'     => $c['program'],
-                                                ]));
-                                                $label = _cluster_chip_label($c);
-                                            ?>
-                                                <a class="cluster-chip"
-                                                   href="<?= htmlspecialchars($chip_url, ENT_QUOTES, 'UTF-8') ?>"
-                                                   onclick="event.stopPropagation();"
-                                                   title="View <?= htmlspecialchars($label) ?> only">
-                                                    <span class="cluster-label"><?= htmlspecialchars($label) ?></span>
-                                                    <span class="cluster-count"><?= (int)$c['total'] ?></span>
-                                                </a>
-                                            <?php endforeach; ?>
-                                            <?php if (!empty($hidden_chips)): ?>
-                                                <span class="cluster-more" title="<?= htmlspecialchars(implode(' · ', array_map('_cluster_chip_label', $hidden_chips))) ?>">
-                                                    +<?= count($hidden_chips) ?> more
-                                                </span>
-                                            <?php endif; ?>
-                                        </div>
-                                    <?php else: ?>
-                                        <span class="cell-muted">—</span>
-                                    <?php endif; ?>
-                                </td>
-                                <td style="text-align:right;white-space:nowrap">
-                                    <?php if ($can_edit_section): ?>
-                                        <a href="<?= htmlspecialchars($roster_url . '&open_rename=1', ENT_QUOTES, 'UTF-8') ?>"
-                                           class="btn btn-icon btn-outline-warning"
-                                           onclick="event.stopPropagation();"
-                                           title="Rename this section">
-                                            <i class="bi bi-pencil-square"></i>
-                                        </a>
-                                    <?php endif; ?>
-                                    <i class="bi bi-chevron-right row-chevron" aria-hidden="true"></i>
-                                </td>
-                            </tr>
+                                <?= render_dir_card([
+                                    'title'    => $s['section'],
+                                    'initials' => strtoupper(substr($s['section'] ?? 'S', 0, 1)),
+                                    'meta'     => [
+                                        'Grade ' . ($s['grade_level'] ?: '—'),
+                                        (int)$s['total'] . ' students',
+                                    ],
+                                    'badge'    => ['label' => 'M ' . (int)$s['boys'] . ' · F ' . (int)$s['girls'], 'class' => 'info'],
+                                    'tags'     => array_map(function($c) {
+                                        $label = trim(($c['school_year'] ?: '—') . ($c['program'] !== '' ? ' · ' . $c['program'] : ''));
+                                        return ['icon' => 'bi-diagram-3', 'label' => $label . ' (' . (int)$c['total'] . ')', 'class' => 'grade'];
+                                    }, array_slice($clusters, 0, 2)),
+                                    'footer_left' => (count($clusters) > 2 ? '+' . (count($clusters) - 2) . ' more clusters' : ''),
+                                    'action'      => [
+                                        'href'  => $open_url,
+                                        'label' => 'View',
+                                        'icon'  => 'bi-arrow-right-short',
+                                    ],
+                                ]) ?>
                             <?php endforeach; ?>
-                        </tbody>
-                    </table>
+                        </div>
+                    </div>
                 </div>
-                <?php else: ?>
-                <div class="empty">
-                    <div class="empty-icon"><i class="bi bi-table"></i></div>
-                    <div class="empty-title">No sections found</div>
-                    <div class="empty-sub">Try adjusting your filters or resetting the search.</div>
-                </div>
-                <?php endif; ?>
             </div>
-        </div>
+
+        <?php else: ?>
+            <div class="card">
+                <div class="card-body">
+                    <div class="empty">
+                        <div class="empty-icon"><i class="bi bi-diagram-3"></i></div>
+                        <div class="empty-title">No sections found</div>
+                        <div class="empty-sub">No sections match the current filters. Try widening your search.</div>
+                    </div>
+                </div>
+            </div>
+        <?php endif; ?>
     <?php endif; ?>
 </div>
 
-<?php if ($can_edit_section && $show_student_list && !empty($students_result)): ?>
-<!-- ═══════════════════════════════════════════════════════
-     UPDATE SECTION NAME MODAL
-     ═══════════════════════════════════════════════════════ -->
-<div class="modal fade rename-modal" id="renameSectionModal" tabindex="-1" aria-hidden="true">
+<?php if ($show_student_list && $can_edit_section): ?>
+<div class="modal fade rename-modal" id="renameSectionModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
-            <form method="POST" id="renameSectionForm" autocomplete="off">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8') ?>">
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                 <input type="hidden" name="rename_section" value="1">
-                <input type="hidden" name="old_section_name" value="<?= htmlspecialchars($section, ENT_QUOTES, 'UTF-8') ?>">
-
-                <input type="hidden" name="target_grade" id="rs_grade" value="">
-                <input type="hidden" name="target_sy" id="rs_sy" value="">
-                <input type="hidden" name="target_program" id="rs_program" value="">
-
+                <input type="hidden" name="old_section_name" value="<?= htmlspecialchars($sec_title) ?>">
+                <input type="hidden" name="target_grade" value="<?= htmlspecialchars($grade_level) ?>">
+                <input type="hidden" name="target_sy" value="<?= htmlspecialchars($school_year) ?>">
+                <input type="hidden" name="target_program" value="<?= htmlspecialchars($program) ?>">
                 <div class="modal-header">
-                    <h6 class="modal-title">
-                        <i class="bi bi-pencil-square"></i> Update Section Name
-                    </h6>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    <h5 class="modal-title"><i class="bi bi-pencil-square"></i> Update Section Name</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
-
                 <div class="modal-body">
-                    <?php if (count($roster_clusters) > 1): ?>
                     <div class="mb-3">
-                        <label class="form-label" for="rs_cluster">Which cluster to rename? <span class="text-danger">*</span></label>
-                        <select class="form-select" id="rs_cluster" required>
-                            <?php foreach ($roster_clusters as $c):
-                                $val = json_encode([
-                                    'g' => $c['grade_level'],
-                                    's' => $c['school_year'],
-                                    'p' => $c['program']
-                                ]);
-                                $label = _cluster_chip_label($c);
-                            ?>
-                                <option value="<?= htmlspecialchars($val, ENT_QUOTES, 'UTF-8') ?>"
-                                        data-total="<?= (int)$c['total'] ?>"
-                                        data-grade="<?= htmlspecialchars($c['grade_level'], ENT_QUOTES, 'UTF-8') ?>"
-                                        data-sy="<?= htmlspecialchars($c['school_year'], ENT_QUOTES, 'UTF-8') ?>"
-                                        data-program="<?= htmlspecialchars($c['program'], ENT_QUOTES, 'UTF-8') ?>">
-                                    <?= htmlspecialchars($label) ?> (<?= (int)$c['total'] ?> students)
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                        <div class="form-text mt-1" style="font-size:.72rem;color:var(--text-3)">
-                            Only students in the selected cluster will be updated. Other grades/years are untouched.
-                        </div>
+                        <label class="form-label">Current Name</label>
+                        <input type="text" class="form-control" value="<?= htmlspecialchars($sec_title) ?>" readonly>
                     </div>
-                    <?php else: ?>
-                        <?php $single_cluster = $roster_clusters[0]; ?>
-                        <select id="rs_cluster" style="display:none">
-                            <option value="<?= htmlspecialchars(json_encode(['g' => $single_cluster['grade_level'], 's' => $single_cluster['school_year'], 'p' => $single_cluster['program']]), ENT_QUOTES, 'UTF-8') ?>"
-                                    data-total="<?= (int)$single_cluster['total'] ?>"
-                                    data-grade="<?= htmlspecialchars($single_cluster['grade_level'], ENT_QUOTES, 'UTF-8') ?>"
-                                    data-sy="<?= htmlspecialchars($single_cluster['school_year'], ENT_QUOTES, 'UTF-8') ?>"
-                                    data-program="<?= htmlspecialchars($single_cluster['program'], ENT_QUOTES, 'UTF-8') ?>">
-                            </option>
-                        </select>
-                    <?php endif; ?>
-
-                    <div class="mb-3">
-                        <label class="form-label" for="rs_current">Current name</label>
-                        <input type="text"
-                               class="form-control"
-                               id="rs_current"
-                               value="<?= htmlspecialchars($section, ENT_QUOTES, 'UTF-8') ?>"
-                               readonly>
-                    </div>
-
                     <div class="mb-0">
-                        <label class="form-label" for="rs_new">New name <span class="text-danger">*</span></label>
-                        <input type="text"
-                               class="form-control"
-                               id="rs_new"
-                               name="new_section_name"
-                               required
-                               maxlength="100"
-                               autocomplete="off"
-                               placeholder="e.g. ICT Alpha">
-                        <div class="form-text mt-1" style="font-size:.72rem;color:var(--text-3)">
-                            Letters, numbers, spaces, dashes, underscores, dots, parentheses, slashes. Max 100 characters.
-                        </div>
-                    </div>
-
-                    <div class="teacher-note" style="background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 25%,transparent)">
-                        <i class="bi bi-shield-check"></i>
-                        <span>
-                            You are editing as <strong><?= htmlspecialchars(ucfirst($_SESSION['admin_role'] ?? 'admin')) ?></strong>.
-                            This renames the section cluster and cascades to <code>teacher_sections</code>.
-                        </span>
+                        <label class="form-label" for="new_section_name">New Name</label>
+                        <input type="text" id="new_section_name" name="new_section_name" class="form-control"
+                               maxlength="100" required value="<?= htmlspecialchars($sec_title) ?>">
                     </div>
 
                     <div class="warning-note">
                         <i class="bi bi-exclamation-triangle-fill"></i>
-                        <span id="rs_warning_text"></span>
+                        <div>This will update <strong><?= $sec_count ?> student record<?= $sec_count === 1 ? '' : 's' ?></strong> in this section for the selected cluster. Other sections with the same name in different grade/year/program clusters are unaffected.</div>
+                    </div>
+
+                    <div class="teacher-note">
+                        <i class="bi bi-info-circle-fill"></i>
+                        <div>Teacher assignments referencing this section will also be updated automatically.</div>
                     </div>
                 </div>
-
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-warning btn-sm" style="color:#fff;font-weight:600">
-                        <i class="bi bi-check-lg me-1"></i> Update Name
-                    </button>
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-warning"><i class="bi bi-check-lg me-1"></i> Rename Section</button>
                 </div>
             </form>
         </div>
     </div>
 </div>
-
-<script>
-(function () {
-    'use strict';
-
-    const modalEl = document.getElementById('renameSectionModal');
-    if (!modalEl) return;
-    const newInput = document.getElementById('rs_new');
-    const oldValue = document.getElementById('rs_current').value;
-    const form     = document.getElementById('renameSectionForm');
-    const clusterSelect = document.getElementById('rs_cluster');
-    const warningText = document.getElementById('rs_warning_text');
-
-    if (new URLSearchParams(location.search).get('open_rename') === '1') {
-        new bootstrap.Modal(modalEl).show();
-    }
-
-    function updateWarning() {
-        if (!clusterSelect || !warningText) return;
-        const opt = clusterSelect.options[clusterSelect.selectedIndex];
-        if (!opt) return;
-        const count = opt.getAttribute('data-total');
-        const grade = opt.getAttribute('data-grade');
-        const sy = opt.getAttribute('data-sy');
-        const prog = opt.getAttribute('data-program');
-
-        let label = [];
-        if (grade) label.push(grade);
-        if (sy) label.push('SY ' + sy);
-        if (prog) label.push(prog);
-
-        warningText.innerHTML = `This will rename <strong>${count} record(s)</strong> in the <strong>${label.join(' · ')}</strong> cluster. Students in other grades or school years will not be affected.`;
-    }
-
-    if (clusterSelect) {
-        clusterSelect.addEventListener('change', updateWarning);
-    }
-
-    modalEl.addEventListener('shown.bs.modal', function () {
-        newInput.value = oldValue;
-        newInput.focus();
-        newInput.select();
-        updateWarning();
-    });
-
-    modalEl.addEventListener('hidden.bs.modal', function () {
-        newInput.value = '';
-        const btn = form.querySelector('button[type="submit"]');
-        if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="bi bi-check-lg me-1"></i> Update Name';
-        }
-    });
-
-    form.addEventListener('submit', function (e) {
-        if (!clusterSelect) {
-            e.preventDefault();
-            alert('No cluster selected.');
-            return;
-        }
-
-        const clusterData = JSON.parse(clusterSelect.value);
-        document.getElementById('rs_grade').value   = clusterData.g || '';
-        document.getElementById('rs_sy').value      = clusterData.s || '';
-        document.getElementById('rs_program').value = clusterData.p || '';
-
-        const v = newInput.value.trim();
-        if (v === '') {
-            e.preventDefault();
-            newInput.focus();
-            return;
-        }
-        if (v === oldValue) {
-            e.preventDefault();
-            alert('The new name is identical to the current name. Change it to something different.');
-            newInput.focus();
-            newInput.select();
-            return;
-        }
-
-        const btn = form.querySelector('button[type="submit"]');
-        if (btn) {
-            btn.disabled = true;
-            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Updating…';
-        }
-    });
-})();
-</script>
 <?php endif; ?>
 
 <?php require __DIR__ . '/../partials/footer.php'; ?>

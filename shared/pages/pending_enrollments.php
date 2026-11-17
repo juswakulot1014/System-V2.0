@@ -2,6 +2,7 @@
 // shared/pages/pending_enrollments.php
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
+require_once __DIR__ . '/../lib/dir_view.php';
 
 $__nav_section = 'enrollment';
 
@@ -10,6 +11,8 @@ if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true))
     header('Location: ' . URL_PREFIX . '/dashboard.php');
     exit;
 }
+
+$__view = dir_view('pending_apps');
 
 /* ── Time helper ── */
 if (!function_exists('time_ago')) {
@@ -90,7 +93,7 @@ $stmt->execute();
 $all_pending = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
-/* ── Pagination Logic ── */
+/* ── Pagination ── */
 $limit = 10;
 $total_records = count($all_pending);
 $total_pages = max(1, ceil($total_records / $limit));
@@ -99,13 +102,12 @@ $offset = ($page - 1) * $limit;
 
 $pending = array_slice($all_pending, $offset, $limit);
 
-/* ── Fetch Full Data for Modals ── */
+/* ── Full data for modals ── */
 $student_data_js = [];
 if (!empty($pending)) {
     $student_ids = array_column($pending, 'student_id');
     $in_query = implode(',', array_fill(0, count($student_ids), '?'));
-    
-    // Fetch Education
+
     $edu_data = [];
     $estmt = $conn->prepare("SELECT student_id, level, school_name, school_address, year_completed FROM educational_history WHERE student_id IN ($in_query) ORDER BY FIELD(level, 'Elementary', 'JHS', 'Transferred')");
     $estmt->bind_param(str_repeat('i', count($student_ids)), ...$student_ids);
@@ -116,7 +118,6 @@ if (!empty($pending)) {
     }
     $estmt->close();
 
-    // Fetch Documents
     $doc_data = [];
     $dstmt = $conn->prepare("SELECT entrance_id, student_id, document_name, submitted, file_path FROM entrance_documents WHERE student_id IN ($in_query)");
     $dstmt->bind_param(str_repeat('i', count($student_ids)), ...$student_ids);
@@ -127,19 +128,17 @@ if (!empty($pending)) {
     }
     $dstmt->close();
 
-    // Merge into pending array for JSON output
     foreach ($pending as $p) {
         $sid = $p['student_id'];
         $p['education'] = $edu_data[$sid] ?? [];
-        
-        // Normalize docs to match required list
+
         $uploaded = [];
         foreach ($doc_data[$sid] ?? [] as $d) {
             if ($d['submitted'] && !empty($d['file_path'])) {
                 $uploaded[$d['document_name']] = $d['entrance_id'];
             }
         }
-        
+
         $p['documents'] = [];
         foreach ($REQUIRED_DOCS as $req) {
             $p['documents'][] = [
@@ -148,7 +147,7 @@ if (!empty($pending)) {
                 'id' => $uploaded[$req] ?? 0
             ];
         }
-        
+
         $student_data_js[$p['enrollment_id']] = $p;
     }
 }
@@ -173,7 +172,6 @@ $pagination_url = "?search=" . urlencode($search) . "&school_year=" . urlencode(
 $page_title = 'Pending Enrollments • USAT Admin';
 
 $page_css = <<<'CSS'
-    /* ═══ STAT CARDS ═══ */
     .stat-card { position:relative; overflow:hidden; transition:transform .2s, box-shadow .2s; }
     .stat-card:hover { transform:translateY(-2px); box-shadow:var(--shadow-md); }
     .stat-card::before { transition:width .3s ease; }
@@ -181,7 +179,6 @@ $page_css = <<<'CSS'
     .stat-icon { transition:transform .2s; }
     .stat-card:hover .stat-icon { transform:scale(1.1) rotate(-3deg); }
 
-    /* ═══ QUICK FILTERS (CHIPS) ═══ */
     .quick-filters { display:flex; gap:.5rem; flex-wrap:wrap; padding:0 1.25rem 1rem; }
     .chip { display:inline-flex; align-items:center; gap:.4rem; padding:.45rem 1rem; border-radius:999px; border:1px solid var(--border); background:var(--surface); color:var(--text-2); font-size:.78rem; font-weight:600; cursor:pointer; transition:all .2s ease; font-family:inherit; }
     .chip:hover { background:var(--surface-2); color:var(--text); border-color:var(--border-strong); transform:translateY(-1px); }
@@ -193,19 +190,17 @@ $page_css = <<<'CSS'
     .chip.chip-amber.active { background:var(--amber); border-color:var(--amber); box-shadow:0 4px 12px -4px rgba(217,119,6,.5); }
     .chip.chip-red.active { background:var(--red); border-color:var(--red); box-shadow:0 4px 12px -4px rgba(220,38,38,.5); }
 
-    /* ═══ TABLE ROWS ═══ */
     .table-admin tbody tr { transition:background .15s; }
     .table-admin tbody tr:hover td { background:color-mix(in srgb, var(--accent) 4%, var(--surface)) !important; }
     .table-admin tbody tr.row-ready td:first-child { box-shadow:inset 4px 0 0 var(--green); }
     .table-admin tbody tr.row-nodocs td:first-child { box-shadow:inset 4px 0 0 var(--amber); }
-    
+
     .student-cell { display:flex; align-items:center; gap:.85rem; min-width:0; }
     .student-avatar { width:40px; height:40px; border-radius:12px; background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#fff; display:flex; align-items:center; justify-content:center; font-size:.85rem; font-weight:800; flex-shrink:0; box-shadow:0 4px 12px -4px rgba(79,70,229,.5); letter-spacing:.5px; }
     .student-info { min-width:0; }
     .student-name { font-weight:700; color:var(--text); font-size:.88rem; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .student-lrn { font-size:.72rem; color:var(--text-2); font-variant-numeric:tabular-nums; margin-top:.15rem; font-weight:500; }
-    
-    /* ═══ DOC PROGRESS ═══ */
+
     .doc-progress { display:flex; flex-direction:column; gap:.4rem; min-width:110px; }
     .doc-progress .doc-bar { width:100%; height:8px; border-radius:999px; background:var(--border); overflow:hidden; box-shadow:inset 0 1px 2px rgba(0,0,0,.05); }
     .doc-progress .doc-bar-fill { height:100%; border-radius:999px; transition:width .6s cubic-bezier(.4,0,.2,1); }
@@ -216,28 +211,22 @@ $page_css = <<<'CSS'
     .doc-progress .doc-label span { display:flex; align-items:center; gap:.3rem; }
     .doc-progress .doc-label.ok { color:var(--green); }
     .doc-progress .doc-label.warn { color:var(--amber); }
-    
-    /* ═══ TIME CELL ═══ */
+
     .time-cell { white-space:nowrap; }
     .time-cell .rel { font-size:.82rem; font-weight:700; color:var(--text); display:flex; align-items:center; gap:.3rem; }
     .time-cell .rel.overdue { color:var(--red); }
     .time-cell .abs { font-size:.72rem; color:var(--text-3); font-variant-numeric:tabular-nums; margin-top:.15rem; font-weight:500; }
 
-    /* ═══ ACTION BUTTONS ═══ */
     .action-group { display:inline-flex; gap:.35rem; flex-wrap:wrap; justify-content:flex-end; }
     .btn-action { display:inline-flex; align-items:center; justify-content:center; gap:.35rem; padding:.4rem .75rem; border-radius:8px; font-size:.75rem; font-weight:600; font-family:inherit; cursor:pointer; transition:all .15s; border:1px solid transparent; white-space:nowrap; }
     .btn-action:active { transform:translateY(1px); }
-    
     .btn-action.view { background:transparent; color:var(--text-2); border-color:var(--border); }
     .btn-action.view:hover { background:var(--surface-2); color:var(--text); border-color:var(--border-strong); }
-    
     .btn-action.approve { background:var(--green); color:#fff; box-shadow:0 4px 12px -4px rgba(5,150,105,.4); }
     .btn-action.approve:hover { background:#047857; box-shadow:0 6px 16px -4px rgba(5,150,105,.6); transform:translateY(-1px); }
-    
     .btn-action.reject { background:transparent; color:var(--red); border-color:color-mix(in srgb, var(--red) 30%, transparent); }
     .btn-action.reject:hover { background:var(--red-soft); border-color:var(--red); color:var(--red); }
 
-    /* ═══ PAGINATION ═══ */
     .pagination-bar { display:flex; justify-content:space-between; align-items:center; padding:1rem 1.25rem; border-top:1px solid var(--border); background:var(--surface); }
     .pagination { display:inline-flex; align-items:center; gap:.25rem; background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:.25rem; }
     .pagination .btn { border:none; color:var(--text-2); min-width:34px; padding:.35rem .55rem; font-weight:600; border-radius:8px; }
@@ -245,10 +234,7 @@ $page_css = <<<'CSS'
     .pagination .btn:disabled { opacity:.4; cursor:not-allowed; }
     .pagination .page-info { font-size:.78rem; color:var(--text-2); padding:0 .65rem; font-weight:600; }
 
-    /* ═══ MODALS ═══ */
     .modal-content { border:none; border-radius:24px; overflow:hidden; box-shadow:0 32px 80px -16px rgba(15,23,42,.4); }
-    
-    /* Review Modal Enhancements */
     .review-modal .modal-header { background:linear-gradient(135deg, #1e293b, #0f172a); color:#fff; border-bottom:none; padding:1.25rem 1.5rem; }
     .review-modal .modal-header h5 { font-weight:700; display:flex; align-items:center; gap:.5rem; }
     .review-modal .modal-body { padding:0; background:var(--surface); max-height:70vh; overflow-y:auto; }
@@ -260,8 +246,7 @@ $page_css = <<<'CSS'
     .review-item .lbl { font-size:.7rem; font-weight:600; color:var(--text-3); text-transform:uppercase; margin-bottom:.15rem; }
     .review-item .val { font-size:.9rem; font-weight:600; color:var(--text); word-break:break-word; }
     .review-item.full-width { grid-column:1 / -1; }
-    
-    /* Doc Checklist */
+
     .doc-checklist { display:flex; flex-direction:column; gap:.5rem; }
     .doc-check-item { display:flex; align-items:center; justify-content:space-between; padding:.6rem .85rem; border-radius:8px; background:var(--surface-2); border:1px solid var(--border); }
     .doc-check-item .name { font-size:.82rem; font-weight:600; color:var(--text); display:flex; align-items:center; gap:.5rem; }
@@ -275,19 +260,21 @@ $page_css = <<<'CSS'
     .doc-check-item.missing .name i { color:var(--amber); }
     .doc-check-item.missing .action { color:var(--amber); }
 
-    /* Quick Reason Chips in Reject Modal */
     .quick-reasons { display:flex; flex-wrap:wrap; gap:.4rem; margin-bottom:1rem; }
     .reason-chip { padding:.35rem .7rem; border-radius:6px; background:var(--surface-2); border:1px solid var(--border); font-size:.75rem; font-weight:600; color:var(--text-2); cursor:pointer; transition:all .15s; font-family:inherit; }
     .reason-chip:hover { background:var(--red-soft); color:var(--red); border-color:color-mix(in srgb, var(--red) 30%, transparent); }
 
-    /* T&C Box */
     .terms-box { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:1rem; font-size:.8rem; color:var(--text-2); line-height:1.6; max-height:150px; overflow-y:auto; margin-bottom:1rem; }
     .terms-box p { margin-bottom:.5rem; }
     .terms-check { display:flex; align-items:flex-start; gap:.6rem; padding:.85rem; background:var(--surface-2); border:1px solid var(--border); border-radius:8px; cursor:pointer; transition:border-color .15s; }
     .terms-check:hover { border-color:var(--accent); }
     .terms-check input[type="checkbox"] { margin-top:.2rem; width:18px; height:18px; accent-color:var(--accent); flex-shrink:0; }
     .terms-check-text { font-size:.85rem; font-weight:600; color:var(--text); line-height:1.4; }
-    
+
+    /* Card-view compact doc-progress */
+    .student-card .doc-progress { min-width:0; margin-top:.1rem; }
+    .student-card .doc-progress .doc-bar { height:6px; }
+
     @media (max-width: 768px) {
         .action-group { flex-direction:column; width:100%; }
         .btn-action { width:100%; justify-content:center; }
@@ -425,9 +412,12 @@ require __DIR__ . '/../partials/sidebar.php';
     <div class="card">
         <div class="card-header">
             <h3><i class="bi bi-inbox"></i> Submissions Awaiting Approval</h3>
-            <span class="cell-muted" id="visibleCount" style="font-weight:600;font-size:.8rem"></span>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <span class="cell-muted" id="visibleCount" style="font-weight:600;font-size:.8rem"></span>
+                <?= dir_view_toggle($__view) ?>
+            </div>
         </div>
-        <div class="card-body no-padding">
+        <div class="card-body no-padding <?= dir_view_class($__view) ?>" data-page-key="pending_apps">
             <?php if (empty($pending)): ?>
                 <div class="empty">
                     <div class="empty-icon"><i class="bi bi-check2-circle"></i></div>
@@ -435,120 +425,204 @@ require __DIR__ . '/../partials/sidebar.php';
                     <div class="empty-sub">No pending enrollments to review right now.</div>
                 </div>
             <?php else: ?>
-                <div class="table-scroll">
-                    <table class="table-admin" id="pendingTable">
-                        <thead>
-                            <tr>
-                                <th style="width:250px">Student</th>
-                                <th>Program</th>
-                                <th style="width:140px">Section</th>
-                                <th style="width:160px">Submitted</th>
-                                <th style="width:160px">Documents</th>
-                                <th style="text-align:right;width:240px">Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                        <?php foreach ($pending as $p):
-                            $fullName   = trim(($p['last_name'] ?? '') . ', ' . ($p['first_name'] ?? '') . ' ' . ($p['middle_name'] ?? ''));
-                            $initials   = strtoupper(substr($p['first_name'] ?? '?', 0, 1) . substr($p['last_name'] ?? '', 0, 1));
-                            $docs_total = (int)$p['docs_total'];
-                            $docs_up    = min((int)$p['docs_uploaded'], $docs_total);
+                <div class="dir-table-wrap">
+                    <div class="table-scroll">
+                        <table class="table-admin" id="pendingTable">
+                            <thead>
+                                <tr>
+                                    <th style="width:250px">Student</th>
+                                    <th>Program</th>
+                                    <th style="width:140px">Section</th>
+                                    <th style="width:160px">Submitted</th>
+                                    <th style="width:160px">Documents</th>
+                                    <th style="text-align:right;width:240px">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                            <?php foreach ($pending as $p):
+                                $fullName   = trim(($p['last_name'] ?? '') . ', ' . ($p['first_name'] ?? '') . ' ' . ($p['middle_name'] ?? ''));
+                                $initials   = strtoupper(substr($p['first_name'] ?? '?', 0, 1) . substr($p['last_name'] ?? '', 0, 1));
+                                $docs_total = (int)$p['docs_total'];
+                                $docs_up    = min((int)$p['docs_uploaded'], $docs_total);
 
-                            if ($docs_total > 0) {
-                                $pct = min(100, round(($docs_up / max(1, $docs_total)) * 100));
-                            } else {
-                                $pct = 0;
-                            }
-                            if ($docs_up === 0) {
-                                $fill_class = 'fill-empty';
-                                $label_class = 'warn';
-                                $label_icon = 'bi-exclamation-circle';
-                                $row_class = 'row-nodocs';
-                            } elseif ($docs_total > 0 && $docs_up >= $docs_total) {
-                                $fill_class = 'fill-full';
-                                $label_class = 'ok';
-                                $label_icon = 'bi-check2-circle';
-                                $row_class = 'row-ready';
-                            } else {
-                                $fill_class = 'fill-partial';
-                                $label_class = '';
-                                $label_icon = 'bi-circle-half';
-                                $row_class = 'row-ready';
-                            }
+                                if ($docs_total > 0) {
+                                    $pct = min(100, round(($docs_up / max(1, $docs_total)) * 100));
+                                } else {
+                                    $pct = 0;
+                                }
+                                if ($docs_up === 0) {
+                                    $fill_class = 'fill-empty';
+                                    $label_class = 'warn';
+                                    $label_icon = 'bi-exclamation-circle';
+                                    $row_class = 'row-nodocs';
+                                } elseif ($docs_total > 0 && $docs_up >= $docs_total) {
+                                    $fill_class = 'fill-full';
+                                    $label_class = 'ok';
+                                    $label_icon = 'bi-check2-circle';
+                                    $row_class = 'row-ready';
+                                } else {
+                                    $fill_class = 'fill-partial';
+                                    $label_class = '';
+                                    $label_icon = 'bi-circle-half';
+                                    $row_class = 'row-ready';
+                                }
 
-                            $ts = strtotime($p['enrolled_at']);
-                            $is_overdue = (time() - $ts) > 3 * 86400;
-                            $rel = time_ago($p['enrolled_at']);
-                            $abs = date('M d, Y · g:i A', $ts);
+                                $ts = strtotime($p['enrolled_at']);
+                                $is_overdue = (time() - $ts) > 3 * 86400;
+                                $rel = time_ago($p['enrolled_at']);
+                                $abs = date('M d, Y · g:i A', $ts);
 
-                            $data_filter = $docs_up > 0 ? 'ready' : 'nodocs';
-                            if ($is_overdue) $data_filter .= ' overdue';
-                        ?>
-                            <tr class="<?= $row_class ?>" data-row-filter="<?= $data_filter ?>">
-                                <td>
-                                    <div class="student-cell">
-                                        <div class="student-avatar"><?= htmlspecialchars($initials) ?></div>
-                                        <div class="student-info">
-                                            <div class="student-name"><?= htmlspecialchars($fullName) ?></div>
-                                            <div class="student-lrn">
-                                                <?= htmlspecialchars($p['student_id_number'] ?: '—') ?>
-                                                &nbsp;·&nbsp; LRN <?= htmlspecialchars($p['lrn'] ?: '—') ?>
+                                $data_filter = $docs_up > 0 ? 'ready' : 'nodocs';
+                                if ($is_overdue) $data_filter .= ' overdue';
+                            ?>
+                                <tr class="<?= $row_class ?>" data-row-filter="<?= $data_filter ?>">
+                                    <td>
+                                        <div class="student-cell">
+                                            <div class="student-avatar"><?= htmlspecialchars($initials) ?></div>
+                                            <div class="student-info">
+                                                <div class="student-name"><?= htmlspecialchars($fullName) ?></div>
+                                                <div class="student-lrn">
+                                                    <?= htmlspecialchars($p['student_id_number'] ?: '—') ?>
+                                                    &nbsp;·&nbsp; LRN <?= htmlspecialchars($p['lrn'] ?: '—') ?>
+                                                </div>
                                             </div>
                                         </div>
-                                    </div>
-                                </td>
-                                <td>
-                                    <div class="cell-strong" style="font-size:.85rem"><?= htmlspecialchars($p['grade_level']) ?></div>
-                                    <div class="cell-muted" style="font-size:.75rem;margin-top:.1rem"><?= htmlspecialchars($p['strand'] ?: '—') ?></div>
-                                </td>
-                                <td>
-                                    <?php if (!empty($p['section'])): ?>
-                                        <span class="pill info" style="text-transform:none;letter-spacing:0;"><?= htmlspecialchars($p['section']) ?></span>
-                                    <?php else: ?>
-                                        <span class="cell-muted" style="font-style:italic;font-size:.78rem">Unassigned</span>
-                                    <?php endif; ?>
-                                </td>
-                                <td class="time-cell">
-                                    <div class="rel <?= $is_overdue ? 'overdue' : '' ?>" title="<?= htmlspecialchars($abs) ?>">
-                                        <i class="bi bi-clock"></i> <?= htmlspecialchars($rel) ?>
-                                    </div>
-                                    <div class="abs"><?= date('M d, Y', $ts) ?></div>
-                                </td>
-                                <td>
-                                    <div class="doc-progress">
-                                        <div class="doc-bar">
-                                            <div class="doc-bar-fill <?= $fill_class ?>" style="width:<?= $pct ?>%"></div>
+                                    </td>
+                                    <td>
+                                        <div class="cell-strong" style="font-size:.85rem"><?= htmlspecialchars($p['grade_level']) ?></div>
+                                        <div class="cell-muted" style="font-size:.75rem;margin-top:.1rem"><?= htmlspecialchars($p['strand'] ?: '—') ?></div>
+                                    </td>
+                                    <td>
+                                        <?php if (!empty($p['section'])): ?>
+                                            <span class="pill info" style="text-transform:none;letter-spacing:0;"><?= htmlspecialchars($p['section']) ?></span>
+                                        <?php else: ?>
+                                            <span class="cell-muted" style="font-style:italic;font-size:.78rem">Unassigned</span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td class="time-cell">
+                                        <div class="rel <?= $is_overdue ? 'overdue' : '' ?>" title="<?= htmlspecialchars($abs) ?>">
+                                            <i class="bi bi-clock"></i> <?= htmlspecialchars($rel) ?>
                                         </div>
-                                        <div class="doc-label <?= $label_class ?>">
-                                            <span><i class="bi <?= $label_icon ?>"></i> <?= $docs_up ?> / <?= $docs_total ?> docs</span>
-                                            <span><?= $pct ?>%</span>
+                                        <div class="abs"><?= date('M d, Y', $ts) ?></div>
+                                    </td>
+                                    <td>
+                                        <div class="doc-progress">
+                                            <div class="doc-bar">
+                                                <div class="doc-bar-fill <?= $fill_class ?>" style="width:<?= $pct ?>%"></div>
+                                            </div>
+                                            <div class="doc-label <?= $label_class ?>">
+                                                <span><i class="bi <?= $label_icon ?>"></i> <?= $docs_up ?> / <?= $docs_total ?> docs</span>
+                                                <span><?= $pct ?>%</span>
+                                            </div>
                                         </div>
+                                    </td>
+                                    <td style="text-align:right">
+                                        <div class="action-group">
+                                            <button class="btn-action view view-btn"
+                                                    data-id="<?= (int)$p['enrollment_id'] ?>"
+                                                    title="Review details">
+                                                <i class="bi bi-eye"></i> View
+                                            </button>
+                                            <button class="btn-action approve approve-btn"
+                                                    data-id="<?= (int)$p['enrollment_id'] ?>"
+                                                    title="Approve enrollment">
+                                                <i class="bi bi-check-lg"></i> Approve
+                                            </button>
+                                            <button class="btn-action reject reject-btn"
+                                                    data-id="<?= (int)$p['enrollment_id'] ?>"
+                                                    data-name="<?= htmlspecialchars($fullName) ?>"
+                                                    title="Reject enrollment">
+                                                <i class="bi bi-x-lg"></i>
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="dir-cards-wrap">
+                    <div class="student-cards-grid" id="pendingCardsGrid">
+                    <?php foreach ($pending as $p):
+                        $fullName   = trim(($p['last_name'] ?? '') . ', ' . ($p['first_name'] ?? '') . ' ' . ($p['middle_name'] ?? ''));
+                        $initials   = strtoupper(substr($p['first_name'] ?? '?', 0, 1) . substr($p['last_name'] ?? '', 0, 1));
+                        $docs_total = (int)$p['docs_total'];
+                        $docs_up    = min((int)$p['docs_uploaded'], $docs_total);
+                        $pct        = $docs_total > 0 ? min(100, round(($docs_up / max(1, $docs_total)) * 100)) : 0;
+
+                        if ($docs_up === 0) {
+                            $fill_class = 'fill-empty';  $label_class = 'warn'; $label_icon = 'bi-exclamation-circle';
+                        } elseif ($docs_total > 0 && $docs_up >= $docs_total) {
+                            $fill_class = 'fill-full';   $label_class = 'ok';   $label_icon = 'bi-check2-circle';
+                        } else {
+                            $fill_class = 'fill-partial'; $label_class = '';   $label_icon = 'bi-circle-half';
+                        }
+
+                        $ts         = strtotime($p['enrolled_at']);
+                        $is_overdue = (time() - $ts) > 3 * 86400;
+                        $rel        = time_ago($p['enrolled_at']);
+
+                        $data_filter = $docs_up > 0 ? 'ready' : 'nodocs';
+                        if ($is_overdue) $data_filter .= ' overdue';
+                    ?>
+                        <div class="student-card" data-row-filter="<?= $data_filter ?>">
+                            <div class="student-card-header">
+                                <div class="student-avatar-mini"><?= htmlspecialchars($initials) ?></div>
+                                <div class="student-card-info">
+                                    <div class="student-card-name"><?= htmlspecialchars($fullName) ?></div>
+                                    <div class="student-card-meta">
+                                        <span>ID: <?= htmlspecialchars($p['student_id_number'] ?: '—') ?></span>
+                                        <span class="sep">·</span>
+                                        <span>LRN: <?= htmlspecialchars($p['lrn'] ?: '—') ?></span>
                                     </div>
-                                </td>
-                                <td style="text-align:right">
-                                    <div class="action-group">
-                                        <button class="btn-action view view-btn"
-                                                data-id="<?= (int)$p['enrollment_id'] ?>"
-                                                title="Review details">
-                                            <i class="bi bi-eye"></i> View
-                                        </button>
-                                        <button class="btn-action approve approve-btn"
-                                                data-id="<?= (int)$p['enrollment_id'] ?>"
-                                                title="Approve enrollment">
-                                            <i class="bi bi-check-lg"></i> Approve
-                                        </button>
-                                        <button class="btn-action reject reject-btn"
-                                                data-id="<?= (int)$p['enrollment_id'] ?>"
-                                                data-name="<?= htmlspecialchars($fullName) ?>"
-                                                title="Reject enrollment">
-                                            <i class="bi bi-x-lg"></i>
-                                        </button>
-                                    </div>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                        </tbody>
-                    </table>
+                                </div>
+                                <span class="pill warning" style="font-size:.66rem;">Pending</span>
+                            </div>
+
+                            <div class="student-card-tags">
+                                <span class="s-tag grade"><i class="bi bi-mortarboard"></i> <?= htmlspecialchars($p['grade_level']) ?></span>
+                                <?php if (!empty($p['strand'])): ?>
+                                    <span class="s-tag grade" style="background:#fef3c7;color:#92400e;border-color:#fde68a"><i class="bi bi-bookmark"></i> <?= htmlspecialchars($p['strand']) ?></span>
+                                <?php endif; ?>
+                                <?php if (!empty($p['section'])): ?>
+                                    <span class="s-tag section"><i class="bi bi-columns-gap"></i> <?= htmlspecialchars($p['section']) ?></span>
+                                <?php else: ?>
+                                    <span class="s-tag section unassigned"><i class="bi bi-exclamation-triangle-fill"></i> No Section</span>
+                                <?php endif; ?>
+                            </div>
+
+                            <div class="doc-progress">
+                                <div class="doc-bar">
+                                    <div class="doc-bar-fill <?= $fill_class ?>" style="width:<?= $pct ?>%"></div>
+                                </div>
+                                <div class="doc-label <?= $label_class ?>">
+                                    <span><i class="bi <?= $label_icon ?>"></i> <?= $docs_up ?> / <?= $docs_total ?> docs</span>
+                                    <span><?= $pct ?>%</span>
+                                </div>
+                            </div>
+
+                            <div class="student-card-footer">
+                                <span class="student-card-strand">
+                                    <i class="bi bi-clock <?= $is_overdue ? 'text-danger' : '' ?>"></i>
+                                    <span style="margin-left:.2rem;<?= $is_overdue ? 'color:var(--red);font-weight:700' : '' ?>"><?= htmlspecialchars($rel) ?></span>
+                                </span>
+                                <div class="action-group">
+                                    <button class="btn-action view view-btn" data-id="<?= (int)$p['enrollment_id'] ?>" title="Review details">
+                                        <i class="bi bi-eye"></i>
+                                    </button>
+                                    <button class="btn-action approve approve-btn" data-id="<?= (int)$p['enrollment_id'] ?>" title="Approve">
+                                        <i class="bi bi-check-lg"></i>
+                                    </button>
+                                    <button class="btn-action reject reject-btn" data-id="<?= (int)$p['enrollment_id'] ?>" data-name="<?= htmlspecialchars($fullName) ?>" title="Reject">
+                                        <i class="bi bi-x-lg"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                    </div>
                 </div>
 
                 <?php if ($total_pages > 1): ?>
@@ -571,17 +645,11 @@ require __DIR__ . '/../partials/sidebar.php';
     </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════
-     MODALS
-     ═══════════════════════════════════════════════════════ -->
-
 <!-- Approve Modal -->
 <div class="modal fade" id="approveModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
             <form method="POST" action="<?= URL_PREFIX ?>/approve_enrollment.php" id="approveForm">
-                
-                <!-- Hero Header -->
                 <div class="approve-hero" style="background: linear-gradient(135deg, #059669, #047857); padding: 2rem 2rem 1.5rem; color: #fff; position: relative;">
                     <button type="button" class="btn-close btn-close-white position-absolute" data-bs-dismiss="modal" style="top: 1rem; right: 1rem; z-index: 2;"></button>
                     <div class="approve-hero-inner" style="display: flex; align-items: center; gap: 1.25rem; position: relative; z-index: 1;">
@@ -601,13 +669,11 @@ require __DIR__ . '/../partials/sidebar.php';
                     </div>
                 </div>
 
-                <!-- Body -->
                 <div style="padding: 1.75rem 2rem;">
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <input type="hidden" name="enrollment_id" id="approveId">
                     <input type="hidden" name="action" value="approve">
 
-                    <!-- Terms & Conditions Section -->
                     <div style="font-size: 0.75rem; font-weight: 800; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
                         <i class="bi bi-shield-check" style="font-size: 1rem; color: var(--accent);"></i> Legal & Data Privacy Consent
                     </div>
@@ -644,7 +710,6 @@ require __DIR__ . '/../partials/sidebar.php';
                     </div>
                 </div>
 
-                <!-- Footer -->
                 <div style="padding: 1.25rem 2rem; background: var(--surface); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 1rem;">
                     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
                     <button type="submit" class="btn btn-confirm" id="btnConfirmApprove" disabled style="background: linear-gradient(135deg, #059669, #047857); border: none; color: #fff; box-shadow: 0 4px 12px -2px rgba(5,150,105,.4); padding: 0.65rem 1.5rem; font-weight: 600; border-radius: 10px; opacity: 0.5; cursor: not-allowed;">
@@ -656,7 +721,7 @@ require __DIR__ . '/../partials/sidebar.php';
     </div>
 </div>
 
-<!-- Review Modal (Full Application View) -->
+<!-- Review Modal -->
 <div class="modal fade review-modal" id="reviewModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered modal-xl">
         <div class="modal-content">
@@ -665,7 +730,6 @@ require __DIR__ . '/../partials/sidebar.php';
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body" id="reviewBody">
-                <!-- Loaded via JS -->
             </div>
             <div style="padding: 1.25rem 1.5rem; background: var(--surface-2); border-top: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 1rem;">
                 <div style="font-size:.8rem; color:var(--text-2);">
@@ -695,9 +759,9 @@ require __DIR__ . '/../partials/sidebar.php';
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <input type="hidden" name="enrollment_id" id="rejectId">
                     <input type="hidden" name="action" value="reject">
-                    
+
                     <p class="mb-4" style="font-size:.95rem;">Are you sure you want to reject <strong id="rejectName" class="text-danger"></strong>?</p>
-                    
+
                     <div class="mb-3">
                         <label class="form-label fw-bold" style="font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-2)">Quick Reasons</label>
                         <div class="quick-reasons">
@@ -727,23 +791,23 @@ require __DIR__ . '/../partials/sidebar.php';
 const URL_PREFIX = <?= json_encode(URL_PREFIX) ?>;
 const studentData = <?= json_encode($student_data_js, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
-// Quick filters
+// Quick filters — hide both table rows and cards; count only rows (1:1 mapping)
 (function () {
     const chips = document.querySelectorAll('.chip');
-    const rows  = document.querySelectorAll('#pendingTable tbody tr');
+    const items = document.querySelectorAll('#pendingTable tbody tr, #pendingCardsGrid .student-card');
     const visibleCountEl = document.getElementById('visibleCount');
 
     function applyFilter(filter) {
         let shown = 0;
-        rows.forEach(row => {
-            const tags = (row.dataset.rowFilter || '').split(' ');
+        items.forEach(el => {
+            const tags = (el.dataset.rowFilter || '').split(' ');
             let show = false;
             if (filter === 'all')          show = true;
             else if (filter === 'ready')   show = tags.includes('ready');
             else if (filter === 'nodocs')  show = tags.includes('nodocs');
             else if (filter === 'overdue') show = tags.includes('overdue');
-            row.style.display = show ? '' : 'none';
-            if (show) shown++;
+            el.style.display = show ? '' : 'none';
+            if (show && el.tagName === 'TR') shown++;
         });
         if (visibleCountEl) {
             visibleCountEl.textContent = (filter === 'all') ? '' : shown + ' shown';
@@ -769,7 +833,6 @@ document.querySelectorAll('.view-btn').forEach(btn => {
         const fullName = `${d.last_name}, ${d.first_name} ${d.middle_name || ''}`;
         document.getElementById('reviewName').innerHTML = `<i class="bi bi-person-lines-fill"></i> Application: ${fullName}`;
 
-        // Build Education HTML
         let eduHtml = '';
         if (d.education && d.education.length > 0) {
             d.education.forEach(e => {
@@ -785,7 +848,6 @@ document.querySelectorAll('.view-btn').forEach(btn => {
             eduHtml = '<div style="font-size:.8rem;color:var(--text-3);font-style:italic">No educational history provided.</div>';
         }
 
-        // Build Documents HTML
         let docsHtml = '';
         if (d.documents && d.documents.length > 0) {
             d.documents.forEach(doc => {
@@ -795,7 +857,6 @@ document.querySelectorAll('.view-btn').forEach(btn => {
                 const action = isUploaded 
                     ? `<a href="${URL_PREFIX}/view_document.php?id=${doc.id}" target="_blank"><i class="bi bi-box-arrow-up-right"></i> View File</a>` 
                     : `<span>Not Uploaded</span>`;
-                
                 docsHtml += `
                     <div class="doc-check-item ${cls}">
                         <div class="name"><i class="bi ${icon}"></i> ${doc.name}</div>
@@ -819,7 +880,7 @@ document.querySelectorAll('.view-btn').forEach(btn => {
                     <div class="review-item"><div class="lbl">Phone</div><div class="val">${d.phone || '—'}</div></div>
                 </div>
             </div>
-            
+
             <div class="review-section">
                 <div class="review-section-title"><i class="bi bi-geo-alt"></i> Address</div>
                 <div class="review-grid">
@@ -862,7 +923,7 @@ document.querySelectorAll('.view-btn').forEach(btn => {
                 <div class="review-section-title"><i class="bi bi-folder-check"></i> Entrance Documents</div>
                 <div class="doc-checklist">${docsHtml}</div>
             </div>
-            
+
             <div class="review-section" style="background:#fffbeb;">
                 <div class="review-section-title" style="color:#92400e;"><i class="bi bi-shield-check" style="color:#d97706;"></i> Legal & Data Privacy</div>
                 <div style="font-size:.8rem; color:#92400e; line-height:1.5;">
@@ -871,24 +932,23 @@ document.querySelectorAll('.view-btn').forEach(btn => {
                 </div>
             </div>
         `;
-        
+
         document.getElementById('reviewBody').innerHTML = html;
-        
-        // Setup the Approve button inside the review modal
+
         const reviewApproveBtn = document.getElementById('reviewApproveBtn');
         reviewApproveBtn.onclick = function() {
             bootstrap.Modal.getInstance(document.getElementById('reviewModal')).hide();
-            setTimeout(() => openApprove(d), 300); // Open approve modal
+            setTimeout(() => openApprove(d), 300);
         };
 
         new bootstrap.Modal(document.getElementById('reviewModal')).show();
     });
 });
 
-// Approve Modal Logic
+// Approve Modal
 function openApprove(d) {
     const fullName = `${d.last_name}, ${d.first_name} ${d.middle_name || ''}`;
-    
+
     document.getElementById('approveId').value = d.enrollment_id;
     document.getElementById('approveName').textContent = fullName;
     document.getElementById('approveIdno').textContent = d.student_id_number || '—';
@@ -897,7 +957,7 @@ function openApprove(d) {
 
     const emailEl = document.getElementById('approveEmailDisplay');
     const warnEl = document.getElementById('approveEmailWarn');
-    
+
     if (d.email && d.email.trim() !== '') {
         emailEl.textContent = d.email;
         emailEl.style.color = 'var(--accent)';
@@ -910,7 +970,6 @@ function openApprove(d) {
         warnEl.style.display = 'flex';
     }
 
-    // Reset T&C Checkbox and Disable Button
     const agreeCheckbox = document.getElementById('agreeTerms');
     const confirmBtn = document.getElementById('btnConfirmApprove');
     agreeCheckbox.checked = false;
@@ -918,7 +977,6 @@ function openApprove(d) {
     confirmBtn.style.opacity = '0.5';
     confirmBtn.style.cursor = 'not-allowed';
 
-    // Add event listener for the checkbox
     agreeCheckbox.onchange = function() {
         confirmBtn.disabled = !this.checked;
         confirmBtn.style.opacity = this.checked ? '1' : '0.5';
@@ -936,12 +994,12 @@ document.querySelectorAll('.approve-btn').forEach(btn => {
     });
 });
 
-// Reject Modal Logic & Quick Chips
+// Reject Modal
 document.querySelectorAll('.reject-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         document.getElementById('rejectId').value = btn.dataset.id;
         document.getElementById('rejectName').textContent = btn.dataset.name;
-        document.getElementById('rejectReasonText').value = ''; // Clear previous
+        document.getElementById('rejectReasonText').value = '';
         new bootstrap.Modal(document.getElementById('rejectModal')).show();
     });
 });

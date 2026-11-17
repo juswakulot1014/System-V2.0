@@ -4,19 +4,20 @@ date_default_timezone_set('Asia/Manila');
 
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
-require_once __DIR__ . '/../lib/teacher_scope.php';   // PATCH 1: helper
+require_once __DIR__ . '/../lib/teacher_scope.php';
+require_once __DIR__ . '/../lib/view_toggle.php';
+require_once __DIR__ . '/../print/render.php';
 
-$__nav_section     = 'dashboard';
+$__nav_section = 'dashboard';
 
-// PATCH 2: teacher scope state
 $__is_teacher = (($_SESSION['admin_role'] ?? '') === 'teacher');
 $__teacher_id = $__is_teacher ? (int)($_SESSION['admin_id'] ?? 0) : 0;
 
-/* ── Detect AJAX Requests ── */
-$is_ajax = (isset($_GET['ajax']) && $_GET['ajax'] === '1') || 
+$is_ajax = (isset($_GET['ajax']) && $_GET['ajax'] === '1') ||
            (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest');
 
-// Determine label based on folder
+$__print_mode = (($_GET['action'] ?? '') === 'print');
+
 $__dashboard_label = 'Admin';
 if (str_contains(URL_PREFIX, '/registrar')) $__dashboard_label = 'Registrar';
 if (str_contains(URL_PREFIX, '/teacher'))   $__dashboard_label = 'Teacher';
@@ -70,7 +71,6 @@ function dash_url(array $changes = []): string {
 
 function dash_csv_safe($v): string { $s = (string)$v; return preg_match('/^[=+\-@\t\r]/', $s) ? "'" . $s : $s; }
 
-// PATCH 3: dash_snapshot() accepts teacher_id and scopes all five queries
 function dash_snapshot(mysqli $conn, int $__teacher_id = 0): array {
     $week_start = date('Y-m-d', strtotime('monday this week'));
 
@@ -134,7 +134,6 @@ function dash_snapshot(mysqli $conn, int $__teacher_id = 0): array {
     ];
 }
 
-// PATCH 4: pass teacher_id into both snapshot call sites
 if (dash_get('action') === 'live') {
     header('Content-Type: application/json; charset=UTF-8');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
@@ -144,9 +143,6 @@ if (dash_get('action') === 'live') {
 
 $snap = dash_snapshot($conn, $__teacher_id);
 
-/* ═══════════════════════════════════════════════════════════
-   DEFAULT SCHOOL YEAR LOGIC
-   ═══════════════════════════════════════════════════════════ */
 $default_sy = '';
 $latest_sy_q = $conn->query("SELECT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC LIMIT 1");
 if ($latest_sy_q && $latest_sy_row = $latest_sy_q->fetch_assoc()) {
@@ -159,23 +155,26 @@ if (!isset($_GET['school_year'])) {
     $f_sy = trim((string)$_GET['school_year']);
 }
 
-$f_search = dash_get('search'); $f_grade  = dash_get('grade_level'); $f_strand = dash_get('strand'); $f_needs  = dash_get('needs_section') === '1';
+$f_search = dash_get('search');
+$f_grade  = dash_get('grade_level');
+$f_strand = dash_get('strand');
+$f_needs  = dash_get('needs_section') === '1';
 
-// SORTS: Defaulted to grade with a secondary sort by name
 $SORTS = [
-    'name' => 's.last_name {d}, s.first_name {d}', 
-    'lrn' => 's.lrn {d}', 
-    'id' => 's.student_id_number {d}', 
-    'grade' => 'le.grade_level {d}, s.last_name ASC, s.first_name ASC', 
+    'name'    => 's.last_name {d}, s.first_name {d}',
+    'lrn'     => 's.lrn {d}',
+    'id'      => 's.student_id_number {d}',
+    'grade'   => 'le.grade_level {d}, s.last_name ASC, s.first_name ASC',
     'section' => 'le.section {d}, le.grade_level ASC',
-    'strand' => 'le.strand {d}, le.grade_level ASC',
-    'status' => 'COALESCE(le.status, \'Active\') {d}, le.grade_level ASC'
+    'strand'  => 'le.strand {d}, le.grade_level ASC',
+    'status'  => 'COALESCE(le.status, \'Active\') {d}, le.grade_level ASC',
 ];
+$sort_in = dash_get('sort');
+$sort    = isset($SORTS[$sort_in]) ? $sort_in : 'grade';
+$dir_lc  = strtolower(dash_get('dir')) === 'desc' ? 'desc' : 'asc';
+$dir_sql = strtoupper($dir_lc);
 
-$sort_in = dash_get('sort'); $sort = isset($SORTS[$sort_in]) ? $sort_in : 'grade'; $dir_lc = strtolower(dash_get('dir')) === 'desc' ? 'desc' : 'asc'; $dir_sql = strtoupper($dir_lc);
-
-// PATCH 5: teacher scope added to the $where array FIRST (before user filters, so param order stays aligned)
-$where  = [DASH_VISIBLE]; $types  = ''; $params = [];
+$where = [DASH_VISIBLE]; $types = ''; $params = [];
 
 if ($__is_teacher) {
     $ts = teacher_scope_filter($conn, $__teacher_id, 'le');
@@ -184,92 +183,267 @@ if ($__is_teacher) {
     $params  = array_merge($params, $ts['params']);
 }
 
-if ($f_search !== '') { $where[] = "(s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)"; $like = '%' . addcslashes($f_search, '%_\\') . '%'; array_push($params, $like, $like, $like, $like); $types  .= 'ssss'; }
+if ($f_search !== '') { $where[] = "(s.first_name LIKE ? OR s.last_name LIKE ? OR s.lrn LIKE ? OR s.student_id_number LIKE ?)"; $like = '%' . addcslashes($f_search, '%_\\') . '%'; array_push($params, $like, $like, $like, $like); $types .= 'ssss'; }
 if ($f_grade !== '')  { $where[] = 'le.grade_level = ?'; $params[] = $f_grade;  $types .= 's'; }
 if ($f_sy !== '')     { $where[] = 'le.school_year = ?'; $params[] = $f_sy;     $types .= 's'; }
 if ($f_strand !== '') { $where[] = 'le.strand = ?';      $params[] = $f_strand; $types .= 's'; }
 if ($f_needs)         { $where[] = "(le.section IS NULL OR le.section = '')"; }
-$where_sql = 'WHERE ' . implode(' AND ', $where); $order_sql = str_replace('{d}', $dir_sql, $SORTS[$sort]);
+
+$where_sql = 'WHERE ' . implode(' AND ', $where);
+$order_sql = str_replace('{d}', $dir_sql, $SORTS[$sort]);
 
 if (dash_get('export') === 'csv') {
     $rows = dash_rows($conn, "SELECT " . DASH_DIR_COLUMNS . " " . DASH_BASE_FROM . " $where_sql ORDER BY $order_sql, s.student_id ASC LIMIT ?", $types . 'i', array_merge($params, [DASH_EXPORT_MAX]));
-    header('Content-Type: text/csv; charset=UTF-8'); header('Content-Disposition: attachment; filename="students_' . date('Ymd_His') . '.csv"');
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="students_' . date('Ymd_His') . '.csv"');
     $out = fopen('php://output', 'w'); fwrite($out, "\xEF\xBB\xBF");
     fputcsv($out, ['Student ID', 'LRN', 'Last Name', 'First Name', 'Middle Name', 'Sex', 'Grade Level', 'School Year', 'Strand', 'Program', 'Section', 'Status']);
-    foreach ($rows as $r) { fputcsv($out, array_map('dash_csv_safe', [$r['student_id_number'], $r['lrn'], $r['last_name'], $r['first_name'], $r['middle_name'], $r['sex'], $r['grade_level'], $r['school_year'], $r['strand'], $r['program'], $r['section'], $r['status']])); }
+    foreach ($rows as $r) {
+        fputcsv($out, array_map('dash_csv_safe', [
+            $r['student_id_number'], $r['lrn'], $r['last_name'], $r['first_name'], $r['middle_name'],
+            $r['sex'], $r['grade_level'], $r['school_year'], $r['strand'], $r['program'], $r['section'], $r['status'],
+        ]));
+    }
     fclose($out); exit;
 }
 
 $school_years = dash_rows($conn, "SELECT DISTINCT le.school_year AS v " . dash_vis("le.school_year IS NOT NULL AND le.school_year <> ''") . " ORDER BY v DESC");
-$strands = dash_rows($conn, "SELECT DISTINCT le.strand AS v " . dash_vis("le.strand IS NOT NULL AND le.strand <> ''") . " ORDER BY v");
+$strands      = dash_rows($conn, "SELECT DISTINCT le.strand AS v " . dash_vis("le.strand IS NOT NULL AND le.strand <> ''") . " ORDER BY v");
 
-$total_rows  = dash_scalar($conn, "SELECT COUNT(*) " . DASH_BASE_FROM . " $where_sql", $types, $params);
+$total_rows = dash_scalar($conn, "SELECT COUNT(*) " . DASH_BASE_FROM . " $where_sql", $types, $params);
+
+$__print_filters = [];
+if ($f_search !== '')  $__print_filters[] = 'Search: "' . $f_search . '"';
+if ($f_grade !== '')   $__print_filters[] = 'Grade ' . $f_grade;
+if ($f_strand !== '')  $__print_filters[] = 'Strand: ' . $f_strand;
+if ($f_sy !== '')      $__print_filters[] = 'School Year ' . $f_sy;
+if ($f_needs)          $__print_filters[] = 'Unassigned sections only';
+$__print_filter_str = empty($__print_filters) ? 'All records' : implode(' · ', $__print_filters);
+
+/* PRINT MODE — render everything through the shared document template */
+if ($__print_mode) {
+    $print_rows = dash_rows(
+        $conn,
+        "SELECT " . DASH_DIR_COLUMNS . " " . DASH_BASE_FROM . " $where_sql ORDER BY $order_sql, s.student_id ASC LIMIT ?",
+        $types . 'i',
+        array_merge($params, [DASH_EXPORT_MAX])
+    );
+
+    $admin_name = $_SESSION['admin_name']
+                ?? $_SESSION['admin_username']
+                ?? ucfirst((string)($_SESSION['admin_role'] ?? 'Administrator'));
+
+    $grade_total  = array_sum($snap['grade']['counts']);
+    $strand_total = array_sum($snap['strand']['counts']);
+
+    $body  = '';
+
+    $body .= '<div class="meta-block">'
+           . '<strong>Report scope:</strong> ' . doc_e($__print_filter_str) . '<br>'
+           . '<strong>Generated:</strong> ' . date('M d, Y g:i A') . '<br>'
+           . '<strong>Prepared by:</strong> ' . doc_e($admin_name) . ' (' . doc_e($__dashboard_label) . ')'
+           . '</div>';
+
+    $body .= '<span class="section-title">Enrollment Summary</span>';
+    $body .= '<table class="grid"><tbody>'
+           . '<tr>'
+           .     '<td><strong>Total Students</strong></td><td class="num">' . number_format($snap['stats']['total']) . '</td>'
+           .     '<td><strong>Active Enrolled</strong></td><td class="num">' . number_format($snap['stats']['active']) . '</td>'
+           .     '<td><strong>Sections</strong></td><td class="num">' . number_format($snap['stats']['sections']) . '</td>'
+           . '</tr>'
+           . '<tr>'
+           .     '<td><strong>Male</strong></td><td class="num">' . number_format($snap['stats']['boys']) . '</td>'
+           .     '<td><strong>Female</strong></td><td class="num">' . number_format($snap['stats']['girls']) . '</td>'
+           .     '<td><strong>Need Section</strong></td><td class="num">' . number_format($snap['stats']['no_section']) . '</td>'
+           . '</tr>'
+           . '<tr>'
+           .     '<td><strong>New This Week</strong></td><td class="num">' . number_format($snap['stats']['new_week']) . '</td>'
+           .     '<td><strong>Pending Enrollments</strong></td><td class="num">' . number_format($snap['pending']) . '</td>'
+           .     '<td></td><td></td>'
+           . '</tr>'
+           . '</tbody></table>';
+
+    $body .= '<span class="section-title">Enrollment by Grade Level</span>';
+    $body .= '<table class="grid"><thead><tr>'
+           . '<th>Grade Level</th><th class="num" style="width:80pt">Students</th><th class="num" style="width:60pt">Share</th>'
+           . '</tr></thead><tbody>';
+    if (empty($snap['grade']['labels'])) {
+        $body .= '<tr><td colspan="3" style="text-align:center;color:#6b7280;font-style:italic;">No grade data.</td></tr>';
+    } else {
+        foreach ($snap['grade']['labels'] as $idx => $lbl) {
+            $cnt = (int)($snap['grade']['counts'][$idx] ?? 0);
+            $pct = $grade_total > 0 ? round(($cnt / $grade_total) * 100, 1) : 0;
+            $body .= '<tr>'
+                   . '<td>' . doc_e((string)$lbl) . '</td>'
+                   . '<td class="num">' . number_format($cnt) . '</td>'
+                   . '<td class="num">' . $pct . '%</td>'
+                   . '</tr>';
+        }
+        $body .= '<tr>'
+               . '<td><strong>Total</strong></td>'
+               . '<td class="num"><strong>' . number_format($grade_total) . '</strong></td>'
+               . '<td class="num"><strong>' . ($grade_total > 0 ? '100%' : '—') . '</strong></td>'
+               . '</tr>';
+    }
+    $body .= '</tbody></table>';
+
+    $body .= '<span class="section-title">Strand Distribution</span>';
+    $body .= '<table class="grid"><thead><tr>'
+           . '<th>Strand</th><th class="num" style="width:80pt">Students</th><th class="num" style="width:60pt">Share</th>'
+           . '</tr></thead><tbody>';
+    if (empty($snap['strand']['labels'])) {
+        $body .= '<tr><td colspan="3" style="text-align:center;color:#6b7280;font-style:italic;">No strand data.</td></tr>';
+    } else {
+        foreach ($snap['strand']['labels'] as $idx => $lbl) {
+            $cnt = (int)($snap['strand']['counts'][$idx] ?? 0);
+            $pct = $strand_total > 0 ? round(($cnt / $strand_total) * 100, 1) : 0;
+            $body .= '<tr>'
+                   . '<td>' . doc_e((string)$lbl) . '</td>'
+                   . '<td class="num">' . number_format($cnt) . '</td>'
+                   . '<td class="num">' . $pct . '%</td>'
+                   . '</tr>';
+        }
+        $body .= '<tr>'
+               . '<td><strong>Total</strong></td>'
+               . '<td class="num"><strong>' . number_format($strand_total) . '</strong></td>'
+               . '<td class="num"><strong>' . ($strand_total > 0 ? '100%' : '—') . '</strong></td>'
+               . '</tr>';
+    }
+    $body .= '</tbody></table>';
+
+    $body .= '<span class="section-title">Student Directory &mdash; ' . number_format($total_rows) . ' record' . ($total_rows === 1 ? '' : 's') . '</span>';
+    if (empty($print_rows)) {
+        $body .= '<p style="font-style:italic;color:#6b7280;">No students match the current filters.</p>';
+    } else {
+        $body .= '<table class="grid"><thead><tr>'
+               . '<th style="width:24pt">#</th>'
+               . '<th style="width:68pt">Student ID</th>'
+               . '<th>Name</th>'
+               . '<th style="width:78pt">LRN</th>'
+               . '<th style="width:50pt">Grade</th>'
+               . '<th>Strand</th>'
+               . '<th style="width:60pt">Section</th>'
+               . '<th style="width:55pt">Status</th>'
+               . '</tr></thead><tbody>';
+        foreach ($print_rows as $i => $s) {
+            $name = trim(($s['last_name'] ?? '') . ', ' . ($s['first_name'] ?? ''));
+            $body .= '<tr>'
+                   . '<td class="num">' . ($i + 1) . '</td>'
+                   . '<td>' . doc_e($s['student_id_number'] ?: '—') . '</td>'
+                   . '<td>' . doc_e($name) . '</td>'
+                   . '<td>' . doc_e($s['lrn'] ?: '—') . '</td>'
+                   . '<td>' . doc_e($s['grade_level'] ?: '—') . '</td>'
+                   . '<td>' . doc_e($s['strand'] ?: '—') . '</td>'
+                   . '<td>' . doc_e($s['section'] ?: '—') . '</td>'
+                   . '<td>' . doc_e($s['status'] ?: '—') . '</td>'
+                   . '</tr>';
+        }
+        $body .= '</tbody></table>';
+    }
+
+    $body .= '<span class="section-title">Recent Enrollments</span>';
+    if (empty($snap['recent'])) {
+        $body .= '<p style="font-style:italic;color:#6b7280;">No recent enrollments.</p>';
+    } else {
+        $body .= '<table class="grid"><thead><tr>'
+               . '<th style="width:68pt">Student ID</th>'
+               . '<th>Name</th>'
+               . '<th style="width:78pt">LRN</th>'
+               . '<th style="width:50pt">Grade</th>'
+               . '<th>Strand</th>'
+               . '<th style="width:60pt">Section</th>'
+               . '<th style="width:80pt">Date Enrolled</th>'
+               . '</tr></thead><tbody>';
+        foreach ($snap['recent'] as $r) {
+            $body .= '<tr>'
+                   . '<td>' . doc_e($r['student_id_number'] ?: '—') . '</td>'
+                   . '<td>' . doc_e($r['name']) . '</td>'
+                   . '<td>' . doc_e($r['lrn'] ?: '—') . '</td>'
+                   . '<td>' . doc_e($r['grade_level'] ?: '—') . '</td>'
+                   . '<td>' . doc_e($r['strand'] ?: '—') . '</td>'
+                   . '<td>' . doc_e($r['section'] ?: '—') . '</td>'
+                   . '<td>' . doc_e($r['enrolled_label'] ?: '—') . '</td>'
+                   . '</tr>';
+        }
+        $body .= '</tbody></table>';
+    }
+
+    $ident = school_identity();
+
+    $doc = [
+        'title'       => 'Enrollment Dashboard Report',
+        'subtitle'    => $__print_filter_str,
+        'paper'       => 'A4',
+        'body'        => $body,
+        'control_no'  => 'DASH-' . date('Ymd-His'),
+        'copy_label'  => 'Internal Use',
+        'signatories' => $ident['signatories'] ?? [],
+    ];
+
+    output_document_print($doc);
+    exit;
+}
+
+/* NORMAL PAGE */
 $total_pages = max(1, (int)ceil($total_rows / DASH_PAGE_SIZE));
 $page        = max(1, min($total_pages, (int)($_GET['page'] ?? 1)));
 $offset      = ($page - 1) * DASH_PAGE_SIZE;
 
 $students = dash_rows($conn, "SELECT " . DASH_DIR_COLUMNS . " " . DASH_BASE_FROM . " $where_sql ORDER BY $order_sql, s.student_id ASC LIMIT ? OFFSET ?", $types . 'ii', array_merge($params, [DASH_PAGE_SIZE, $offset]));
 
-$range_from = $total_rows === 0 ? 0 : $offset + 1; $range_to = min($offset + DASH_PAGE_SIZE, $total_rows);
+$range_from = $total_rows === 0 ? 0 : $offset + 1;
+$range_to   = min($offset + DASH_PAGE_SIZE, $total_rows);
 $JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
 
 $page_title = $__dashboard_label . ' Dashboard • USAT Admin';
 $page_head  = '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>';
 $page_css   = '
-    /* --- LAYOUT FIXES TO PREVENT HORIZONTAL OVERFLOW --- */
-    .main-content {
-        min-width: 0; 
-        flex: 1;
-        overflow-x: hidden;
-    }
-    
-    .topbar {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        flex-wrap: wrap; 
-        gap: 1rem;
-        margin-bottom: 1.5rem;
-    }
-
-    /* --- CHARTS & CARDS --- */
+    .main-content { min-width: 0; flex: 1; overflow-x: hidden; }
+    .topbar { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
     .chart-wrap { position: relative; height: 260px; width: 100%; }
     .chart-wrap canvas { max-height: 100%; }
     .chart-empty { height: 260px; display: flex; align-items: center; justify-content: center; color: var(--text-3); font-size: .9rem; }
     .card { max-width: 100%; overflow: hidden; }
-
-    /* --- FILTER BAR --- */
     .filter-bar { grid-template-columns: minmax(200px,1.4fr) minmax(140px,1fr) minmax(140px,1fr) minmax(140px,1fr) auto; }
     .dash-quick { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
     .dash-quick .badge-count { background: rgba(255,255,255,.25); border-radius: 999px; padding: 0 .5rem; margin-left: .35rem; }
-    
-    /* --- STAT CARDS --- */
     .stat-card.is-link { text-decoration: none; color: inherit; cursor: pointer; }
     .stat-card.is-link:hover { transform: translateY(-1px); }
     .stat-card.is-active-filter { outline: 2px solid var(--accent, #4f46e5); }
-    
-    /* --- TABLES & PAGINATION --- */
     .sort-link { color: inherit; text-decoration: none; white-space: nowrap; display: inline-flex; align-items: center; gap: 0.25rem; }
     .sort-link:hover { text-decoration: underline; color: var(--accent); }
-    
     .sort-icon { font-size: 0.75em; transition: opacity 0.2s; }
     .sort-icon.active { opacity: 1; color: var(--accent); }
     .sort-icon.inactive { opacity: 0.2; }
-
     .dash-pager { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; padding: .9rem 1.25rem; border-top: 1px solid var(--border); }
     .dash-pager .pages { display: flex; align-items: center; gap: .6rem; }
     .dash-pager .pg-btn { padding: .35rem .8rem; border: 1px solid var(--border); border-radius: 8px; text-decoration: none; color: inherit; font-size: .85rem; }
     .dash-pager .pg-btn.disabled { opacity: .45; pointer-events: none; }
     .dash-pager .muted-note { color: var(--text-3); font-size: .85rem; }
-    
-    /* --- LIVE INDICATORS --- */
     .live-status { display: inline-flex; align-items: center; gap: .45rem; font-size: .8rem; color: var(--text-3); white-space: nowrap; }
     .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; display: inline-block; }
     .live-dot.live { background: #10b981; box-shadow: 0 0 0 0 rgba(16,185,129,.6); animation: livePulse 1.8s infinite; }
     .live-dot.offline { background: #ef4444; }
     @keyframes livePulse { 0% { box-shadow: 0 0 0 0 rgba(16,185,129,.55); } 70% { box-shadow: 0 0 0 7px rgba(16,185,129,0); } 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); } }
-    
-    /* --- RESPONSIVE ADJUSTMENTS --- */
+    .dash-view-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+        margin-bottom: .6rem;
+    }
+    .dash-view-label {
+        font-size: .78rem;
+        font-weight: 700;
+        color: var(--text-2);
+        text-transform: uppercase;
+        letter-spacing: .55px;
+        display: inline-flex;
+        align-items: center;
+        gap: .45rem;
+    }
+    .dash-view-label i { color: var(--accent); font-size: .9rem; }
     @media (max-width: 1024px) {
         .filter-bar { grid-template-columns: 1fr 1fr 1fr auto; }
         .filter-bar .actions { grid-column: 1 / -1; justify-content: flex-end; margin-top: .5rem; }
@@ -296,12 +470,11 @@ if (!$is_ajax) {
             </div>
             <div class="d-flex align-items-center gap-3 flex-wrap">
                 <span class="live-status" aria-live="polite"><span class="live-dot" id="liveDot"></span><span id="liveText">Connecting…</span></span>
-                <button class="btn btn-outline-secondary btn-sm" onclick="window.print()"><i class="bi bi-printer me-1"></i> Print</button>
+                <a class="btn btn-outline-secondary btn-sm" href="<?= dash_e(dash_url(['action' => 'print', 'ajax' => null, 'export' => null])) ?>" target="_blank" rel="noopener" title="Open print-ready document"><i class="bi bi-printer me-1"></i> Print report</a>
                 <button class="theme-btn" id="themeToggle" title="Toggle theme"><i class="bi bi-moon-stars-fill" id="themeIcon"></i></button>
             </div>
         </div>
-        
-        <!-- AJAX Container Starts Here -->
+
         <div id="ajax-container">
 <?php } ?>
 
@@ -316,19 +489,25 @@ if (!$is_ajax) {
                 <a class="btn btn-outline-success btn-sm" href="<?= dash_e(dash_url(['export' => 'csv', 'page' => null])) ?>"><i class="bi bi-filetype-csv me-1"></i> Export CSV</a>
             </div>
 
+            <div class="dash-view-bar">
+                <span class="dash-view-label"><i class="bi bi-pie-chart-fill"></i> Key Metrics</span>
+                <?= view_toggle('dashboard_stats', 'grid') ?>
+            </div>
+            <div class="<?= view_container_class('dashboard_stats', 'grid') ?>">
             <div class="stat-grid">
                 <div class="stat-card tone-blue"><div class="stat-icon"><i class="bi bi-people-fill"></i></div><div class="stat-info"><div class="stat-value" data-stat="total"><?= number_format($snap['stats']['total']) ?></div><div class="stat-label">Total Students</div><div class="stat-hint"><span data-stat="new_week"><?= number_format($snap['stats']['new_week']) ?></span> added this week</div></div></div>
                 <div class="stat-card tone-green"><div class="stat-icon"><i class="bi bi-mortarboard-fill"></i></div><div class="stat-info"><div class="stat-value" data-stat="active"><?= number_format($snap['stats']['active']) ?></div><div class="stat-label">Active Enrolled</div><div class="stat-hint">Current enrollment status</div></div></div>
                 <div class="stat-card tone-purple"><div class="stat-icon"><i class="bi bi-diagram-3"></i></div><div class="stat-info"><div class="stat-value" data-stat="sections"><?= number_format($snap['stats']['sections']) ?></div><div class="stat-label">Sections</div><div class="stat-hint">Across all grade levels</div></div></div>
-                
+
                 <a class="stat-card tone-amber is-link <?= $f_needs ? 'is-active-filter' : '' ?>" href="<?= dash_e(dash_url(['needs_section' => $f_needs ? null : 1, 'page' => null])) ?>" title="Show only students without a section">
                     <div class="stat-icon"><i class="bi bi-exclamation-triangle"></i></div>
                     <div class="stat-info"><div class="stat-value" data-stat="no_section"><?= number_format($snap['stats']['no_section']) ?></div><div class="stat-label">Need Section</div><div class="stat-hint"><?= $f_needs ? 'Filter on: click to clear' : 'Click to filter' ?></div></div>
                 </a>
-                
+
                 <div class="stat-card tone-blue"><div class="stat-icon"><i class="bi bi-gender-male"></i></div><div class="stat-info"><div class="stat-value" data-stat="boys"><?= number_format($snap['stats']['boys']) ?></div><div class="stat-label">Male</div></div></div>
                 <div class="stat-card tone-red"><div class="stat-icon"><i class="bi bi-gender-female"></i></div><div class="stat-info"><div class="stat-value" data-stat="girls"><?= number_format($snap['stats']['girls']) ?></div><div class="stat-label">Female</div></div></div>
             </div>
+            </div><!-- /view-container -->
 
             <div class="row g-3 mt-1">
                 <div class="col-lg-7"><div class="card h-100"><div class="card-header"><h3><i class="bi bi-bar-chart"></i> Enrollment by Grade Level</h3><span class="hint">Students per grade</span></div><div class="card-body"><div class="chart-wrap" id="gradeWrap" style="<?= !empty($snap['grade']['labels']) ? '' : 'display:none' ?>"><canvas id="gradeChart"></canvas></div><div class="chart-empty" id="gradeEmpty" style="<?= !empty($snap['grade']['labels']) ? 'display:none' : '' ?>">No grade data yet.</div></div></div></div>
@@ -428,8 +607,8 @@ if (!$is_ajax) {
             </div>
 
 <?php if (!$is_ajax) { ?>
-        </div> <!-- end #ajax-container -->
-    </div> <!-- end main-content -->
+        </div>
+    </div>
 
     <script>
     (function () {
@@ -441,10 +620,10 @@ if (!$is_ajax) {
         const PALETTE     = ['#4f46e5','#7c3aed','#6366f1','#818cf8','#a5b4fc','#c7d2fe','#8b5cf6','#6d28d9'];
         const HAS_CHART   = typeof Chart !== 'undefined';
         const INITIAL     = <?= json_encode($snap, $JSON_FLAGS) ?>;
-        
+
         let gradeChart = null, strandChart = null;
         let lastSig = '', failures = 0, timer = null, inFlight = false;
-        
+
         const $ = id => document.getElementById(id);
         const nf = n => Number(n || 0).toLocaleString('en-US');
         const cssVar = name => getComputedStyle(root).getPropertyValue(name).trim();
@@ -507,11 +686,13 @@ if (!$is_ajax) {
             });
         }
 
-        window.applySnapshot = function(d) {
+        function applySnapshot(d) {
             const sig = JSON.stringify([d.stats, d.pending, d.grade, d.strand, d.recent]); if (sig === lastSig) return; lastSig = sig;
             document.querySelectorAll('[data-stat]').forEach(el => { const key = el.dataset.stat; const value = key === 'pending' ? d.pending : d.stats[key]; if (value !== undefined) el.textContent = nf(value); });
             renderGrade(d.grade); renderStrand(d.strand); renderRecent(d.recent);
-        };
+        }
+
+        if (INITIAL) { applySnapshot(INITIAL); setStatus('live', 'Live · updated ' + INITIAL.server_time_label); }
 
         function schedule() { clearTimeout(timer); const delay = failures ? Math.min(LIVE_MS * Math.pow(2, failures), 5 * 60 * 1000) : LIVE_MS; timer = setTimeout(refresh, delay); }
 
@@ -526,21 +707,18 @@ if (!$is_ajax) {
 
         document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
         new MutationObserver(muts => { muts.forEach(m => { if (m.attributeName === 'data-bs-theme') refreshChartColors(); }); }).observe(root, { attributes: true });
-        
-        if (INITIAL) {
-            applySnapshot(INITIAL); setStatus('live', 'Live · updated ' + INITIAL.server_time_label); schedule();
-        }
 
-        // AJAX NAVIGATION LOGIC
+        schedule();
+
         const container = document.getElementById('ajax-container');
-        
+
         function loadAjax(url) {
             if (!container) return;
             container.style.opacity = '0.5';
             container.style.pointerEvents = 'none';
-            
+
             const ajaxUrl = url + (url.includes('?') ? '&' : '?') + 'ajax=1';
-            
+
             fetch(ajaxUrl, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
                 .then(r => r.text())
                 .then(html => {
@@ -548,49 +726,39 @@ if (!$is_ajax) {
                     container.style.opacity = '1';
                     container.style.pointerEvents = 'auto';
                     window.history.pushState(null, '', url);
-                    
-                    // Re-fetch live snapshot to update charts and stats properly
-                    fetch(LIVE_URL)
+
+                    if (gradeChart)  { gradeChart.destroy(); gradeChart = null; }
+                    if (strandChart) { strandChart.destroy(); strandChart = null; }
+                    lastSig = '';
+
+                    fetch(LIVE_URL, { headers: { 'Accept': 'application/json' }, cache: 'no-store', credentials: 'same-origin' })
                         .then(res => res.json())
-                        .then(data => {
-                            if (gradeChart) { gradeChart.destroy(); gradeChart = null; }
-                            if (strandChart) { strandChart.destroy(); strandChart = null; }
-                            lastSig = ''; // force update
-                            applySnapshot(data);
-                        });
+                        .then(data => applySnapshot(data))
+                        .catch(() => { lastSig = ''; applySnapshot(INITIAL); });
                 })
                 .catch(() => window.location.href = url);
         }
 
-        container.addEventListener('click', function(e) {
+        container.addEventListener('click', function (e) {
             const link = e.target.closest('.sort-link, .dash-pager a, .stat-card.is-link, .reset-btn');
             if (!link) return;
             if (link.classList.contains('disabled')) return;
-            
             e.preventDefault();
             let url = link.getAttribute('href');
-            
-            if (link.classList.contains('reset-btn')) {
-                url = '<?= URL_PREFIX ?>/dashboard.php';
-            }
-            
+            if (link.classList.contains('reset-btn')) url = '<?= URL_PREFIX ?>/dashboard.php';
             loadAjax(url);
         });
 
-        container.addEventListener('submit', function(e) {
+        container.addEventListener('submit', function (e) {
             if (e.target.matches('#filterForm')) {
                 e.preventDefault();
-                const formData = new FormData(e.target);
-                const params = new URLSearchParams(formData);
-                const cleanUrl = '?' + params.toString();
-                loadAjax(cleanUrl);
+                const fd = new FormData(e.target);
+                const params = new URLSearchParams(fd);
+                loadAjax('?' + params.toString());
             }
         });
 
-        window.addEventListener('popstate', function() {
-            loadAjax(window.location.href);
-        });
-
+        window.addEventListener('popstate', () => loadAjax(window.location.href));
     })();
     </script>
 

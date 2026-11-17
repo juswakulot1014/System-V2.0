@@ -5,6 +5,7 @@ require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
 require_once __DIR__ . '/../../config/mailer.php';
 require_once __DIR__ . '/../lib/teacher_scope.php';
+require_once __DIR__ . '/../lib/dir_view.php';
 
 $__nav_section = 'system';
 
@@ -13,12 +14,12 @@ if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true))
     exit('Forbidden');
 }
 
+$__view = dir_view('teacher_assignments');
+
 $flash = $_SESSION['ta_flash'] ?? null;
 unset($_SESSION['ta_flash']);
 
-/* ═══ COLUMN LIMITS ═══
-   Keep in sync with the teacher_sections schema. If you widen the columns,
-   update both the ALTER TABLE migration and these constants. */
+/* ═══ COLUMN LIMITS ═══ */
 const TA_SECTION_MAXLEN = 255;
 const TA_GRADE_MAXLEN   = 64;
 const TA_SY_MAXLEN      = 20;
@@ -27,12 +28,9 @@ const TA_PROGRAM_MAXLEN = 128;
 /* ═══ HELPER: dashboard URL without trusting Host header ═══ */
 if (!function_exists('ta_dashboard_url')) {
     function ta_dashboard_url(): string {
-        // Preferred: a configured absolute base URL, e.g.
-        //   define('APP_BASE_URL', 'https://usat.example.edu');
         if (defined('APP_BASE_URL') && APP_BASE_URL !== '') {
             return rtrim(APP_BASE_URL, '/') . '/dashboard.php';
         }
-        // Fallback: SERVER_NAME comes from web-server config, not the Host header.
         $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
         $host   = $_SERVER['SERVER_NAME'] ?? 'localhost';
         $port   = $_SERVER['SERVER_PORT'] ?? '';
@@ -51,7 +49,6 @@ if (!function_exists('create_email_logo_temp')) {
         $files = glob($dir . 'usat.*');
         if (empty($files)) return null;
 
-        // Prefer the newest logo rather than an arbitrary filesystem pick.
         usort($files, static fn($a, $b) => @filemtime($b) <=> @filemtime($a));
         $path = $files[0];
 
@@ -79,8 +76,6 @@ if (!function_exists('create_email_logo_temp')) {
         imagefill($new_im, 0, 0, $white);
         imagecopyresampled($new_im, $im, 0, 0, 0, 0, $new_w, $new_h, $w, $h);
 
-        // tempnam() already created the extensionless file; remove it so
-        // imagejpeg() writes a fresh .jpg and we don't leak the original.
         $temp = tempnam(sys_get_temp_dir(), 'email_logo_');
         if ($temp === false) {
             imagedestroy($im);
@@ -151,11 +146,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
         try {
             $conn->begin_transaction();
 
-            // Advisory clear and insert share one transaction so a failed
-            // insert never leaves the cluster without an advisory teacher.
-            // This is still check-then-act against a concurrent session; for a
-            // hard invariant add a unique key on
-            // (section, grade_level, school_year, program) filtered on is_advisory=1.
             if ($is_advisory) {
                 $clear = $conn->prepare("
                     UPDATE teacher_sections
@@ -176,8 +166,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
             ");
             $ins->bind_param('issssii', $teacher_id, $section, $grade, $sy, $program, $is_advisory, $actor);
             $ins->execute();
-            // affected_rows: 1 = inserted, 2 = updated, 0 = matched unchanged.
-            // Only brand-new inserts trigger the notification email.
             $is_new_assignment = ($ins->affected_rows === 1);
             $ins->close();
 
@@ -203,8 +191,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
         }
     }
 
-    // Email is sent only after commit. A mail failure never rolls back the DB
-    // write; it just downgrades the flash message to a warning.
     $email_note = '';
     if ($err === '' && $is_new_assignment && !empty($teacher_data['email'])
         && filter_var($teacher_data['email'], FILTER_VALIDATE_EMAIL)) {
@@ -298,8 +284,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
                 $mail->addEmbeddedImage($temp_logo, 'usat_logo');
             }
 
-            // PHPMailer only throws when ExceptionMode is on; check the return
-            // value so a silent send failure is not reported as success.
             if (!$mail->send()) {
                 throw new \RuntimeException($mail->ErrorInfo ?: 'send() returned false');
             }
@@ -358,6 +342,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['unassign'])) {
     exit;
 }
 
+/* ═══ FILTER: TEACHER ═══ */
+$filter_teacher_id = (int)($_GET['teacher_id'] ?? 0);
+
 /* ═══ PAGINATION + DATA ═══ */
 $page  = max(1, (int)($_GET['page'] ?? 1));
 $limit = 10;
@@ -368,13 +355,61 @@ $offset            = 0;
 $teachers          = [];
 $assignments       = [];
 $clusters          = [];
+$teacher_counts    = [];
+$filtered_teacher  = null;
+$filtered_adv_sections = '';
+$filtered_sub_count    = 0;
 
 try {
-    $total_assignments = (int)($conn->query("SELECT COUNT(*) FROM teacher_sections")->fetch_row()[0] ?? 0);
-    $total_pages       = max(1, (int)ceil($total_assignments / $limit));
-    $page              = min($page, $total_pages);
-    $offset            = ($page - 1) * $limit;
+    /* ── Counts per teacher (for the picker + context bar) ── */
+    $tc_result = $conn->query("
+        SELECT teacher_id,
+               SUM(CASE WHEN is_advisory = 1 THEN 1 ELSE 0 END) AS adv_ct,
+               SUM(CASE WHEN is_advisory = 0 THEN 1 ELSE 0 END) AS sub_ct,
+               GROUP_CONCAT(CASE WHEN is_advisory = 1 THEN section END SEPARATOR ', ') AS adv_sections
+          FROM teacher_sections
+         GROUP BY teacher_id
+    ");
+    while ($tc = $tc_result->fetch_assoc()) {
+        $teacher_counts[(int)$tc['teacher_id']] = [
+            'adv'          => (int)$tc['adv_ct'],
+            'sub'          => (int)$tc['sub_ct'],
+            'adv_sections' => (string)($tc['adv_sections'] ?? ''),
+        ];
+    }
 
+    /* ── Filtered context ── */
+    if ($filter_teacher_id > 0) {
+        $ctx_stmt = $conn->prepare("SELECT admin_id, fullname, username FROM admins WHERE admin_id = ? AND role = 'teacher' LIMIT 1");
+        $ctx_stmt->bind_param('i', $filter_teacher_id);
+        $ctx_stmt->execute();
+        $filtered_teacher = $ctx_stmt->get_result()->fetch_assoc();
+        $ctx_stmt->close();
+
+        if ($filtered_teacher) {
+            $filtered_adv_sections = $teacher_counts[$filter_teacher_id]['adv_sections'] ?? '';
+            $filtered_sub_count    = (int)($teacher_counts[$filter_teacher_id]['sub'] ?? 0);
+        } else {
+            $filter_teacher_id = 0;
+        }
+    }
+
+    /* ── Total count (respects filter) ── */
+    if ($filter_teacher_id > 0) {
+        $cnt_stmt = $conn->prepare("SELECT COUNT(*) FROM teacher_sections WHERE teacher_id = ?");
+        $cnt_stmt->bind_param('i', $filter_teacher_id);
+        $cnt_stmt->execute();
+        $total_assignments = (int)($cnt_stmt->get_result()->fetch_row()[0] ?? 0);
+        $cnt_stmt->close();
+    } else {
+        $total_assignments = (int)($conn->query("SELECT COUNT(*) FROM teacher_sections")->fetch_row()[0] ?? 0);
+    }
+
+    $total_pages = max(1, (int)ceil($total_assignments / $limit));
+    $page        = min($page, $total_pages);
+    $offset      = ($page - 1) * $limit;
+
+    /* ── Teacher roster ── */
     $teachers = $conn->query("
         SELECT admin_id, fullname, username, email
           FROM admins
@@ -382,15 +417,27 @@ try {
          ORDER BY fullname
     ")->fetch_all(MYSQLI_ASSOC);
 
-    $assignments = $conn->query("
+    /* ── Assignments (respects filter; advisory first) ── */
+    $assign_sql = "
         SELECT ts.assignment_id, ts.teacher_id, ts.section, ts.grade_level, ts.school_year, ts.program, ts.is_advisory,
                a.fullname AS teacher_name, a.username
           FROM teacher_sections ts
           JOIN admins a ON a.admin_id = ts.teacher_id
-         ORDER BY a.fullname ASC, ts.grade_level ASC, ts.section ASC
-         LIMIT $limit OFFSET $offset
-    ")->fetch_all(MYSQLI_ASSOC);
+    ";
+    if ($filter_teacher_id > 0) $assign_sql .= " WHERE ts.teacher_id = ? ";
+    $assign_sql .= " ORDER BY a.fullname ASC, ts.is_advisory DESC, ts.grade_level ASC, ts.section ASC LIMIT ? OFFSET ?";
 
+    $assign_stmt = $conn->prepare($assign_sql);
+    if ($filter_teacher_id > 0) {
+        $assign_stmt->bind_param('iii', $filter_teacher_id, $limit, $offset);
+    } else {
+        $assign_stmt->bind_param('ii', $limit, $offset);
+    }
+    $assign_stmt->execute();
+    $assignments = $assign_stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $assign_stmt->close();
+
+    /* ── Section clusters available for new assignments ── */
     $clusters = $conn->query("
         SELECT DISTINCT section, grade_level, school_year, COALESCE(program,'') AS program
           FROM enrollment_form
@@ -401,19 +448,22 @@ try {
 } catch (\mysqli_sql_exception $e) {
     error_log('teacher_assignments load failed: ' . $e->getMessage());
     $flash = ['type' => 'error', 'msg' => 'Could not load assignments right now. Please try again shortly.'];
-    $teachers = $assignments = $clusters = [];
+    $teachers = $assignments = $clusters = $teacher_counts = [];
     $total_assignments = 0;
     $total_pages = 1;
     $offset = 0;
     $page = 1;
+    $filtered_teacher = null;
 }
+
+/* Pagination string preserves the teacher filter */
+$pagination_qs = $filter_teacher_id > 0 ? 'teacher_id=' . $filter_teacher_id . '&' : '';
 
 $page_title = 'Teacher Assignments • USAT Admin';
 $page_css = <<<'CSS'
     .empty-note { padding: 2.5rem 1.5rem; text-align:center; color: var(--text-2); }
     .cluster-pill { display:inline-block; padding:.15rem .55rem; border-radius:6px; font-size:.7rem; font-weight:600; background:var(--surface-2); border:1px solid var(--border); color:var(--text-2); }
 
-    /* Pagination */
     .pagination-bar { display: flex; justify-content: space-between; align-items: center; padding: 1.25rem; border-top: 1px solid var(--border); flex-wrap: wrap; gap: 1rem; }
     .page-info { font-size: .85rem; color: var(--text-2); font-weight: 500; }
     .pagination { display: inline-flex; align-items: center; gap: .25rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: .25rem; }
@@ -422,6 +472,78 @@ $page_css = <<<'CSS'
     .page-btn.disabled { opacity: .4; cursor: not-allowed; }
     .page-btn.active { background: var(--accent); color: #fff; }
     .page-btn.active:hover { background: var(--accent); color: #fff; }
+
+    /* Teacher filter picker */
+    .ta-filter-select {
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: .5rem .85rem;
+        font-size: .85rem;
+        color: var(--text);
+        font-family: inherit;
+        max-width: 380px;
+        cursor: pointer;
+    }
+    .ta-filter-select:focus {
+        outline: none;
+        border-color: var(--accent);
+        background: var(--surface);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+
+    /* Filtered context bar */
+    .ta-context {
+        display: flex;
+        align-items: center;
+        gap: .85rem;
+        flex-wrap: wrap;
+        padding: .9rem 1.25rem;
+        background: linear-gradient(90deg, var(--accent-soft), transparent);
+        border-bottom: 1px solid var(--border);
+    }
+    .ta-context-avatar {
+        width: 42px; height: 42px; border-radius: 12px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        color: #fff; display: flex; align-items: center; justify-content: center;
+        font-weight: 800; font-size: .9rem; flex-shrink: 0;
+        box-shadow: 0 4px 12px -4px rgba(79,70,229,.5);
+    }
+    .ta-context-info { flex: 1; min-width: 0; }
+    .ta-context-name {
+        font-weight: 700; font-size: .95rem; color: var(--text);
+        line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .ta-context-meta {
+        font-size: .75rem; color: var(--text-2); margin-top: .2rem;
+        display: flex; gap: .5rem; flex-wrap: wrap;
+    }
+    .ta-context-meta .sep { opacity: .4; }
+    .ta-context-meta strong { color: var(--text); }
+    .ta-context-clear {
+        font-size: .78rem; font-weight: 600; color: var(--accent);
+        text-decoration: none; white-space: nowrap;
+        padding: .35rem .7rem; border-radius: 8px;
+        transition: background .15s;
+    }
+    .ta-context-clear:hover { background: var(--accent-soft); color: var(--accent); text-decoration: none; }
+
+    /* Role pills in table */
+    .role-pill {
+        display: inline-flex; align-items: center; gap: .35rem;
+        padding: .25rem .65rem; border-radius: 999px;
+        font-size: .7rem; font-weight: 700; white-space: nowrap;
+        border: 1px solid transparent;
+    }
+    .role-pill.advisory {
+        background: var(--amber-soft); color: var(--amber);
+        border-color: color-mix(in srgb, var(--amber) 28%, transparent);
+    }
+    .role-pill.subject {
+        background: var(--accent-soft); color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+    }
+    .role-pill i { font-size: .75rem; }
 CSS;
 
 require __DIR__ . '/../partials/head.php';
@@ -465,16 +587,16 @@ require __DIR__ . '/../partials/sidebar.php';
                     No sections with active enrollments yet. Assign sections to students first.
                 </div>
             <?php else: ?>
-                <form method="POST" class="row g-3">
+                <form method="POST" class="row g-3" id="assignForm">
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
                     <input type="hidden" name="assign" value="1">
 
                     <div class="col-md-5">
                         <label class="form-label">Teacher</label>
-                        <select name="teacher_id" class="form-select" required>
+                        <select name="teacher_id" id="teacherSelect" class="form-select" required>
                             <option value="">— Select teacher —</option>
                             <?php foreach ($teachers as $t): ?>
-                                <option value="<?= (int)$t['admin_id'] ?>">
+                                <option value="<?= (int)$t['admin_id'] ?>" <?= $filter_teacher_id === (int)$t['admin_id'] ? 'selected' : '' ?>>
                                     <?= htmlspecialchars($t['fullname']) ?> (@<?= htmlspecialchars($t['username']) ?>)
                                     <?= empty($t['email']) ? ' [No Email]' : '' ?>
                                 </option>
@@ -537,65 +659,202 @@ require __DIR__ . '/../partials/sidebar.php';
     <div class="card">
         <div class="card-header">
             <h3>
-                <i class="bi bi-list-check"></i> Current Assignments
+                <i class="bi bi-list-check"></i>
+                <?php if ($filtered_teacher): ?>
+                    <?= htmlspecialchars($filtered_teacher['fullname']) ?>'s Assignments
+                <?php else: ?>
+                    Current Assignments
+                <?php endif; ?>
                 <span class="hint">(<?= number_format($total_assignments) ?>)</span>
             </h3>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <?php if (!empty($teachers)): ?>
+                    <select class="ta-filter-select" onchange="if(this.value){window.location='?teacher_id='+encodeURIComponent(this.value)}else{window.location='<?= URL_PREFIX ?>/teacher_assignments.php'}">
+                        <option value="">— All Teachers —</option>
+                        <?php foreach ($teachers as $t):
+                            $tid  = (int)$t['admin_id'];
+                            $tc   = $teacher_counts[$tid] ?? ['adv' => 0, 'sub' => 0, 'adv_sections' => ''];
+                            $bits = [];
+                            if ($tc['adv'] > 0) {
+                                $bits[] = 'advisor: ' . ($tc['adv_sections'] ?: 'yes');
+                            }
+                            if ($tc['sub'] > 0) {
+                                $bits[] = $tc['sub'] . ' subject section' . ($tc['sub'] === 1 ? '' : 's');
+                            }
+                            if (empty($bits)) $bits[] = 'no assignments';
+                        ?>
+                            <option value="<?= $tid ?>" <?= $filter_teacher_id === $tid ? 'selected' : '' ?>>
+                                <?= htmlspecialchars($t['fullname']) ?> (@<?= htmlspecialchars($t['username']) ?>) — <?= htmlspecialchars(implode(' · ', $bits)) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                <?php endif; ?>
+                <?php if (!empty($assignments)): ?>
+                    <?= dir_view_toggle($__view) ?>
+                <?php endif; ?>
+            </div>
         </div>
-        <div class="card-body no-padding">
+
+        <?php if ($filtered_teacher): ?>
+            <?php
+            $ctx_initials = '';
+            foreach (preg_split('/\s+/', trim((string)$filtered_teacher['fullname'])) as $part) {
+                if ($part !== '') $ctx_initials .= mb_strtoupper(mb_substr($part, 0, 1));
+                if (mb_strlen($ctx_initials) >= 2) break;
+            }
+            if ($ctx_initials === '') $ctx_initials = 'T';
+            ?>
+            <div class="ta-context">
+                <div class="ta-context-avatar"><?= htmlspecialchars($ctx_initials) ?></div>
+                <div class="ta-context-info">
+                    <div class="ta-context-name"><?= htmlspecialchars($filtered_teacher['fullname']) ?></div>
+                    <div class="ta-context-meta">
+                        <span>@<?= htmlspecialchars($filtered_teacher['username']) ?></span>
+                        <?php if ($filtered_adv_sections !== ''): ?>
+                            <span class="sep">·</span>
+                            <span><strong>Advisory:</strong> <?= htmlspecialchars($filtered_adv_sections) ?></span>
+                        <?php else: ?>
+                            <span class="sep">·</span>
+                            <span style="font-style:italic">No advisory section</span>
+                        <?php endif; ?>
+                        <span class="sep">·</span>
+                        <span><strong><?= $filtered_sub_count ?></strong> subject section<?= $filtered_sub_count === 1 ? '' : 's' ?></span>
+                    </div>
+                </div>
+                <a href="<?= URL_PREFIX ?>/teacher_assignments.php" class="ta-context-clear">
+                    <i class="bi bi-x-circle"></i> Clear filter
+                </a>
+            </div>
+        <?php endif; ?>
+
+        <div class="card-body no-padding <?= dir_view_class($__view) ?>" data-page-key="teacher_assignments">
             <?php if (empty($assignments)): ?>
                 <div class="empty-note">
-                    No assignments yet. Teachers see an empty dashboard until you assign them a section.
+                    <?php if ($filtered_teacher): ?>
+                        No assignments for <strong><?= htmlspecialchars($filtered_teacher['fullname']) ?></strong> yet.
+                        Use the form above to assign them a section.
+                    <?php else: ?>
+                        No assignments yet. Teachers see an empty dashboard until you assign them a section.
+                    <?php endif; ?>
                 </div>
             <?php else: ?>
-                <div class="table-scroll">
-                    <table class="table-admin">
-                        <thead>
-                            <tr>
-                                <th>Teacher</th>
-                                <th>Section</th>
-                                <th>Grade</th>
-                                <th>School Year</th>
-                                <th>Program</th>
-                                <th style="width:100px;text-align:right">Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                        <?php foreach ($assignments as $a): ?>
-                            <tr>
-                                <td>
-                                    <div class="cell-strong"><?= htmlspecialchars($a['teacher_name']) ?></div>
-                                    <div class="cell-muted" style="font-size:.72rem">@<?= htmlspecialchars($a['username']) ?></div>
-                                </td>
-                                <td>
-                                    <span class="pill info" style="text-transform:none;letter-spacing:0"><?= htmlspecialchars($a['section']) ?></span>
-                                    <?php if (!empty($a['is_advisory'])): ?>
-                                        <span class="badge bg-warning text-dark ms-1" style="font-size:.65rem;" title="Advisory Teacher"><i class="bi bi-star-fill"></i> Advisory</span>
-                                    <?php endif; ?>
-                                </td>
-                                <td><?= htmlspecialchars($a['grade_level']) ?></td>
-                                <td><?= htmlspecialchars($a['school_year']) ?></td>
-                                <td>
-                                    <?php if ($a['program'] !== ''): ?>
-                                        <span class="cluster-pill"><?= htmlspecialchars($a['program']) ?></span>
+                <div class="dir-table-wrap">
+                    <div class="table-scroll">
+                        <table class="table-admin">
+                            <thead>
+                                <tr>
+                                    <th>Teacher</th>
+                                    <th>Section</th>
+                                    <th>Grade</th>
+                                    <th>School Year</th>
+                                    <th>Program</th>
+                                    <th style="width:110px">Role</th>
+                                    <th style="width:100px;text-align:right">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                            <?php foreach ($assignments as $a): ?>
+                                <tr>
+                                    <td>
+                                        <div class="cell-strong"><?= htmlspecialchars($a['teacher_name']) ?></div>
+                                        <div class="cell-muted" style="font-size:.72rem">@<?= htmlspecialchars($a['username']) ?></div>
+                                    </td>
+                                    <td>
+                                        <span class="pill info" style="text-transform:none;letter-spacing:0"><?= htmlspecialchars($a['section']) ?></span>
+                                    </td>
+                                    <td><?= htmlspecialchars($a['grade_level']) ?></td>
+                                    <td><?= htmlspecialchars($a['school_year']) ?></td>
+                                    <td>
+                                        <?php if ($a['program'] !== ''): ?>
+                                            <span class="cluster-pill"><?= htmlspecialchars($a['program']) ?></span>
+                                        <?php else: ?>
+                                            <span class="cell-muted">—</span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <?php if (!empty($a['is_advisory'])): ?>
+                                            <span class="role-pill advisory"><i class="bi bi-star-fill"></i> Advisory</span>
+                                        <?php else: ?>
+                                            <span class="role-pill subject"><i class="bi bi-person-check"></i> Subject</span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td style="text-align:right">
+                                        <form method="POST" class="m-0 d-inline"
+                                              onsubmit="return confirm('Remove this assignment?');">
+                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+                                            <input type="hidden" name="unassign" value="1">
+                                            <input type="hidden" name="id" value="<?= (int)$a['assignment_id'] ?>">
+                                            <button class="btn btn-outline-danger btn-xs" title="Remove">
+                                                <i class="bi bi-trash3"></i>
+                                            </button>
+                                        </form>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="dir-cards-wrap">
+                    <div class="student-cards-grid">
+                        <?php foreach ($assignments as $a):
+                            $teacher_name = $a['teacher_name'] ?? 'Teacher';
+                            $name_parts   = preg_split('/\s+/', trim($teacher_name));
+                            $initials     = strtoupper(
+                                substr($name_parts[0] ?? 'T', 0, 1) .
+                                substr($name_parts[count($name_parts) - 1] ?? '', 0, 1)
+                            );
+                            if ($initials === '' || $initials === 'T') $initials = 'T';
+                            $is_adv = !empty($a['is_advisory']);
+                        ?>
+                            <div class="student-card">
+                                <div class="student-card-header">
+                                    <div class="student-avatar-mini"><?= htmlspecialchars($initials) ?></div>
+                                    <div class="student-card-info">
+                                        <div class="student-card-name"><?= htmlspecialchars($teacher_name) ?></div>
+                                        <div class="student-card-meta">
+                                            <span>@<?= htmlspecialchars($a['username']) ?></span>
+                                            <span class="sep">·</span>
+                                            <span>#<?= (int)$a['assignment_id'] ?></span>
+                                        </div>
+                                    </div>
+                                    <?php if ($is_adv): ?>
+                                        <span class="role-pill advisory" style="font-size:.65rem;"><i class="bi bi-star-fill"></i> Advisory</span>
                                     <?php else: ?>
-                                        <span class="cell-muted">—</span>
+                                        <span class="role-pill subject" style="font-size:.65rem;"><i class="bi bi-person-check"></i> Subject</span>
                                     <?php endif; ?>
-                                </td>
-                                <td style="text-align:right">
-                                    <form method="POST" class="m-0 d-inline"
-                                          onsubmit="return confirm('Remove this assignment?');">
+                                </div>
+
+                                <div class="student-card-tags">
+                                    <span class="s-tag section"><i class="bi bi-columns-gap"></i> <?= htmlspecialchars($a['section']) ?></span>
+                                    <span class="s-tag grade"><i class="bi bi-mortarboard"></i> <?= htmlspecialchars($a['grade_level']) ?></span>
+                                    <span class="s-tag grade"><i class="bi bi-calendar3"></i> SY <?= htmlspecialchars($a['school_year']) ?></span>
+                                    <?php if ($a['program'] !== ''): ?>
+                                        <span class="s-tag section"><i class="bi bi-bookmark"></i> <?= htmlspecialchars($a['program']) ?></span>
+                                    <?php endif; ?>
+                                </div>
+
+                                <div class="student-card-footer">
+                                    <span class="student-card-strand">
+                                        <?php if ($is_adv): ?>
+                                            <i class="bi bi-star-fill" style="color:var(--amber);"></i> Advisory teacher
+                                        <?php else: ?>
+                                            <i class="bi bi-person-check"></i> Subject teacher
+                                        <?php endif; ?>
+                                    </span>
+                                    <form method="POST" class="m-0" onsubmit="return confirm('Remove this assignment?');">
                                         <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
                                         <input type="hidden" name="unassign" value="1">
                                         <input type="hidden" name="id" value="<?= (int)$a['assignment_id'] ?>">
                                         <button class="btn btn-outline-danger btn-xs" title="Remove">
-                                            <i class="bi bi-trash3"></i>
+                                            <i class="bi bi-trash3"></i> Remove
                                         </button>
                                     </form>
-                                </td>
-                            </tr>
+                                </div>
+                            </div>
                         <?php endforeach; ?>
-                        </tbody>
-                    </table>
+                    </div>
                 </div>
 
                 <?php if ($total_pages > 1): ?>
@@ -604,19 +863,19 @@ require __DIR__ . '/../partials/sidebar.php';
                         Showing assignments <strong><?= number_format($offset + 1) ?>–<?= number_format(min($offset + $limit, $total_assignments)) ?></strong> of <strong><?= number_format($total_assignments) ?></strong>
                     </div>
                     <div class="pagination">
-                        <a href="?page=1" class="page-btn <?= $page <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-left"></i></a>
-                        <a href="?page=<?= max(1, $page - 1) ?>" class="page-btn <?= $page <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-left"></i></a>
+                        <a href="?<?= $pagination_qs ?>page=1" class="page-btn <?= $page <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-left"></i></a>
+                        <a href="?<?= $pagination_qs ?>page=<?= max(1, $page - 1) ?>" class="page-btn <?= $page <= 1 ? 'disabled' : '' ?>"><i class="bi bi-chevron-left"></i></a>
 
                         <?php
                         $start_page = max(1, $page - 2);
                         $end_page   = min($total_pages, $page + 2);
                         for ($i = $start_page; $i <= $end_page; $i++):
                         ?>
-                            <a href="?page=<?= $i ?>" class="page-btn <?= $i === $page ? 'active' : '' ?>"><?= $i ?></a>
+                            <a href="?<?= $pagination_qs ?>page=<?= $i ?>" class="page-btn <?= $i === $page ? 'active' : '' ?>"><?= $i ?></a>
                         <?php endfor; ?>
 
-                        <a href="?page=<?= min($total_pages, $page + 1) ?>" class="page-btn <?= $page >= $total_pages ? 'disabled' : '' ?>"><i class="bi bi-chevron-right"></i></a>
-                        <a href="?page=<?= $total_pages ?>" class="page-btn <?= $page >= $total_pages ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-right"></i></a>
+                        <a href="?<?= $pagination_qs ?>page=<?= min($total_pages, $page + 1) ?>" class="page-btn <?= $page >= $total_pages ? 'disabled' : '' ?>"><i class="bi bi-chevron-right"></i></a>
+                        <a href="?<?= $pagination_qs ?>page=<?= $total_pages ?>" class="page-btn <?= $page >= $total_pages ? 'disabled' : '' ?>"><i class="bi bi-chevron-double-right"></i></a>
                     </div>
                 </div>
                 <?php endif; ?>
@@ -638,6 +897,21 @@ function fillCluster(sel) {
     document.getElementById('f_sy').value      = c.school_year || '';
     document.getElementById('f_program').value = c.program || '';
 }
+
+document.addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-prefill-advisory]');
+    if (!btn) return;
+    const teacherId = btn.getAttribute('data-prefill-advisory');
+    const form = document.getElementById('assignForm');
+    if (!form) return;
+    const teacherSel = document.getElementById('teacherSelect');
+    if (teacherSel && teacherId) teacherSel.value = teacherId;
+    const cb = document.getElementById('is_advisory');
+    if (cb) cb.checked = true;
+    const cluster = document.getElementById('clusterSelect');
+    if (cluster) cluster.focus();
+    form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
 </script>
 
 <?php require __DIR__ . '/../partials/footer.php'; ?>

@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
 require_once __DIR__ . '/../../config/security.php';
+require_once __DIR__ . '/../lib/view_toggle.php';
 
 $__nav_section = 'profile';
 
@@ -211,7 +212,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     /* Update Email */
     elseif (isset($_POST['update_email'])) {
         $new_email = trim((string)($_POST['new_email'] ?? ''));
-        
+
         if ($new_email === '') {
             $error = 'Email address cannot be empty.';
         } elseif (!filter_var($new_email, FILTER_VALIDATE_EMAIL)) {
@@ -525,6 +526,24 @@ $page_css = <<<'CSS'
     .cw-submit:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 10px 26px rgba(79,70,229,.45)}
     .cw-submit:disabled{opacity:.65;cursor:not-allowed}
 
+    /* List mode overrides for the profile card */
+    .view-container.view-mode-list .pf-info-grid{grid-template-columns:1fr !important}
+    .view-container.view-mode-list .pf-info-cell{border-right:none;border-bottom:1px solid var(--border)}
+    .view-container.view-mode-list .pf-info-cell:last-child{border-bottom:none}
+    .view-container.view-mode-list .pf-info-cell.span-full{border-bottom:1px solid var(--border)}
+    .view-container.view-mode-list .pf-stats{grid-template-columns:1fr !important}
+    .view-container.view-mode-list .pf-stat{
+        border-right:none;
+        border-bottom:1px solid var(--border);
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        text-align:left;
+        gap:.75rem;
+    }
+    .view-container.view-mode-list .pf-stat:last-child{border-bottom:none}
+    .view-container.view-mode-list .pf-stat-lbl{justify-content:flex-start;margin-top:0}
+
     @media (max-width:640px){
         .pf-hero{padding:1.75rem 1.25rem 1.5rem}
         .pf-photo,.pf-photo-fallback{width:108px;height:108px}
@@ -560,7 +579,8 @@ require __DIR__ . '/../partials/sidebar.php';
                 <p class="sub">Manage your account credentials and profile</p>
             </div>
         </div>
-        <div class="d-flex gap-2 align-items-center">
+        <div class="d-flex gap-2 align-items-center flex-wrap">
+            <?= view_toggle('profile_info', 'grid') ?>
             <a href="<?= URL_PREFIX ?>/dashboard.php" class="btn btn-outline-secondary btn-sm">
                 <i class="bi bi-arrow-left me-1"></i> Back to Dashboard
             </a>
@@ -640,6 +660,7 @@ require __DIR__ . '/../partials/sidebar.php';
                     </div>
                 </div>
 
+                <div class="<?= view_container_class('profile_info', 'grid') ?>">
                 <div class="pf-stats">
                     <div class="pf-stat">
                         <div class="pf-stat-val"><?= number_format($days_member) ?></div>
@@ -672,8 +693,7 @@ require __DIR__ . '/../partials/sidebar.php';
                         <div class="lbl"><i class="bi bi-calendar-check"></i>Account Created</div>
                         <div class="val"><?= htmlspecialchars($member_since, ENT_QUOTES, 'UTF-8') ?></div>
                     </div>
-                    
-                    <!-- NEW: Email Edit Inline -->
+
                     <div class="pf-info-cell span-full">
                         <div class="lbl"><i class="bi bi-envelope-fill"></i>Email Address</div>
                         <form method="POST" class="pf-email-form">
@@ -683,6 +703,7 @@ require __DIR__ . '/../partials/sidebar.php';
                         </form>
                     </div>
                 </div>
+                </div><!-- /view-container -->
 
                 <div class="pf-photo-hint">
                     <i class="bi bi-info-circle-fill"></i>

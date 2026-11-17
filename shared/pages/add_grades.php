@@ -5,9 +5,7 @@ require_once __DIR__ . '/../../config/audit.php';
 require_once __DIR__ . '/../lib/teacher_scope.php';
 require_once __DIR__ . '/../lib/grades_email.php';
 require_once __DIR__ . '/../lib/email_queue.php';
-
-// Set to true temporarily to log spawn cmd to error_log — remove when stable
-// define('WORKER_SPAWN_DEBUG', true);
+require_once __DIR__ . '/../lib/view_toggle.php';
 
 $__nav_section = 'grades';
 
@@ -55,7 +53,6 @@ if (($_SESSION['admin_role'] ?? '') === 'teacher') {
     }
 }
 
-/* ── JSON helper for non-streaming endpoints ── */
 $want_json = strtolower($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'xmlhttprequest'
           || (($_POST['respond'] ?? '') === 'json');
 
@@ -166,7 +163,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_grades_email']))
         $json_reply(['ok' => false, 'message' => 'Invalid term.', 'student_id' => $student_id], 400);
     }
 
-    // Rate limit: 2/term/day
     $today_key = 'grades_email_' . $student_id . '_' . md5($email_term) . '_' . date('Y-m-d');
     $_SESSION[$today_key] = (int)($_SESSION[$today_key] ?? 0);
     if ($_SESSION[$today_key] >= 2) {
@@ -178,7 +174,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_grades_email']))
         ], 429);
     }
 
-    // Load grades
     $q = $conn->prepare("
         SELECT subject_code, subject_name, grade, remarks
           FROM student_grades
@@ -197,7 +192,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_grades_email']))
         $json_reply(['ok' => false, 'message' => "No grades recorded for {$email_term}.", 'term' => $email_term, 'student_id' => $student_id], 400);
     }
 
-    // Load student
     $st = $conn->prepare("SELECT first_name, middle_name, last_name, ext_name, lrn, email FROM students_info WHERE student_id = ? LIMIT 1");
     $st->bind_param('i', $student_id);
     $st->execute();
@@ -212,7 +206,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_grades_email']))
         $json_reply(['ok' => false, 'message' => 'Student has no valid email on file.', 'student_id' => $student_id], 400);
     }
 
-    // Term GWA
     $term_total = 0; $term_count = 0;
     foreach ($email_grades as $g) {
         if ($g['grade'] !== null && is_numeric($g['grade'])) {
@@ -264,7 +257,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_grades_email']))
         'grade_count' => count($email_grades),
     ]);
 
-    /* ── Send JSON to client NOW, keep PHP running to actually send ── */
     http_response_code(200);
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store');
@@ -278,22 +270,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_grades_email']))
         'student_id' => $student_id,
     ], JSON_UNESCAPED_UNICODE);
 
-    flush_http_response_to_client(); // ← client disconnects here
+    flush_http_response_to_client();
 
-    /* ── Now we're alone. Try the fast path (spawn), then fall back. ── */
     spawn_worker_async($job_id);
 
-    // Wait up to 2s for the spawned worker to claim the job
     $job = null;
     for ($i = 0; $i < 10; $i++) {
-        usleep(200000); // 200ms
+        usleep(200000);
         $job = eq_get_job($conn, $job_id);
         if (!$job || $job['status'] !== 'queued') {
-            break; // worker took it
+            break;
         }
     }
 
-    // Worker never picked it up — process inline now
     if ($job && $job['status'] === 'queued') {
         eq_process_now($conn, $job_id);
     }
@@ -336,7 +325,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['email_status'])) {
 
 /* ── Load existing data ── */
 $stmt = $conn->prepare("
-    SELECT * FROM student_grades 
+    SELECT * FROM student_grades
     WHERE student_id = ? AND school_year = ?
     ORDER BY FIELD(term, '1st Term', '2nd Term', '3rd Term') ASC, subject_name ASC
 ");
@@ -365,7 +354,6 @@ foreach ($grades as $g) {
 }
 $gwa = $total_subjects > 0 ? round($total_grade / $total_subjects, 2) : 0;
 
-/* Last-sent history */
 $email_history = [];
 $hq = $conn->prepare("
     SELECT meta, created_at
@@ -473,18 +461,23 @@ require __DIR__ . '/../partials/sidebar.php';
         <p class="sub"><?= htmlspecialchars($grade_level) ?> · <?= htmlspecialchars($student['section'] ?: 'No section') ?> · SY <?= htmlspecialchars($sy) ?></p>
       </div>
     </div>
-    <a href="<?= URL_PREFIX ?>/view_student.php?id=<?= (int)$student_id ?>" class="btn btn-outline-secondary btn-sm">
-      <i class="bi bi-arrow-left me-1"></i> Back to Profile
-    </a>
+    <div class="d-flex gap-2 align-items-center flex-wrap">
+      <?= view_toggle('grades_stats', 'grid') ?>
+      <a href="<?= URL_PREFIX ?>/view_student.php?id=<?= (int)$student_id ?>" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left me-1"></i> Back to Profile
+      </a>
+    </div>
   </div>
 
   <?php if ($total_subjects > 0): ?>
+  <div class="<?= view_container_class('grades_stats', 'grid') ?>">
   <div class="stat-grid mb-4">
       <div class="stat-card tone-blue"><div class="stat-icon"><i class="bi bi-journal-bookmark-fill"></i></div><div class="stat-info"><div class="stat-value"><?= $total_subjects ?></div><div class="stat-label">Subjects Recorded</div></div></div>
       <div class="stat-card tone-green"><div class="stat-icon"><i class="bi bi-check-circle-fill"></i></div><div class="stat-info"><div class="stat-value"><?= $passed_count ?></div><div class="stat-label">Passed</div></div></div>
       <div class="stat-card tone-red"><div class="stat-icon"><i class="bi bi-x-circle-fill"></i></div><div class="stat-info"><div class="stat-value"><?= $failed_count ?></div><div class="stat-label">Failed</div></div></div>
       <div class="stat-card tone-amber"><div class="stat-icon"><i class="bi bi-calculator-fill"></i></div><div class="stat-info"><div class="stat-value"><?= number_format($gwa, 2) ?></div><div class="stat-label">Current GWA</div></div></div>
   </div>
+  </div><!-- /view-container -->
   <?php endif; ?>
 
   <div class="card mb-4">

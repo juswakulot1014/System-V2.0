@@ -141,6 +141,12 @@ $__sb_link = static function (string $href, string $icon, string $label, ?int $b
             <div class="sidebar-group">Students</div>
             <?php
             $__sb_link(URL_PREFIX . '/student_profile.php', 'bi-people', 'Students');
+            
+            // NEW: Status Management (Registrar & Superadmin only)
+            if ($__sb_can_manage) {
+                $__sb_link(URL_PREFIX . '/status_management.php', 'bi-person-gear', 'Status Management');
+            }
+            
             $__sb_link(URL_PREFIX . '/sections_list.php',   'bi-diagram-3', 'Sections');
             ?>
         <?php endif; ?>
@@ -154,7 +160,6 @@ $__sb_link = static function (string $href, string $icon, string $label, ?int $b
                 'Pending Enrollments',
                 $__sb_pending > 0 ? $__sb_pending : null
             );
-            // ⬇⬇ NEW: Walkthrough Enrollment (registrar + superadmin only)
             $__sb_link(
                 URL_PREFIX . '/walkthrough_enrollment.php',
                 'bi-person-vcard',

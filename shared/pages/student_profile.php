@@ -2,28 +2,25 @@
 // shared/pages/student_profile.php
 require_once __DIR__ . '/../../config/auth.php';
 require_once __DIR__ . '/../../config/audit.php';
-require_once __DIR__ . '/../lib/teacher_scope.php';   // PATCH 1: helper
+require_once __DIR__ . '/../lib/teacher_scope.php';
+require_once __DIR__ . '/../lib/dir_view.php';
 
 $__nav_section = 'students';
 
-/* ── Detect AJAX Requests ── */
 $is_ajax = (isset($_GET['ajax']) && $_GET['ajax'] === '1') || 
            (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest');
 
-/* ── Role gate (Allows teacher) ── */
 if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin', 'teacher'], true)) {
     $_SESSION['error'] = 'Access denied.';
     header('Location: ' . URL_PREFIX . '/dashboard.php');
-    exit;
+    exit();
 }
 
-// PATCH 2: teacher scope state
 $__is_teacher = (($_SESSION['admin_role'] ?? '') === 'teacher');
 $__teacher_id = $__is_teacher ? (int)($_SESSION['admin_id'] ?? 0) : 0;
 
-/* ═══════════════════════════════════════════════════════════
-   Helpers
-   ═══════════════════════════════════════════════════════════ */
+$__dir_view = dir_view('student_directory');
+
 if (!function_exists('strandInitials')) {
     function strandInitials(string $strand): string {
         $stopwords = ['and','of','the','for','in','on','to','a','an','at','by','with','or'];
@@ -40,60 +37,27 @@ if (!function_exists('formatStudentName')) {
     }
 }
 
-/* ═══════════════════════════════════════════════════════════
-   POST: DELETE ALL STUDENTS (SUPERADMIN ONLY)
-   ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_all_students'])) {
     verify_csrf();
-    
     if (($_SESSION['admin_role'] ?? '') !== 'superadmin') {
         $_SESSION['error'] = 'Access denied. Only Superadmin can perform this action.';
-        header('Location: ' . URL_PREFIX . '/student_profile.php');
-        exit();
+        header('Location: ' . URL_PREFIX . '/student_profile.php'); exit();
     }
-
     if (trim($_POST['confirm_phrase'] ?? '') !== 'DELETE ALL') {
         $_SESSION['error'] = 'Confirmation phrase does not match.';
-        header('Location: ' . URL_PREFIX . '/student_profile.php');
-        exit();
+        header('Location: ' . URL_PREFIX . '/student_profile.php'); exit();
     }
-
-    $tables = [
-        'document_access_log',
-        'enrollment_email_log',
-        'student_status_history',
-        'student_grades',
-        'entrance_documents',
-        'educational_history',
-        'addresses',
-        'parents_info',
-        'enrollment_form',
-        'students_info'
-    ];
-
+    $tables = ['document_access_log','enrollment_email_log','student_status_history','student_grades','entrance_documents','educational_history','addresses','parents_info','enrollment_form','students_info'];
     try {
         $conn->query("SET FOREIGN_KEY_CHECKS = 0");
-        foreach ($tables as $tbl) {
-            $conn->query("TRUNCATE TABLE `$tbl`");
-        }
+        foreach ($tables as $tbl) { $conn->query("TRUNCATE TABLE `$tbl`"); }
         $conn->query("SET FOREIGN_KEY_CHECKS = 1");
-
-        // Cleanup physical files
         if (!defined('USE_CLOUDINARY') || !USE_CLOUDINARY) {
             $docs = glob(DOCUMENTS_DIR . '*');
-            if ($docs) {
-                foreach ($docs as $f) {
-                    if (is_file($f)) @unlink($f);
-                }
-            }
+            if ($docs) { foreach ($docs as $f) { if (is_file($f)) @unlink($f); } }
             $photos = glob(STUDENTS_PHOTO_DIR . '*');
-            if ($photos) {
-                foreach ($photos as $f) {
-                    if (is_file($f)) @unlink($f);
-                }
-            }
+            if ($photos) { foreach ($photos as $f) { if (is_file($f)) @unlink($f); } }
         }
-
         audit_log($conn, 'system.delete_all_students', ['type' => 'system']);
         $_SESSION['success'] = "All student records and files have been permanently deleted.";
     } catch (Throwable $e) {
@@ -101,23 +65,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_all_students']
         error_log("Delete all failed: " . $e->getMessage());
         $_SESSION['error'] = "Failed to delete all data: " . $e->getMessage();
     }
-
-    header('Location: ' . URL_PREFIX . '/student_profile.php');
-    exit();
+    header('Location: ' . URL_PREFIX . '/student_profile.php'); exit();
 }
 
-/* ═══════════════════════════════════════════════════════════
-   POST: AUTO SECTION ASSIGNMENT (SECURED)
-   ═══════════════════════════════════════════════════════════ */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auto_assign'])) {
     verify_csrf();
-    
-    // SECURITY FIX: Only Admin/Registrar can Auto-Assign
     if (!in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true)) {
         $_SESSION['error'] = 'Access denied. Only administrators can assign sections.';
         header('Location: ' . URL_PREFIX . '/student_profile.php'); exit();
     }
-
     $grade_level = trim((string)($_POST['grade_level'] ?? '')); $school_year = trim((string)($_POST['school_year'] ?? ''));
     if (empty($grade_level) || empty($school_year)) { $_SESSION['error'] = "Please select Grade Level and School Year."; } 
     else {
@@ -169,10 +125,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auto_assign'])) {
     header("Location: " . $redirect_url); exit();
 }
 
-/* ═══════════════════════════════════════════════════════════
-   DEFAULT SCHOOL YEAR & FILTERS
-   ═══════════════════════════════════════════════════════════ */
-// Fetch latest school year for default
 $latest_sy_q = $conn->query("SELECT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC LIMIT 1");
 $default_sy = ($latest_sy_q && $row = $latest_sy_q->fetch_assoc()) ? $row['school_year'] : '';
 
@@ -188,13 +140,9 @@ $offset   = ($page - 1) * $per_page;
 
 $all_students = []; $total_students = 0; $total_pages = 0; $total_all_students = 0; $boys = 0; $girls = 0; $sec_count = 0; $unassigned_count = 0;
 
-/* ═══════════════════════════════════════════════════════════
-   PATCH 3: Main list query — teacher scope added FIRST so params align
-   ═══════════════════════════════════════════════════════════ */
 $sql = "SELECT s.student_id, s.student_id_number, s.lrn, s.last_name, s.first_name, s.middle_name, s.ext_name, s.sex, s.age, e.grade_level, e.school_year, e.section, e.strand, e.track, e.program, e.term, COALESCE(e.status, 'Active') AS status, COUNT(*) OVER() as total_count FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE 1=1";
 $params = []; $types = "";
 
-// PATCH 3a: teacher scope FIRST
 if ($__is_teacher) {
     $ts = teacher_scope_filter($conn, $__teacher_id, 'e');
     $sql .= ' AND ' . $ts['sql'];
@@ -213,9 +161,6 @@ $params[] = $per_page; $types .= "i"; $params[] = $offset; $types .= "i";
 
 $stmt = $conn->prepare($sql); if (!empty($params)) $stmt->bind_param($types, ...$params); $stmt->execute(); $all_students = $stmt->get_result()->fetch_all(MYSQLI_ASSOC); $total_students = !empty($all_students) ? (int)$all_students[0]['total_count'] : 0; $total_pages = (int)ceil($total_students / $per_page); $stmt->close();
 
-/* ═══════════════════════════════════════════════════════════
-   PATCH 4: Global count query ($tsql) — teacher scope added FIRST
-   ═══════════════════════════════════════════════════════════ */
 $tsql = "SELECT COUNT(*) AS c FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
 $tp = []; $tt = "";
 
@@ -232,11 +177,6 @@ if ($school_year !== '') { $tsql .= " AND e.school_year = ?"; $tp[] = $school_ye
 
 $ts = $conn->prepare($tsql); if (!empty($tp)) $ts->bind_param($tt, ...$tp); $ts->execute(); $ts_row = $ts->get_result()->fetch_assoc(); $ts->close(); $total_all_students = (int)($ts_row['c'] ?? 0);
 
-/* ═══════════════════════════════════════════════════════════
-   PATCH 5: Unassigned count — rewritten as prepared with teacher scope.
-   For teachers, this will return 0 (correct: students in their sections
-   always have a section by definition).
-   ═══════════════════════════════════════════════════════════ */
 $usql = "SELECT COUNT(*) AS c FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE (e.section IS NULL OR e.section = '') AND COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
 $up = []; $ut = "";
 
@@ -255,9 +195,6 @@ if ($ustmt) {
     $ustmt->close();
 }
 
-/* ═══════════════════════════════════════════════════════════
-   PATCH 6: Gender breakdown ($gsql) — teacher scope added FIRST
-   ═══════════════════════════════════════════════════════════ */
 $gsql = "SELECT SUM(CASE WHEN UPPER(TRIM(s.sex)) IN ('MALE','M') THEN 1 ELSE 0 END) AS boys, SUM(CASE WHEN UPPER(TRIM(s.sex)) IN ('FEMALE','F') THEN 1 ELSE 0 END) AS girls FROM students_info s INNER JOIN enrollment_form e ON s.student_id = e.student_id WHERE COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
 $gp = []; $gt = "";
 
@@ -274,9 +211,6 @@ if ($school_year !== '') { $gsql .= " AND e.school_year = ?"; $gp[] = $school_ye
 
 $gs = $conn->prepare($gsql); if (!empty($gp)) $gs->bind_param($gt, ...$gp); $gs->execute(); $st = $gs->get_result()->fetch_assoc(); $gs->close(); $boys  = (int)($st['boys'] ?? 0); $girls = (int)($st['girls'] ?? 0);
 
-/* ═══════════════════════════════════════════════════════════
-   PATCH 7: Distinct-section count — teacher scope applied
-   ═══════════════════════════════════════════════════════════ */
 $secsql = "SELECT COUNT(DISTINCT e.section) AS c FROM enrollment_form e WHERE e.section IS NOT NULL AND e.section != '' AND COALESCE(e.status, 'Active') NOT IN ('Graduated', 'Pending', 'Promoted')";
 $sp = []; $stp = "";
 
@@ -295,13 +229,8 @@ if ($secstmt) {
     $secstmt->close();
 }
 
-/* ═══════════════════════════════════════════════════════════
-   PATCH 8 + 9: Dropdowns — scoped to teacher's assigned data.
-   Teachers only see filter options that will return results.
-   ═══════════════════════════════════════════════════════════ */
 if ($__is_teacher) {
     $ts = teacher_scope_filter($conn, $__teacher_id, 'enrollment_form');
-
     $glsql = "SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' AND " . $ts['sql'] . " ORDER BY grade_level ASC";
     $glstmt = $conn->prepare($glsql);
     if ($glstmt) {
@@ -309,10 +238,7 @@ if ($__is_teacher) {
         $glstmt->execute();
         $grade_levels_data = $glstmt->get_result()->fetch_all(MYSQLI_ASSOC);
         $glstmt->close();
-    } else {
-        $grade_levels_data = [];
-    }
-
+    } else { $grade_levels_data = []; }
     $sysql = "SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' AND " . $ts['sql'] . " ORDER BY school_year DESC";
     $systmt = $conn->prepare($sysql);
     if ($systmt) {
@@ -320,9 +246,7 @@ if ($__is_teacher) {
         $systmt->execute();
         $school_years_data = $systmt->get_result()->fetch_all(MYSQLI_ASSOC);
         $systmt->close();
-    } else {
-        $school_years_data = [];
-    }
+    } else { $school_years_data = []; }
 } else {
     $grade_levels_data = $conn->query("SELECT DISTINCT grade_level FROM enrollment_form WHERE grade_level IS NOT NULL AND grade_level != '' ORDER BY grade_level ASC")->fetch_all(MYSQLI_ASSOC);
     $school_years_data = $conn->query("SELECT DISTINCT school_year FROM enrollment_form WHERE school_year IS NOT NULL AND school_year != '' ORDER BY school_year DESC")->fetch_all(MYSQLI_ASSOC);
@@ -335,20 +259,6 @@ $csrf_token = csrf_token();
 $page_title = 'Student Profiles • USAT Admin';
 
 $page_css = <<<'CSS'
-    .student-avatar-mini { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--purple)); color: #fff; font-weight: 700; font-size: 0.75rem; display: inline-flex; align-items: center; justify-content: center; margin-right: 0.75rem; flex-shrink: 0; box-shadow: 0 2px 6px rgba(79, 70, 229, 0.3); }
-    .student-info-cell { display: flex; align-items: center; min-width: 0; }
-    .student-info-text { display: flex; flex-direction: column; min-width: 0; }
-    .student-info-text .name { font-weight: 700; color: var(--text); font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .student-info-text .meta { font-size: 0.72rem; color: var(--text-2); font-variant-numeric: tabular-nums; margin-top: 0.15rem; }
-    .tag-group { display: flex; gap: 0.35rem; flex-wrap: wrap; }
-    .s-tag { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.2rem 0.5rem; border-radius: 6px; font-size: 0.68rem; font-weight: 700; border: 1px solid transparent; white-space: nowrap; }
-    .s-tag i { font-size: 0.75rem; opacity: 0.8; }
-    .s-tag.grade { background: #e0e7ff; color: #4338ca; border-color: #c7d2fe; }
-    .s-tag.section { background: #dcfce7; color: #15803d; border-color: #bbf7d0; }
-    .s-tag.section.unassigned { background: var(--amber-soft); color: var(--amber); border-color: var(--amber); }
-    [data-bs-theme="dark"] .s-tag.grade { background: #1e1e38; color: #a5b4fc; border-color: #312e81; }
-    [data-bs-theme="dark"] .s-tag.section { background: #052e16; color: #86efac; border-color: #166534; }
-    [data-bs-theme="dark"] .s-tag.section.unassigned { background: #3d2a08; color: #fcd34d; border-color: #78350f; }
     .filter-bar { grid-template-columns: minmax(200px,1.6fr) minmax(140px,1fr) minmax(140px,1fr) minmax(140px,1fr) auto; }
     .pagination-wrap { display: flex; justify-content: space-between; align-items: center; padding: 1.25rem 0 0; margin-top: 1.5rem; border-top: 1px solid var(--border); flex-wrap: wrap; gap: 1rem; }
     .page-info-text { font-size: .85rem; color: var(--text-2); font-weight: 500; }
@@ -393,11 +303,9 @@ if (!$is_ajax) {
             </div>
         </div>
         
-        <!-- AJAX Container Starts Here -->
         <div id="ajax-container">
 <?php } ?>
 
-            <!-- Flash Messages -->
             <?php if (isset($_SESSION['success'])): ?><div class="flash success"><i class="bi bi-check-circle-fill"></i><span><?= htmlspecialchars($_SESSION['success']) ?></span><button class="btn-close" data-bs-dismiss="alert"></button></div><?php unset($_SESSION['success']); endif; ?>
             <?php if (isset($_SESSION['error'])): ?><div class="flash error"><i class="bi bi-exclamation-triangle-fill"></i><span><?= htmlspecialchars($_SESSION['error']) ?></span><button class="btn-close" data-bs-dismiss="alert"></button></div><?php unset($_SESSION['error']); endif; ?>
             <?php if (isset($_SESSION['info'])): ?><div class="flash info"><i class="bi bi-info-circle-fill"></i><span><?= htmlspecialchars($_SESSION['info']) ?></span><button class="btn-close" data-bs-dismiss="alert"></button></div><?php unset($_SESSION['info']); endif; ?>
@@ -478,72 +386,124 @@ if (!$is_ajax) {
             <div class="card">
                 <div class="card-header">
                     <h3><i class="bi bi-people"></i> Student Directory <span class="hint">(<?= number_format($total_students) ?> result<?= $total_students === 1 ? '' : 's' ?>)</span></h3>
-                    <?php if($school_year): ?>
-                        <span class="pill info" style="margin-left:auto;"><i class="bi bi-calendar3"></i> SY <?= htmlspecialchars($school_year) ?></span>
-                    <?php endif; ?>
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                        <?php if($school_year): ?>
+                            <span class="pill info"><i class="bi bi-calendar3"></i> SY <?= htmlspecialchars($school_year) ?></span>
+                        <?php endif; ?>
+                        <?= dir_view_toggle($__dir_view) ?>
+                    </div>
                 </div>
-                <div class="card-body no-padding">
+                <div class="card-body no-padding <?= dir_view_class($__dir_view) ?>" data-page-key="student_directory" id="studentDirectoryView">
                     <?php if($total_students > 0): ?>
-                        <div class="table-scroll">
-                            <table class="table-admin">
-                                <thead>
-                                    <tr>
-                                        <th style="width: 40%">Student Name</th>
-                                        <th style="width: 20%">Grade &amp; Section</th>
-                                        <th style="width: 20%">Strand</th>
-                                        <th style="width: 10%">Status</th>
-                                        <th style="width: 10%; text-align:right">Action</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php foreach($all_students as $s):
-                                        $name = htmlspecialchars(formatStudentName($s));
-                                        $initials = strtoupper(substr($s['first_name']??'',0,1).substr($s['last_name']??'',0,1));
-                                        $st = $s['status'] ?? 'Active';
-                                        $strand_txt = $s['strand'] ?? '—';
-                                        $has_section = !empty($s['section']);
-                                        $pillClass = match($st) {
-                                            'Active'    => 'success',
-                                            'Pending'   => 'warning',
-                                            'Graduated' => 'purple',
-                                            default     => 'danger'
-                                        };
-                                    ?>
-                                    <tr>
-                                        <td>
-                                            <div class="student-info-cell">
-                                                <div class="student-avatar-mini"><?= htmlspecialchars($initials) ?></div>
-                                                <div class="student-info-text">
-                                                    <span class="name"><?= $name ?></span>
-                                                    <span class="meta">LRN: <?= htmlspecialchars($s['lrn']??'—') ?> · ID: <?= htmlspecialchars($s['student_id_number']??'—') ?></span>
+                        <div class="dir-table-wrap">
+                            <div class="table-scroll">
+                                <table class="table-admin">
+                                    <thead>
+                                        <tr>
+                                            <th style="width: 40%">Student Name</th>
+                                            <th style="width: 20%">Grade &amp; Section</th>
+                                            <th style="width: 20%">Strand</th>
+                                            <th style="width: 10%">Status</th>
+                                            <th style="width: 10%; text-align:right">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach($all_students as $s):
+                                            $name = htmlspecialchars(formatStudentName($s));
+                                            $initials = strtoupper(substr($s['first_name']??'',0,1).substr($s['last_name']??'',0,1));
+                                            $st = $s['status'] ?? 'Active';
+                                            $strand_txt = $s['strand'] ?? '—';
+                                            $has_section = !empty($s['section']);
+                                            $pillClass = match($st) {
+                                                'Active'    => 'success',
+                                                'Pending'   => 'warning',
+                                                'Graduated' => 'purple',
+                                                default     => 'danger'
+                                            };
+                                        ?>
+                                        <tr>
+                                            <td>
+                                                <div class="student-info-cell">
+                                                    <div class="student-avatar-mini"><?= htmlspecialchars($initials) ?></div>
+                                                    <div class="student-info-text">
+                                                        <span class="name"><?= $name ?></span>
+                                                        <span class="meta">LRN: <?= htmlspecialchars($s['lrn']??'—') ?> · ID: <?= htmlspecialchars($s['student_id_number']??'—') ?></span>
+                                                    </div>
                                                 </div>
+                                            </td>
+                                            <td>
+                                                <div class="tag-group">
+                                                    <span class="s-tag grade"><i class="bi bi-mortarboard"></i> <?= htmlspecialchars($s['grade_level']??'—') ?></span>
+                                                    <?php if (!$has_section): ?>
+                                                        <span class="s-tag section unassigned"><i class="bi bi-exclamation-triangle-fill"></i> No Section</span>
+                                                    <?php else: ?>
+                                                        <span class="s-tag section"><i class="bi bi-columns-gap"></i> <?= htmlspecialchars($s['section']) ?></span>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </td>
+                                            <td class="cell-muted" style="font-size: 0.82rem;">
+                                                <?= htmlspecialchars($strand_txt) ?>
+                                            </td>
+                                            <td>
+                                                <span class="pill <?= $pillClass ?>" style="font-size: .7rem;"><?= htmlspecialchars($st) ?></span>
+                                            </td>
+                                            <td style="text-align:right">
+                                                <a href="<?= URL_PREFIX ?>/view_student.php?id=<?= (int)$s['student_id'] ?>" class="btn btn-sm btn-outline-primary" title="View Profile">
+                                                    <i class="bi bi-eye"></i> View
+                                                </a>
+                                            </td>
+                                        </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="dir-cards-wrap">
+                            <div class="student-cards-grid">
+                                <?php foreach($all_students as $s):
+                                    $name = formatStudentName($s);
+                                    $initials = strtoupper(substr($s['first_name']??'',0,1).substr($s['last_name']??'',0,1));
+                                    $st = $s['status'] ?? 'Active';
+                                    $strand_txt = $s['strand'] ?? '—';
+                                    $has_section = !empty($s['section']);
+                                    $pillClass = match($st) {
+                                        'Active'    => 'success',
+                                        'Pending'   => 'warning',
+                                        'Graduated' => 'purple',
+                                        default     => 'danger'
+                                    };
+                                ?>
+                                <div class="student-card">
+                                    <div class="student-card-header">
+                                        <div class="student-avatar-mini"><?= htmlspecialchars($initials) ?></div>
+                                        <div class="student-card-info">
+                                            <div class="student-card-name"><?= htmlspecialchars($name) ?></div>
+                                            <div class="student-card-meta">
+                                                <span>LRN: <?= htmlspecialchars($s['lrn']??'—') ?></span>
+                                                <span class="sep">·</span>
+                                                <span>ID: <?= htmlspecialchars($s['student_id_number']??'—') ?></span>
                                             </div>
-                                        </td>
-                                        <td>
-                                            <div class="tag-group">
-                                                <span class="s-tag grade"><i class="bi bi-mortarboard"></i> <?= htmlspecialchars($s['grade_level']??'—') ?></span>
-                                                <?php if (!$has_section): ?>
-                                                    <span class="s-tag section unassigned"><i class="bi bi-exclamation-triangle-fill"></i> No Section</span>
-                                                <?php else: ?>
-                                                    <span class="s-tag section"><i class="bi bi-columns-gap"></i> <?= htmlspecialchars($s['section']) ?></span>
-                                                <?php endif; ?>
-                                            </div>
-                                        </td>
-                                        <td class="cell-muted" style="font-size: 0.82rem;">
-                                            <?= htmlspecialchars($strand_txt) ?>
-                                        </td>
-                                        <td>
-                                            <span class="pill <?= $pillClass ?>" style="font-size: .7rem;"><?= htmlspecialchars($st) ?></span>
-                                        </td>
-                                        <td style="text-align:right">
-                                            <a href="<?= URL_PREFIX ?>/view_student.php?id=<?= (int)$s['student_id'] ?>" class="btn btn-sm btn-outline-primary" title="View Profile">
-                                                <i class="bi bi-eye"></i> View
-                                            </a>
-                                        </td>
-                                    </tr>
-                                    <?php endforeach; ?>
-                                </tbody>
-                            </table>
+                                        </div>
+                                        <span class="pill <?= $pillClass ?>" style="font-size: .66rem;"><?= htmlspecialchars($st) ?></span>
+                                    </div>
+                                    <div class="student-card-tags">
+                                        <span class="s-tag grade"><i class="bi bi-mortarboard"></i> <?= htmlspecialchars($s['grade_level']??'—') ?></span>
+                                        <?php if (!$has_section): ?>
+                                            <span class="s-tag section unassigned"><i class="bi bi-exclamation-triangle-fill"></i> No Section</span>
+                                        <?php else: ?>
+                                            <span class="s-tag section"><i class="bi bi-columns-gap"></i> <?= htmlspecialchars($s['section']) ?></span>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="student-card-footer">
+                                        <span class="student-card-strand"><?= htmlspecialchars($strand_txt) ?></span>
+                                        <a href="<?= URL_PREFIX ?>/view_student.php?id=<?= (int)$s['student_id'] ?>" class="btn btn-sm btn-outline-primary student-card-actions">
+                                            <i class="bi bi-eye"></i> View
+                                        </a>
+                                    </div>
+                                </div>
+                                <?php endforeach; ?>
+                            </div>
                         </div>
 
                         <?php if ($total_pages > 1): ?>
@@ -573,8 +533,8 @@ if (!$is_ajax) {
             </div>
             
 <?php if (!$is_ajax) { ?>
-        </div> <!-- end #ajax-container -->
-    </div> <!-- end main-content -->
+        </div>
+    </div>
 
     <?php if (in_array($_SESSION['admin_role'] ?? '', ['registrar', 'superadmin'], true)): ?>
     <div class="modal fade aa-modal" id="autoAssignModal" tabindex="-1">
@@ -601,9 +561,6 @@ if (!$is_ajax) {
     </div>
     <?php endif; ?>
 
-    <!-- ═══════════════════════════════════════════════════════
-         DELETE ALL STUDENTS MODAL
-         ═══════════════════════════════════════════════════════ -->
     <?php if (($_SESSION['admin_role'] ?? '') === 'superadmin'): ?>
     <div class="modal fade" id="deleteAllStudentsModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
@@ -616,11 +573,9 @@ if (!$is_ajax) {
                     <div class="modal-body">
                         <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                         <input type="hidden" name="delete_all_students" value="1">
-                        
                         <div class="alert alert-danger" style="border-left: 4px solid var(--red);">
                             <strong>Warning:</strong> This will permanently delete <strong>ALL</strong> student records, enrollments, grades, and uploaded files from the system. This action <strong>cannot</strong> be undone.
                         </div>
-                        
                         <p class="mb-2">To confirm, please type <strong class="text-danger">DELETE ALL</strong> below:</p>
                         <input type="text" name="confirm_phrase" id="confirmPhrase" class="form-control" placeholder="Type DELETE ALL" autocomplete="off" required>
                     </div>
@@ -644,7 +599,6 @@ if (!$is_ajax) {
     })();
 
     document.addEventListener('DOMContentLoaded', function() {
-        // Confirmation input logic for "Delete All"
         const confirmInput = document.getElementById('confirmPhrase');
         const deleteBtn = document.getElementById('btnDeleteAll');
         
@@ -652,7 +606,6 @@ if (!$is_ajax) {
             confirmInput.addEventListener('input', function() {
                 deleteBtn.disabled = (this.value !== 'DELETE ALL');
             });
-            
             document.getElementById('deleteAllForm').addEventListener('submit', function(e) {
                 if (confirmInput.value !== 'DELETE ALL') {
                     e.preventDefault();
@@ -669,9 +622,7 @@ if (!$is_ajax) {
         function loadAjax(url) {
             container.style.opacity = '0.5';
             container.style.pointerEvents = 'none';
-            
             const ajaxUrl = url + (url.includes('?') ? '&' : '?') + 'ajax=1';
-            
             fetch(ajaxUrl, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
                 .then(r => r.text())
                 .then(html => {
@@ -689,14 +640,11 @@ if (!$is_ajax) {
             const link = e.target.closest('.pagination a, .reset-btn');
             if (!link) return;
             if (link.classList.contains('disabled')) return;
-            
             e.preventDefault();
             let url = link.getAttribute('href');
-            
             if (link.classList.contains('reset-btn')) {
                 url = '<?= URL_PREFIX ?>/student_profile.php';
             }
-            
             loadAjax(url);
             window.history.pushState(null, '', url);
         });
@@ -722,7 +670,6 @@ if (!$is_ajax) {
                 e.preventDefault();
                 const formData = new FormData(this);
                 const action = this.getAttribute('action');
-                
                 const submitBtn = this.querySelector('button[type="submit"]');
                 const originalHtml = submitBtn.innerHTML;
                 submitBtn.disabled = true;
@@ -737,7 +684,7 @@ if (!$is_ajax) {
                     if (!response.ok) throw new Error('Server error');
                     if (response.redirected) {
                         let newUrl = response.url;
-                        newUrl = newUrl.replace(/(\?|&)ajax=1/, ''); // Remove ajax param from address bar
+                        newUrl = newUrl.replace(/(\?|&)ajax=1/, '');
                         window.history.pushState(null, '', newUrl);
                     }
                     return response.text();
